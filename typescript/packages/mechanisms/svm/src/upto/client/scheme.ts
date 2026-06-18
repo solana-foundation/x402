@@ -1,0 +1,104 @@
+import { fetchMint, TOKEN_2022_PROGRAM_ADDRESS } from "@solana-program/token-2022";
+import { TOKEN_PROGRAM_ADDRESS } from "@solana-program/token";
+import { type Address } from "@solana/kit";
+import type { PaymentPayload, PaymentRequirements, SchemeNetworkClient } from "@x402/core/types";
+
+import { buildOpenPaymentChannelTransaction } from "../../payment-channels/open";
+import type { ClientSvmConfig, ClientSvmSigner } from "../../signer";
+import { type UptoSvmPayloadV2, UPTO_PROFILE_PAYMENT_CHANNEL } from "../../types";
+import { createRpcClient, resolveBlockhash } from "../../utils";
+
+/**
+ * SVM client implementation for the `upto` payment scheme (payment-channel profile).
+ *
+ * Builds the channel `open` transaction whose `deposit` is the authorized ceiling,
+ * with the operator (`extra.facilitatorAddress`) as both the channel authorized
+ * signer and the transaction fee payer. The client signs only the open; the
+ * facilitator broadcasts it and later settles the metered amount with a voucher.
+ */
+export class UptoSvmScheme implements SchemeNetworkClient {
+  readonly scheme = "upto";
+
+  /**
+   * Creates a new upto SVM client.
+   *
+   * @param signer - The payer's SVM signer
+   * @param config - Optional configuration with a custom RPC URL
+   */
+  constructor(
+    private readonly signer: ClientSvmSigner,
+    private readonly config?: ClientSvmConfig,
+  ) {}
+
+  /**
+   * Creates the `upto` payment payload: a payer-signed channel open authorizing
+   * up to `paymentRequirements.amount`.
+   *
+   * @param x402Version - The x402 protocol version
+   * @param paymentRequirements - The payment requirements (amount = authorized maximum)
+   * @returns The x402 version and the scheme-specific payload
+   */
+  async createPaymentPayload(
+    x402Version: number,
+    paymentRequirements: PaymentRequirements,
+  ): Promise<Pick<PaymentPayload, "x402Version" | "payload">> {
+    const operator = paymentRequirements.extra?.facilitatorAddress as string | undefined;
+    if (!operator) {
+      throw new Error(
+        "facilitatorAddress is required in paymentRequirements.extra for the upto scheme",
+      );
+    }
+
+    const rpc = createRpcClient(paymentRequirements.network, this.config?.rpcUrl);
+
+    // Resolve the token program: prefer the requirement's hint, else read the mint.
+    let tokenProgram = paymentRequirements.extra?.tokenProgram as string | undefined;
+    if (!tokenProgram) {
+      const mint = await fetchMint(rpc, paymentRequirements.asset as Address);
+      const programAddress = mint.programAddress.toString();
+      if (
+        programAddress !== TOKEN_PROGRAM_ADDRESS.toString() &&
+        programAddress !== TOKEN_2022_PROGRAM_ADDRESS.toString()
+      ) {
+        throw new Error("Asset was not created by a known token program");
+      }
+      tokenProgram = programAddress;
+    }
+
+    const maxAmount = BigInt(paymentRequirements.amount);
+    const latestBlockhash = await resolveBlockhash(rpc, paymentRequirements);
+
+    const open = await buildOpenPaymentChannelTransaction({
+      blockhash: {
+        blockhash: latestBlockhash.blockhash,
+        lastValidBlockHeight: latestBlockhash.lastValidBlockHeight,
+      },
+      deposit: maxAmount,
+      mint: paymentRequirements.asset,
+      operator,
+      payee: paymentRequirements.payTo,
+      payer: this.signer,
+      programId: paymentRequirements.extra?.programId as string | undefined,
+      tokenProgram,
+    });
+
+    const now = Math.floor(Date.now() / 1000);
+    const validAfter = (paymentRequirements.extra?.validAfter as number | undefined) ?? now;
+    const expiresAt = now + paymentRequirements.maxTimeoutSeconds;
+
+    const payload: UptoSvmPayloadV2 = {
+      authorizedSigner: operator,
+      channelId: open.channelId,
+      deposit: maxAmount.toString(),
+      expiresAt,
+      from: this.signer.address,
+      maxAmount: maxAmount.toString(),
+      nonce: crypto.randomUUID(),
+      openTransaction: open.transaction,
+      profile: UPTO_PROFILE_PAYMENT_CHANNEL,
+      validAfter,
+    };
+
+    return { x402Version, payload };
+  }
+}
