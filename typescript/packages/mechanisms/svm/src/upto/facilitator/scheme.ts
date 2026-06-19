@@ -68,7 +68,13 @@ export class UptoSvmScheme implements SchemeNetworkFacilitator {
    * @returns Extra metadata folded into the requirement's `extra`
    */
   getExtra(_: Network): Record<string, unknown> | undefined {
-    return { facilitatorAddress: this.operator.address, feePayer: this.operator.address };
+    // `facilitator` + `profiles` per scheme_upto_svm.md §4.1 — the Rust client
+    // requires both; `facilitatorAddress` was a non-spec name that broke interop.
+    return {
+      facilitator: this.operator.address,
+      feePayer: this.operator.address,
+      profiles: ["payment-channel"],
+    };
   }
 
   /**
@@ -108,7 +114,7 @@ export class UptoSvmScheme implements SchemeNetworkFacilitator {
     }
 
     const operatorAddr = this.operator.address;
-    if (requirements.extra?.facilitatorAddress !== operatorAddr) {
+    if (requirements.extra?.facilitator !== operatorAddr) {
       return { isValid: false, invalidReason: "facilitator_mismatch", payer: p.from };
     }
     if (p.authorizedSigner !== operatorAddr) {
@@ -157,13 +163,24 @@ export class UptoSvmScheme implements SchemeNetworkFacilitator {
 
     // Validate the open instruction against the pinned requirements.
     try {
-      await verifyOpenTransaction(p.openTransaction, {
+      const open = await verifyOpenTransaction(p.openTransaction, {
         authorizedSigner: operatorAddr,
         maxCap: maxAmount,
         mint: requirements.asset,
         payee: requirements.payTo,
         programId: requirements.extra?.programId as string | undefined,
       });
+      // Bind the channel payer to `payload.from`: settlement builds the
+      // distribute (refund) instruction from `p.from`, so a mismatch with the
+      // open transaction's payer would make settlement fail on-chain.
+      if (open.payer !== p.from) {
+        return {
+          isValid: false,
+          invalidReason: "invalid_upto_svm_payload_payer_mismatch",
+          invalidMessage: `open payer ${open.payer} != payload.from ${p.from}`,
+          payer: p.from,
+        };
+      }
     } catch (error) {
       return {
         isValid: false,

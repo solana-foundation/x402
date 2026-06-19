@@ -31,6 +31,7 @@ import { findAssociatedTokenPda } from "@solana-program/token-2022";
 
 import { getOpenInstruction, OPEN_DISCRIMINATOR } from "./generated/instructions/open";
 import { findEventAuthorityPda } from "./generated/pdas/eventAuthority";
+import { COMPUTE_BUDGET_PROGRAM_ADDRESS } from "../constants";
 import { ASSOCIATED_TOKEN_PROGRAM_ID, PAYMENT_CHANNELS_PROGRAM_ID } from "./onchain";
 
 const U64_MAX = (1n << 64n) - 1n;
@@ -250,6 +251,7 @@ export async function verifyOpenTransaction(
   const message = getCompiledTransactionMessageDecoder().decode(
     decoded.messageBytes,
   ) as unknown as {
+    addressTableLookups?: readonly unknown[];
     instructions: readonly {
       accountIndices?: readonly number[];
       data?: Uint8Array | undefined;
@@ -258,12 +260,43 @@ export async function verifyOpenTransaction(
     staticAccounts: readonly string[];
   };
 
+  // The operator co-signs (and fee-pays) this client-supplied transaction, so a
+  // malicious client could otherwise smuggle an operator-authorized instruction
+  // (e.g. `SystemProgram.transfer { from: operator }`) alongside the open and
+  // drain the operator. Two defenses, before any account binding:
+  //   1. Reject Address Lookup Tables — they hide instruction programs/accounts
+  //      from `staticAccounts`. The in-SDK open builder never uses them.
+  //   2. Allowlist instruction programs to exactly { payment-channels `open`,
+  //      ComputeBudget }, with exactly one `open`. Nothing else gets the
+  //      operator's signature.
+  if (message.addressTableLookups && message.addressTableLookups.length > 0) {
+    throw new Error(
+      "verifyOpenTransaction: address lookup tables are not permitted in an open transaction",
+    );
+  }
   let openIx: { accountIndices: readonly number[]; data: Uint8Array } | undefined;
+  let openCount = 0;
   for (const ix of message.instructions) {
-    if (message.staticAccounts[ix.programAddressIndex] !== programIdStr) continue;
-    if (!ix.data || ix.data.length < 1 || ix.data[0] !== OPEN_DISCRIMINATOR) continue;
-    openIx = { accountIndices: ix.accountIndices ?? [], data: ix.data };
-    break;
+    const program = message.staticAccounts[ix.programAddressIndex];
+    if (program === programIdStr) {
+      if (!ix.data || ix.data.length < 1 || ix.data[0] !== OPEN_DISCRIMINATOR) {
+        throw new Error(
+          "verifyOpenTransaction: payment-channels instruction is not `open` (only the channel open may be co-signed)",
+        );
+      }
+      openCount += 1;
+      openIx = { accountIndices: ix.accountIndices ?? [], data: ix.data };
+      continue;
+    }
+    if (program === COMPUTE_BUDGET_PROGRAM_ADDRESS) continue;
+    throw new Error(
+      `verifyOpenTransaction: disallowed instruction program ${program} — the operator co-signs, so only the channel open (+ ComputeBudget) is permitted`,
+    );
+  }
+  if (openCount !== 1) {
+    throw new Error(
+      `verifyOpenTransaction: expected exactly one open instruction, found ${openCount}`,
+    );
   }
   if (!openIx) throw new Error("verifyOpenTransaction: no payment-channels open instruction found");
 
