@@ -49,7 +49,7 @@ export const ASSOCIATED_TOKEN_PROGRAM_ID =
 
 /** Canonical payment-channels program id (Surfnet/mainnet deployment). */
 export const PAYMENT_CHANNELS_PROGRAM_ID =
-  "GuoKrzaBiZnW5DvJ3yZVE7xHqbcBvaX9SH6P6Cn9gNvc" as Address<"GuoKrzaBiZnW5DvJ3yZVE7xHqbcBvaX9SH6P6Cn9gNvc">;
+  "CHNLxYvVA28MJP9PrFuDXccuoGXAx7jBacfLEkahyGsX" as Address<"CHNLxYvVA28MJP9PrFuDXccuoGXAx7jBacfLEkahyGsX">;
 
 /**
  * Treasury owner used by the payment-channels deployment: 32 bytes of repeated
@@ -203,10 +203,9 @@ export function buildSettleAndFinalizeInstructions(
       channel,
       instructionsSysvar: INSTRUCTIONS_SYSVAR_ADDRESS,
       merchant: args.merchantSigner,
-      settleAndFinalizeArgs: {
-        hasVoucher,
-        voucher: { channelId: channel, cumulativeAmount, expiresAt },
-      },
+      // The program reads the voucher from the ed25519 precompile; the
+      // settle_and_finalize args carry only the hasVoucher flag.
+      settleAndFinalizeArgs: { hasVoucher },
     },
     { programAddress: programId },
   );

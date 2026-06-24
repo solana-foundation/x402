@@ -58,7 +58,7 @@ export type DistributeInstruction<
   TAccountEventAuthority extends AccountMeta<string> | string = string,
   TAccountSelfProgram extends
     | AccountMeta<string>
-    | string = "GuoKrzaBiZnW5DvJ3yZVE7xHqbcBvaX9SH6P6Cn9gNvc",
+    | string = "CHNLxYvVA28MJP9PrFuDXccuoGXAx7jBacfLEkahyGsX",
   TRemainingAccounts extends readonly AccountMeta<string>[] = [],
 > = Instruction<TProgram> &
   InstructionWithAccounts<
@@ -222,7 +222,7 @@ export function getDistributeInstruction<
 
   if (!accounts.selfProgram.value) {
     accounts.selfProgram.value =
-      "GuoKrzaBiZnW5DvJ3yZVE7xHqbcBvaX9SH6P6Cn9gNvc" as Address<"GuoKrzaBiZnW5DvJ3yZVE7xHqbcBvaX9SH6P6Cn9gNvc">;
+      "CHNLxYvVA28MJP9PrFuDXccuoGXAx7jBacfLEkahyGsX" as Address<"CHNLxYvVA28MJP9PrFuDXccuoGXAx7jBacfLEkahyGsX">;
   }
 
   const remainingAccounts: AccountMeta[] = args.recipientTokenAccounts.map(recipientAddress => ({
