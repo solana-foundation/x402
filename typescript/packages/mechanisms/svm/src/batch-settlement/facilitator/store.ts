@@ -1,0 +1,122 @@
+/**
+ * Per-channel server state and the store that holds it.
+ *
+ * `batch-settlement` is stateful: the operator tracks each channel's deposit,
+ * the highest accepted off-chain voucher (the watermark), and the on-chain
+ * settled / distributed amounts. The default {@link MemoryChannelStore} is an
+ * in-memory implementation with per-channel serialization; integrators swap in
+ * a durable store for production. See the spec's §7 "Server state".
+ */
+
+import { type BatchChannelStatus, type BatchSplit } from "../types";
+
+/** Server-held state for a single channel, keyed by `channelId`. */
+export interface ChannelState {
+  /** Channel PDA (base58). */
+  channelId: string;
+  /** Channel payer / depositor (base58). */
+  payer: string;
+  /** Channel proceeds recipient (base58). */
+  payee: string;
+  /** SPL mint (base58). */
+  mint: string;
+  /** Token program id for the mint (base58). */
+  tokenProgram: string;
+  /** Voucher signer = the client (base58). */
+  authorizedSigner: string;
+  /** On-chain escrow deposit (base units). */
+  deposit: bigint;
+  /** Highest accepted off-chain cumulative (the watermark). */
+  cumulative: bigint;
+  /** On-chain settled watermark (advanced by `settleBatch`). */
+  settled: bigint;
+  /** Cumulative distributed on-chain (base units). */
+  paidOut: bigint;
+  /** Channel lifecycle status. */
+  status: BatchChannelStatus;
+  /** When a forced/cooperative close was requested (Unix seconds), if any. */
+  closeRequestedAt?: number | undefined;
+  /** The highest accepted voucher's signature (base58), for redemption. */
+  highestVoucherSignature?: string | undefined;
+  /** The highest accepted voucher's expiry (Unix seconds). */
+  highestVoucherExpiresAt?: number | undefined;
+  /** Distribution splits sealed at open. */
+  splits: BatchSplit[];
+  /** Channel program id override (base58), if not the default. */
+  programId?: string | undefined;
+  /** The broadcast `open` signature, returned in the deposit settlement response. */
+  openSignature?: string | undefined;
+}
+
+/**
+ * Channel store contract. `update` performs an atomic read-modify-write so that
+ * concurrent voucher acceptance for the same channel is serialized.
+ */
+export interface ChannelStore {
+  /**
+   * Fetch a channel's state.
+   *
+   * @param channelId - Channel PDA (base58)
+   * @returns The state, or undefined if unknown
+   */
+  get(channelId: string): Promise<ChannelState | undefined>;
+
+  /**
+   * Insert or overwrite a channel's state.
+   *
+   * @param state - The channel state
+   */
+  put(state: ChannelState): Promise<void>;
+
+  /**
+   * Atomically read-modify-write a channel under a per-channel lock. The updater
+   * runs with exclusive access; concurrent updates to the same channel queue.
+   *
+   * @param channelId - Channel PDA (base58)
+   * @param updater - Receives the current state (or undefined) and returns the new state
+   * @returns The written state
+   */
+  update(
+    channelId: string,
+    updater: (current: ChannelState | undefined) => ChannelState | Promise<ChannelState>,
+  ): Promise<ChannelState>;
+}
+
+/** In-memory {@link ChannelStore} with per-channel serialization. */
+export class MemoryChannelStore implements ChannelStore {
+  private readonly channels = new Map<string, ChannelState>();
+  private readonly locks = new Map<string, Promise<unknown>>();
+
+  /** @inheritdoc */
+  get(channelId: string): Promise<ChannelState | undefined> {
+    return Promise.resolve(this.channels.get(channelId));
+  }
+
+  /** @inheritdoc */
+  put(state: ChannelState): Promise<void> {
+    this.channels.set(state.channelId, state);
+    return Promise.resolve();
+  }
+
+  /** @inheritdoc */
+  async update(
+    channelId: string,
+    updater: (current: ChannelState | undefined) => ChannelState | Promise<ChannelState>,
+  ): Promise<ChannelState> {
+    const prior = this.locks.get(channelId) ?? Promise.resolve();
+    const run = prior.then(async () => {
+      const next = await updater(this.channels.get(channelId));
+      this.channels.set(channelId, next);
+      return next;
+    });
+    // Keep the lock chain alive regardless of this run's outcome.
+    this.locks.set(
+      channelId,
+      run.then(
+        () => undefined,
+        () => undefined,
+      ),
+    );
+    return run;
+  }
+}

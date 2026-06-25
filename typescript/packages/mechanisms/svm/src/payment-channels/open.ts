@@ -56,8 +56,14 @@ export interface BuildOpenArgs {
   payee: string;
   /** SPL mint. */
   mint: string;
-  /** Operator key — both the voucher signer (authorizedSigner) and fee payer. */
+  /** Operator key — the transaction fee payer (and the default voucher signer). */
   operator: string;
+  /**
+   * Channel voucher signer (base58). Defaults to {@link operator} (the `upto`
+   * pull model). The `batch-settlement` client-voucher model passes the payer
+   * here so the client signs its own cumulative vouchers.
+   */
+  authorizedSigner?: string | undefined;
   /** Escrow deposit = the authorized ceiling (base units). */
   deposit: bigint;
   /** Token program for the mint. */
@@ -137,6 +143,7 @@ export async function buildOpenPaymentChannelTransaction(args: BuildOpenArgs): P
   const payee = address(args.payee);
   const mint = address(args.mint);
   const operator = address(args.operator);
+  const authorizedSigner = address(args.authorizedSigner ?? args.operator);
   const salt = args.salt ?? randomU64();
   const gracePeriod = args.gracePeriod ?? DEFAULT_GRACE_PERIOD_SECONDS;
   const recipients = (args.recipients ?? []).map(r => ({
@@ -148,7 +155,7 @@ export async function buildOpenPaymentChannelTransaction(args: BuildOpenArgs): P
     payer: payer.address,
     payee: args.payee,
     mint: args.mint,
-    authorizedSigner: args.operator,
+    authorizedSigner: args.authorizedSigner ?? args.operator,
     salt,
     programId: args.programId,
   });
@@ -177,7 +184,7 @@ export async function buildOpenPaymentChannelTransaction(args: BuildOpenArgs): P
   const instruction = getOpenInstruction(
     {
       associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
-      authorizedSigner: operator,
+      authorizedSigner,
       channel: address(channelId),
       channelTokenAccount,
       eventAuthority,
