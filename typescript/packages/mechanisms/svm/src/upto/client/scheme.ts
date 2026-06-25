@@ -12,7 +12,7 @@ import { createRpcClient, resolveBlockhash } from "../../utils";
  * SVM client implementation for the `upto` payment scheme (payment-channel profile).
  *
  * Builds the channel `open` transaction whose `deposit` is the authorized ceiling,
- * with the operator (`extra.facilitator`) as both the channel authorized
+ * with the operator (`extra.feePayer`) as both the channel authorized
  * signer and the transaction fee payer. The client signs only the open; the
  * facilitator broadcasts it and later settles the metered amount with a voucher.
  */
@@ -42,9 +42,9 @@ export class UptoSvmScheme implements SchemeNetworkClient {
     x402Version: number,
     paymentRequirements: PaymentRequirements,
   ): Promise<Pick<PaymentPayload, "x402Version" | "payload">> {
-    const operator = paymentRequirements.extra?.facilitator as string | undefined;
+    const operator = paymentRequirements.extra?.feePayer as string | undefined;
     if (!operator) {
-      throw new Error("facilitator is required in paymentRequirements.extra for the upto scheme");
+      throw new Error("feePayer is required in paymentRequirements.extra for the upto scheme");
     }
 
     const rpc = createRpcClient(paymentRequirements.network, this.config?.rpcUrl);
@@ -76,7 +76,7 @@ export class UptoSvmScheme implements SchemeNetworkClient {
       operator,
       payee: paymentRequirements.payTo,
       payer: this.signer,
-      programId: paymentRequirements.extra?.programId as string | undefined,
+      programId: paymentRequirements.extra?.channelProgram as string | undefined,
       tokenProgram,
     });
 

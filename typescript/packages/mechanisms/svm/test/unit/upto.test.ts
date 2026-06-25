@@ -72,14 +72,14 @@ describe("upto SVM scheme", () => {
           x402Version: 2,
           scheme: "upto",
           network: SOLANA_DEVNET_CAIP2,
-          extra: { facilitator: "Op111", feePayer: "Op111" },
+          extra: { feePayer: "Op111", profiles: ["payment-channel"] },
         },
         [],
       );
       expect(result.extra).toEqual({
         custom: "value",
-        facilitator: "Op111",
         feePayer: "Op111",
+        profiles: ["payment-channel"],
       });
     });
   });
@@ -240,7 +240,7 @@ describe("upto SVM scheme", () => {
       amount: "1000000",
       payTo: PAY_TO,
       maxTimeoutSeconds: 300,
-      extra: { facilitator: operatorAddress, feePayer: operatorAddress },
+      extra: { feePayer: operatorAddress },
       ...overrides,
     });
 
@@ -271,7 +271,7 @@ describe("upto SVM scheme", () => {
 
     it("rejects a facilitator-address mismatch", async () => {
       const req = requirements({
-        extra: { facilitator: "OtherOperator11111111111111111111111111" },
+        extra: { feePayer: "OtherOperator11111111111111111111111111" },
       });
       const result = await facilitator.verify(wrap(basePayload, req), req);
       expect(result.isValid).toBe(false);
@@ -359,7 +359,7 @@ describe("upto SVM scheme", () => {
         amount: "1000001", // one over the ceiling
         payTo: PAY_TO,
         maxTimeoutSeconds: 300,
-        extra: { facilitator: operator.address, feePayer: operator.address },
+        extra: { feePayer: operator.address },
       };
 
       const result = await facilitator.settle(

@@ -68,10 +68,9 @@ export class UptoSvmScheme implements SchemeNetworkFacilitator {
    * @returns Extra metadata folded into the requirement's `extra`
    */
   getExtra(_: Network): Record<string, unknown> | undefined {
-    // `facilitator` + `profiles` per scheme_upto_svm.md §4.1 — the Rust client
-    // requires both; `facilitatorAddress` was a non-spec name that broke interop.
+    // `feePayer` + `profiles` per scheme_upto_svm.md §4.1. `feePayer` is the
+    // operator key that sponsors fees (co-signs the open) and settles.
     return {
-      facilitator: this.operator.address,
       feePayer: this.operator.address,
       profiles: ["payment-channel"],
     };
@@ -114,7 +113,7 @@ export class UptoSvmScheme implements SchemeNetworkFacilitator {
     }
 
     const operatorAddr = this.operator.address;
-    if (requirements.extra?.facilitator !== operatorAddr) {
+    if (requirements.extra?.feePayer !== operatorAddr) {
       return { isValid: false, invalidReason: "facilitator_mismatch", payer: p.from };
     }
     if (p.authorizedSigner !== operatorAddr) {
@@ -168,7 +167,7 @@ export class UptoSvmScheme implements SchemeNetworkFacilitator {
         maxCap: maxAmount,
         mint: requirements.asset,
         payee: requirements.payTo,
-        programId: requirements.extra?.programId as string | undefined,
+        programId: requirements.extra?.channelProgram as string | undefined,
       });
       // Bind the channel payer to `payload.from`: settlement builds the
       // distribute (refund) instruction from `p.from`, so a mismatch with the
@@ -274,7 +273,7 @@ export class UptoSvmScheme implements SchemeNetworkFacilitator {
     }
 
     try {
-      const programIdStr = requirements.extra?.programId as string | undefined;
+      const programIdStr = requirements.extra?.channelProgram as string | undefined;
       const programId: Address | undefined = programIdStr ? address(programIdStr) : undefined;
       const tokenProgram =
         (requirements.extra?.tokenProgram as string | undefined) ??
