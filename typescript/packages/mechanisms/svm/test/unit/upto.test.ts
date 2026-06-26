@@ -146,6 +146,7 @@ describe("upto SVM scheme", () => {
 
       const result = await verifyOpenTransaction(open.transaction, {
         authorizedSigner: operator.address,
+        operator: operator.address,
         maxCap: 1_000_000n,
         mint: MINT,
         payee: PAY_TO,
@@ -170,6 +171,7 @@ describe("upto SVM scheme", () => {
       await expect(
         verifyOpenTransaction(open.transaction, {
           authorizedSigner: operator.address,
+          operator: operator.address,
           maxCap: 1_000_000n,
           mint: MINT,
           payee: PAY_TO,
@@ -192,6 +194,7 @@ describe("upto SVM scheme", () => {
       await expect(
         verifyOpenTransaction(open.transaction, {
           authorizedSigner: operator.address,
+          operator: operator.address,
           maxCap: 1_000_000n,
           mint: MINT,
           payee: USDC_DEVNET_ADDRESS, // wrong recipient

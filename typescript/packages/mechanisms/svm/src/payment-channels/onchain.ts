@@ -223,6 +223,8 @@ export interface DistributeBuildArgs {
   channelId: string;
   payee: string;
   payer: string;
+  /** Operator key that funded the channel rent at open; reclaims it on distribute. */
+  rentPayer: string;
   mint: string;
   tokenProgram: string;
   splits: readonly { bps: number; recipient: string }[];
@@ -244,6 +246,7 @@ export async function buildDistributeInstruction(
   const channel = address(args.channelId);
   const payer = address(args.payer);
   const payee = address(args.payee);
+  const rentPayer = address(args.rentPayer);
 
   const [channelTokenAccount] = await findAssociatedTokenPda({
     mint,
@@ -278,6 +281,7 @@ export async function buildDistributeInstruction(
       mint,
       payeeTokenAccount,
       payer,
+      rentPayer,
       payerTokenAccount,
       recipientTokenAccounts,
       selfProgram: programId,

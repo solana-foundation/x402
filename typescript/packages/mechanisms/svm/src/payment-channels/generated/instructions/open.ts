@@ -51,6 +51,7 @@ export function getOpenDiscriminatorBytes(): ReadonlyUint8Array {
 export type OpenInstruction<
   TProgram extends string = typeof PAYMENT_CHANNELS_PROGRAM_ADDRESS,
   TAccountPayer extends AccountMeta<string> | string = string,
+  TAccountRentPayer extends AccountMeta<string> | string = string,
   TAccountPayee extends AccountMeta<string> | string = string,
   TAccountMint extends AccountMeta<string> | string = string,
   TAccountAuthorizedSigner extends AccountMeta<string> | string = string,
@@ -72,6 +73,9 @@ export type OpenInstruction<
       TAccountPayer extends string
         ? AccountSignerMeta<TAccountPayer> & WritableSignerAccount<TAccountPayer>
         : TAccountPayer,
+      TAccountRentPayer extends string
+        ? AccountSignerMeta<TAccountRentPayer> & WritableSignerAccount<TAccountRentPayer>
+        : TAccountRentPayer,
       TAccountPayee extends string ? ReadonlyAccount<TAccountPayee> : TAccountPayee,
       TAccountMint extends string ? ReadonlyAccount<TAccountMint> : TAccountMint,
       TAccountAuthorizedSigner extends string
@@ -141,6 +145,7 @@ export function getOpenInstructionDataCodec(): Codec<OpenInstructionDataArgs, Op
 
 export type OpenInput<
   TAccountPayer extends string = string,
+  TAccountRentPayer extends string = string,
   TAccountPayee extends string = string,
   TAccountMint extends string = string,
   TAccountAuthorizedSigner extends string = string,
@@ -163,6 +168,7 @@ export type OpenInput<
   openArgs: OpenInstructionDataArgs["openArgs"];
   payee: Address<TAccountPayee>;
   payer: TransactionSigner<TAccountPayer>;
+  rentPayer: TransactionSigner<TAccountRentPayer>;
   payerTokenAccount: Address<TAccountPayerTokenAccount>;
   rent: Address<TAccountRent>;
   selfProgram?: Address<TAccountSelfProgram>;
@@ -178,6 +184,7 @@ export type OpenInput<
  */
 export function getOpenInstruction<
   TAccountPayer extends string,
+  TAccountRentPayer extends string,
   TAccountPayee extends string,
   TAccountMint extends string,
   TAccountAuthorizedSigner extends string,
@@ -194,6 +201,7 @@ export function getOpenInstruction<
 >(
   input: OpenInput<
     TAccountPayer,
+    TAccountRentPayer,
     TAccountPayee,
     TAccountMint,
     TAccountAuthorizedSigner,
@@ -211,6 +219,7 @@ export function getOpenInstruction<
 ): OpenInstruction<
   TProgramAddress,
   TAccountPayer,
+  TAccountRentPayer,
   TAccountPayee,
   TAccountMint,
   TAccountAuthorizedSigner,
@@ -235,6 +244,7 @@ export function getOpenInstruction<
     mint: { isWritable: false, value: input.mint ?? null },
     payee: { isWritable: false, value: input.payee ?? null },
     payer: { isWritable: true, value: input.payer ?? null },
+    rentPayer: { isWritable: true, value: input.rentPayer ?? null },
     payerTokenAccount: { isWritable: true, value: input.payerTokenAccount ?? null },
     rent: { isWritable: false, value: input.rent ?? null },
     selfProgram: { isWritable: false, value: input.selfProgram ?? null },
@@ -261,6 +271,7 @@ export function getOpenInstruction<
   return Object.freeze({
     accounts: [
       getAccountMeta("payer", accounts.payer),
+      getAccountMeta("rentPayer", accounts.rentPayer),
       getAccountMeta("payee", accounts.payee),
       getAccountMeta("mint", accounts.mint),
       getAccountMeta("authorizedSigner", accounts.authorizedSigner),
@@ -279,6 +290,7 @@ export function getOpenInstruction<
   } as OpenInstruction<
     TProgramAddress,
     TAccountPayer,
+    TAccountRentPayer,
     TAccountPayee,
     TAccountMint,
     TAccountAuthorizedSigner,

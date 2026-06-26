@@ -12,6 +12,7 @@ import {
   type Address,
   address,
   type Blockhash,
+  createNoopSigner,
   createTransactionMessage,
   getAddressEncoder,
   getBase64Codec,
@@ -164,6 +165,15 @@ export async function buildOpenPaymentChannelTransaction(args: BuildOpenArgs): P
   });
   const [eventAuthority] = await findEventAuthorityPda({ programAddress });
 
+  // rentPayer is the operator / fee payer: it funds the channel PDA + escrow-ATA
+  // rent at open. It is the same key set as fee payer below, so the single
+  // operator signature added by the facilitator covers both the fee-payer and
+  // rentPayer signer roles. When the operator is the payer itself, reuse the
+  // payer signer instance (kit rejects two distinct signer objects for one
+  // address); otherwise a noop signer carries the operator address into the
+  // instruction without signing here.
+  const rentPayerSigner = operator === payer.address ? payer : createNoopSigner(operator);
+
   const instruction = getOpenInstruction(
     {
       associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
@@ -175,6 +185,7 @@ export async function buildOpenPaymentChannelTransaction(args: BuildOpenArgs): P
       openArgs: { deposit: args.deposit, gracePeriod, recipients, salt },
       payee,
       payer,
+      rentPayer: rentPayerSigner,
       payerTokenAccount,
       rent: RENT_SYSVAR,
       selfProgram: programAddress,
@@ -210,6 +221,12 @@ export async function buildOpenPaymentChannelTransaction(args: BuildOpenArgs): P
 export interface VerifyOpenExpected {
   /** Operator key set as the channel authorized signer (base58). */
   authorizedSigner: string;
+  /**
+   * Operator key expected in the `rentPayer` slot (base58). The operator
+   * co-signs the open as both fee payer and rentPayer; binding this guards
+   * against a client smuggling a different rent-funding account.
+   */
+  operator: string;
   /** SPL mint expected in the open. */
   mint: string;
   /** Authorized ceiling — the open deposit must not exceed it. */
@@ -301,7 +318,7 @@ export async function verifyOpenTransaction(
   if (!openIx) throw new Error("verifyOpenTransaction: no payment-channels open instruction found");
 
   const indices = openIx.accountIndices;
-  if (indices.length < 7) {
+  if (indices.length < 8) {
     throw new Error(
       `verifyOpenTransaction: open instruction has too few accounts (${indices.length})`,
     );
@@ -312,13 +329,20 @@ export async function verifyOpenTransaction(
     if (!addr) throw new Error(`verifyOpenTransaction: missing account at slot ${slot} (${label})`);
     return addr;
   };
-  // Open account layout: 0 payer, 1 payee, 2 mint, 3 authorizedSigner, 4 channel, ...
+  // Open account layout: 0 payer, 1 rentPayer, 2 payee, 3 mint,
+  // 4 authorizedSigner, 5 channel, ...
   const payerAddr = accountAt(0, "payer");
-  const payeeAddr = accountAt(1, "payee");
-  const mintAddr = accountAt(2, "mint");
-  const authorizedSignerAddr = accountAt(3, "authorizedSigner");
-  const channelAddr = accountAt(4, "channel");
+  const rentPayerAddr = accountAt(1, "rentPayer");
+  const payeeAddr = accountAt(2, "payee");
+  const mintAddr = accountAt(3, "mint");
+  const authorizedSignerAddr = accountAt(4, "authorizedSigner");
+  const channelAddr = accountAt(5, "channel");
 
+  if (rentPayerAddr !== expected.operator) {
+    throw new Error(
+      `verifyOpenTransaction: rentPayer ${rentPayerAddr} != expected operator ${expected.operator}`,
+    );
+  }
   if (payeeAddr !== expected.payee) {
     throw new Error(`verifyOpenTransaction: payee ${payeeAddr} != expected ${expected.payee}`);
   }

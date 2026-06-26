@@ -164,6 +164,7 @@ export class UptoSvmScheme implements SchemeNetworkFacilitator {
     try {
       const open = await verifyOpenTransaction(p.openTransaction, {
         authorizedSigner: operatorAddr,
+        operator: operatorAddr,
         maxCap: maxAmount,
         mint: requirements.asset,
         payee: requirements.payTo,
@@ -303,6 +304,7 @@ export class UptoSvmScheme implements SchemeNetworkFacilitator {
         mint: requirements.asset,
         payee: requirements.payTo,
         payer: p.from,
+        rentPayer: this.operator.address,
         programId,
         splits: [],
         tokenProgram,
