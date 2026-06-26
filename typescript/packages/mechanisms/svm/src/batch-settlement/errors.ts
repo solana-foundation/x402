@@ -24,6 +24,12 @@ export const BatchError = {
   VOUCHER_SIGNATURE: `${PREFIX}voucher_signature`,
   /** Voucher `expiresAt` is in the past. */
   VOUCHER_EXPIRED: `${PREFIX}voucher_expired`,
+  /**
+   * Voucher `expiresAt` is in the future but inside the settlement grace window,
+   * so it could lapse before the operator's async batch redemption re-checks
+   * `expires_at` on-chain.
+   */
+  VOUCHER_EXPIRES_BEFORE_SETTLEMENT: `${PREFIX}voucher_expires_before_settlement`,
   /** Voucher signer is not the channel's authorized signer. */
   AUTHORIZED_SIGNER_MISMATCH: `${PREFIX}authorized_signer_mismatch`,
   /** Recomputed channel PDA disagrees with the declared/decoded channel id. */

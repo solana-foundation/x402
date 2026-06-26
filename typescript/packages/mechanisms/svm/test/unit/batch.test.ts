@@ -1,4 +1,16 @@
-import { generateKeyPairSigner } from "@solana/kit";
+import {
+  address,
+  appendTransactionMessageInstructions,
+  compileTransaction,
+  createTransactionMessage,
+  generateKeyPairSigner,
+  getBase64EncodedWireTransaction,
+  getCompiledTransactionMessageDecoder,
+  getCompiledTransactionMessageEncoder,
+  pipe,
+  setTransactionMessageFeePayer,
+  setTransactionMessageLifetimeUsingBlockhash,
+} from "@solana/kit";
 import type { PaymentPayload, PaymentRequirements } from "@x402/core/types";
 import { beforeAll, describe, expect, it } from "vitest";
 
@@ -9,7 +21,7 @@ import {
   USDC_DEVNET_ADDRESS,
   USDC_MAINNET_ADDRESS,
 } from "../../src/constants";
-import { findPaymentChannelPda } from "../../src/payment-channels/open";
+import { findPaymentChannelPda, verifyOpenTransaction } from "../../src/payment-channels/open";
 import { buildSettleInstructions } from "../../src/payment-channels/onchain";
 import { SETTLE_DISCRIMINATOR } from "../../src/payment-channels/generated/instructions/settle";
 import {
@@ -246,12 +258,18 @@ describe("batch-settlement SVM scheme", () => {
       s: MemoryChannelStore,
       cumulative: bigint,
       voucher: BatchVoucher,
-      opts: { now?: number; perRequest?: bigint; minVoucherDelta?: bigint } = {},
+      opts: {
+        now?: number;
+        perRequest?: bigint;
+        minVoucherDelta?: bigint;
+        minExpiryWindowSeconds?: number;
+      } = {},
     ) =>
       acceptVoucher(s, {
         channelId,
         cumulativeAmount: cumulative,
         expiresAt: voucher.expiresAt,
+        minExpiryWindowSeconds: opts.minExpiryWindowSeconds,
         minVoucherDelta: opts.minVoucherDelta,
         now: opts.now ?? 1_000,
         perRequest: opts.perRequest,
@@ -320,8 +338,85 @@ describe("batch-settlement SVM scheme", () => {
       const voucher = await sign(1_000n);
       const first = await accept(s, 1_000n, voucher);
       expect(first.ok && first.charged).toBe(1_000n);
+      expect(first.ok && first.replay).toBe(false);
       const replay = await accept(s, 1_000n, voucher);
       expect(replay.ok && replay.charged).toBe(0n);
+      // An exact replay re-serves the cached response; it MUST NOT serve fresh.
+      expect(replay.ok && replay.replay).toBe(true);
+    });
+
+    it("rejects a different signature at the same cumulative (no idempotent re-serve)", async () => {
+      const s = await freshStore();
+      await accept(s, 1_000n, await sign(1_000n));
+      // Same cumulative, different (still-valid) signature: not the recorded
+      // watermark signature, so it is treated as a non-monotonic voucher.
+      const other = await sign(1_000n, FAR_FUTURE - 1);
+      const r = await accept(s, 1_000n, other);
+      expect(r.ok).toBe(false);
+      expect(!r.ok && r.reason).toBe(BatchError.CUMULATIVE_BELOW_ACCEPTED);
+    });
+
+    it("a genuine strict increment charges the delta, is not a replay, advances the watermark", async () => {
+      const s = await freshStore();
+      const first = await accept(s, 1_000n, await sign(1_000n), { perRequest: 1_000n });
+      expect(first.ok && first.charged).toBe(1_000n);
+      const second = await accept(s, 2_000n, await sign(2_000n), { perRequest: 1_000n });
+      expect(second.ok && second.charged).toBe(1_000n);
+      expect(second.ok && second.replay).toBe(false);
+      expect(second.ok && second.state.cumulative).toBe(2_000n);
+    });
+
+    it("rejects an increment below the per-request floor", async () => {
+      const s = await freshStore();
+      await accept(s, 1_000n, await sign(1_000n), { perRequest: 1_000n });
+      // +500 < perRequest 1_000 → rejected.
+      const r = await accept(s, 1_500n, await sign(1_500n), { perRequest: 1_000n });
+      expect(r.ok).toBe(false);
+      expect(!r.ok && r.reason).toBe(BatchError.CUMULATIVE_BELOW_PER_REQUEST);
+    });
+
+    it("accepts a never-expiring voucher (expiresAt === 0)", async () => {
+      const s = await freshStore();
+      const r = await accept(s, 1_000n, await sign(1_000n, 0), {
+        now: 1_000,
+        minExpiryWindowSeconds: 900,
+      });
+      expect(r.ok && r.charged).toBe(1_000n);
+    });
+
+    it("rejects a voucher that expires inside the settlement window", async () => {
+      const s = await freshStore();
+      const now = 1_000;
+      const grace = 900;
+      // expiresAt is in the future but within now + grace → too short to outlast
+      // the async on-chain settlement.
+      const r = await accept(s, 1_000n, await sign(1_000n, now + grace / 2), {
+        now,
+        minExpiryWindowSeconds: grace,
+      });
+      expect(r.ok).toBe(false);
+      expect(!r.ok && r.reason).toBe(BatchError.VOUCHER_EXPIRES_BEFORE_SETTLEMENT);
+    });
+
+    it("accepts a voucher that outlasts the settlement window", async () => {
+      const s = await freshStore();
+      const now = 1_000;
+      const grace = 900;
+      const r = await accept(s, 1_000n, await sign(1_000n, now + grace + 60), {
+        now,
+        minExpiryWindowSeconds: grace,
+      });
+      expect(r.ok && r.charged).toBe(1_000n);
+    });
+
+    it("rejects a voucher whose expiry is at or before now", async () => {
+      const s = await freshStore();
+      const r = await accept(s, 1_000n, await sign(1_000n, 500), {
+        now: 1_000,
+        minExpiryWindowSeconds: 900,
+      });
+      expect(r.ok).toBe(false);
+      expect(!r.ok && r.reason).toBe(BatchError.VOUCHER_EXPIRED);
     });
 
     it("enforces minVoucherDelta", async () => {
@@ -348,6 +443,68 @@ describe("batch-settlement SVM scheme", () => {
       await s.update(channelId, c => ({ ...c!, status: "closing" }));
       const r = await accept(s, 1_000n, await sign(1_000n));
       expect(!r.ok && r.reason).toBe(BatchError.CHANNEL_CLOSING);
+    });
+  });
+
+  describe("verifyOpenTransaction (open-tx guard)", () => {
+    it("rejects an open transaction that carries address-lookup tables", async () => {
+      // The verifier validates accounts from the static keys; an ALT could hide
+      // accounts and smuggle operator-as-authority/source/writable usage past
+      // the fee-payer guard. An `open` needs only static accounts, so any ALT
+      // must be rejected. Build a v0 compiled message, inject a non-empty
+      // `addressTableLookups`, re-encode it, and wrap it into a wire
+      // transaction the way the verifier ingests it.
+      const feePayer = await generateKeyPairSigner();
+      const lookupTable = (await generateKeyPairSigner()).address;
+      const computeBudget = address("ComputeBudget111111111111111111111111111111");
+
+      const message = pipe(
+        createTransactionMessage({ version: 0 }),
+        m => setTransactionMessageFeePayer(feePayer.address, m),
+        m =>
+          setTransactionMessageLifetimeUsingBlockhash(
+            { blockhash: "11111111111111111111111111111111", lastValidBlockHeight: 0n },
+            m,
+          ),
+        m =>
+          appendTransactionMessageInstructions(
+            [
+              {
+                programAddress: computeBudget,
+                accounts: [],
+                data: new Uint8Array([2, 0, 0, 0, 0]),
+              },
+            ],
+            m,
+          ),
+      );
+      const compiled = compileTransaction(message);
+      const decodedMessage = getCompiledTransactionMessageDecoder().decode(compiled.messageBytes);
+      const withLookups = {
+        ...decodedMessage,
+        addressTableLookups: [
+          { lookupTableAddress: lookupTable, readonlyIndexes: [1], writableIndexes: [0] },
+        ],
+      };
+      const messageBytes = getCompiledTransactionMessageEncoder().encode(
+        withLookups as Parameters<
+          ReturnType<typeof getCompiledTransactionMessageEncoder>["encode"]
+        >[0],
+      );
+      const wireTransaction = getBase64EncodedWireTransaction({
+        messageBytes: messageBytes as typeof compiled.messageBytes,
+        signatures: { [feePayer.address]: new Uint8Array(64) },
+      });
+
+      await expect(
+        verifyOpenTransaction(wireTransaction, {
+          authorizedSigner: feePayer.address,
+          maxCap: 1_000_000n,
+          mint: MINT,
+          operator: feePayer.address,
+          payee: PAY_TO,
+        }),
+      ).rejects.toThrow(/address-lookup tables are not permitted/);
     });
   });
 

@@ -432,7 +432,11 @@ export class BatchSvmScheme implements SchemeNetworkFacilitator {
     return {
       isValid: true,
       payer: state.payer,
-      extra: { channelState: snapshot(accepted.state), chargedAmount: accepted.charged.toString() },
+      extra: {
+        channelState: snapshot(accepted.state),
+        chargedAmount: accepted.charged.toString(),
+        replay: accepted.replay,
+      },
     };
   }
 
@@ -631,6 +635,7 @@ export class BatchSvmScheme implements SchemeNetworkFacilitator {
       channelId: voucher.channelId,
       cumulativeAmount: BigInt(voucher.cumulativeAmount),
       expiresAt: voucher.expiresAt,
+      minExpiryWindowSeconds: this.config.gracePeriodSeconds ?? DEFAULT_GRACE_PERIOD_SECONDS,
       minVoucherDelta: this.config.minVoucherDelta
         ? BigInt(this.config.minVoucherDelta)
         : undefined,
