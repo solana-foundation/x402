@@ -116,6 +116,18 @@ export class UptoSvmScheme implements SchemeNetworkFacilitator {
     if (requirements.extra?.feePayer !== operatorAddr) {
       return { isValid: false, invalidReason: "facilitator_mismatch", payer: p.from };
     }
+    // This reference implementation is self-facilitating: the operator settles
+    // and finalizes, and the program requires the `settle_and_finalize` merchant
+    // to equal `channel.payee`. So the recipient must be the operator. A separate
+    // facilitator (payTo != operator) needs the distribution-split flow and is
+    // not supported here.
+    if (requirements.payTo !== operatorAddr) {
+      return {
+        isValid: false,
+        invalidReason: "invalid_upto_svm_payload_recipient_not_operator",
+        payer: p.from,
+      };
+    }
     if (p.authorizedSigner !== operatorAddr) {
       return {
         isValid: false,
@@ -140,10 +152,10 @@ export class UptoSvmScheme implements SchemeNetworkFacilitator {
         payer: p.from,
       };
     }
-    if (deposit < maxAmount) {
+    if (deposit !== maxAmount) {
       return {
         isValid: false,
-        invalidReason: "invalid_upto_svm_payload_deposit_below_ceiling",
+        invalidReason: "invalid_upto_svm_payload_deposit_not_ceiling",
         payer: p.from,
       };
     }

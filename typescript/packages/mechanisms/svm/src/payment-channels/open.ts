@@ -229,7 +229,8 @@ export interface VerifyOpenExpected {
   operator: string;
   /** SPL mint expected in the open. */
   mint: string;
-  /** Authorized ceiling — the open deposit must not exceed it. */
+  /** Authorized ceiling — the open deposit must equal it exactly (`topUp` can
+   *  raise an open channel's deposit, so `>=` would leave the ceiling advisory). */
   maxCap: bigint;
   /** Primary recipient (payTo). */
   payee: string;
@@ -365,8 +366,10 @@ export async function verifyOpenTransaction(
   const gracePeriod = view.getUint32(17, true);
 
   if (deposit === 0n) throw new Error("verifyOpenTransaction: deposit must be greater than zero");
-  if (deposit > expected.maxCap) {
-    throw new Error(`verifyOpenTransaction: deposit ${deposit} exceeds maxCap ${expected.maxCap}`);
+  if (deposit !== expected.maxCap) {
+    throw new Error(
+      `verifyOpenTransaction: deposit ${deposit} != maxCap ${expected.maxCap} — the deposit is the enforced ceiling and \`topUp\` can raise an open channel's deposit, so it must equal the authorized amount exactly`,
+    );
   }
 
   const derivedChannel = await findPaymentChannelPda({

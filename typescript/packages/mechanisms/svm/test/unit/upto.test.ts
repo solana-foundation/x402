@@ -176,7 +176,30 @@ describe("upto SVM scheme", () => {
           mint: MINT,
           payee: PAY_TO,
         }),
-      ).rejects.toThrow(/exceeds maxCap/);
+      ).rejects.toThrow(/!= maxCap/);
+    });
+
+    it("verifyOpenTransaction rejects a deposit below the ceiling", async () => {
+      const payer = await generateKeyPairSigner();
+      const operator = await generateKeyPairSigner();
+      const open = await buildOpenPaymentChannelTransaction({
+        blockhash: { blockhash: DUMMY_BLOCKHASH, lastValidBlockHeight: 0n },
+        deposit: 500_000n,
+        mint: MINT,
+        operator: operator.address,
+        payee: PAY_TO,
+        payer,
+        tokenProgram: TOKEN_PROGRAM_ADDRESS,
+      });
+      await expect(
+        verifyOpenTransaction(open.transaction, {
+          authorizedSigner: operator.address,
+          operator: operator.address,
+          maxCap: 1_000_000n,
+          mint: MINT,
+          payee: PAY_TO,
+        }),
+      ).rejects.toThrow(/!= maxCap/);
     });
 
     it("verifyOpenTransaction rejects a mismatched payee", async () => {
@@ -218,7 +241,7 @@ describe("upto SVM scheme", () => {
         deposit: 1_000_000n,
         mint: MINT,
         operator: operator.address,
-        payee: PAY_TO,
+        payee: operator.address,
         payer,
         tokenProgram: TOKEN_PROGRAM_ADDRESS,
       });
@@ -241,7 +264,7 @@ describe("upto SVM scheme", () => {
       network: SOLANA_DEVNET_CAIP2,
       asset: MINT,
       amount: "1000000",
-      payTo: PAY_TO,
+      payTo: operatorAddress,
       maxTimeoutSeconds: 300,
       extra: { feePayer: operatorAddress },
       ...overrides,
@@ -290,11 +313,27 @@ describe("upto SVM scheme", () => {
       expect(result.invalidReason).toBe("invalid_upto_svm_payload_amount_mismatch");
     });
 
-    it("rejects a deposit below the ceiling", async () => {
+    it("rejects a deposit below the ceiling (must equal exactly)", async () => {
       const payload = { ...basePayload, deposit: "500000" };
       const result = await facilitator.verify(wrap(payload, requirements()), requirements());
       expect(result.isValid).toBe(false);
-      expect(result.invalidReason).toBe("invalid_upto_svm_payload_deposit_below_ceiling");
+      expect(result.invalidReason).toBe("invalid_upto_svm_payload_deposit_not_ceiling");
+    });
+
+    it("rejects a deposit above the ceiling (must equal exactly)", async () => {
+      const payload = { ...basePayload, deposit: "2000000" };
+      const result = await facilitator.verify(wrap(payload, requirements()), requirements());
+      expect(result.isValid).toBe(false);
+      expect(result.invalidReason).toBe("invalid_upto_svm_payload_deposit_not_ceiling");
+    });
+
+    it("rejects a recipient that is not the operator (self-facilitating only)", async () => {
+      const result = await facilitator.verify(
+        wrap(basePayload, requirements()),
+        requirements({ payTo: PAY_TO }),
+      );
+      expect(result.isValid).toBe(false);
+      expect(result.invalidReason).toBe("invalid_upto_svm_payload_recipient_not_operator");
     });
 
     it("rejects an expired authorization", async () => {
