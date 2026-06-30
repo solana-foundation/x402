@@ -21,7 +21,8 @@ const PRICE_STABLECOINS = new Set(["USDC", "USDT", "USDG", "PYUSD", "CASH"]);
  *
  * Price parsing matches the exact scheme (stablecoin → 6-decimal atomic units);
  * `enhancePaymentRequirements` folds the facilitator's `getExtra` (the
- * operator `feePayer` / `profiles`, plus optional `channelProgram`) into
+ * operator `facilitatorAddress` / `assetTransferMethod`, plus optional
+ * `channelProgram`) into
  * the requirement so the client can build the channel open. The `amount` is
  * phase-dependent: the authorized maximum at verification, the actual charge
  * at settlement.
@@ -84,7 +85,7 @@ export class UptoSvmScheme implements SchemeNetworkServer {
    * @param supportedKind.x402Version - The x402 version
    * @param supportedKind.scheme - The payment scheme
    * @param supportedKind.network - The network identifier
-   * @param supportedKind.extra - Facilitator extra (feePayer / profiles / channelProgram)
+   * @param supportedKind.extra - Facilitator extra (facilitatorAddress / assetTransferMethod / channelProgram)
    * @param extensionKeys - Extension keys supported by the facilitator (unused)
    * @returns Enhanced payment requirements
    */

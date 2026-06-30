@@ -68,11 +68,12 @@ export class UptoSvmScheme implements SchemeNetworkFacilitator {
    * @returns Extra metadata folded into the requirement's `extra`
    */
   getExtra(_: Network): Record<string, unknown> | undefined {
-    // `feePayer` + `profiles` per scheme_upto_svm.md §4.1. `feePayer` is the
-    // operator key that sponsors fees (co-signs the open) and settles.
+    // `facilitatorAddress` + `assetTransferMethod` per scheme_upto_svm.md §5.1,
+    // mirroring the EVM upto notation. `facilitatorAddress` is the operator key
+    // that sponsors fees (co-signs the open) and settles.
     return {
-      feePayer: this.operator.address,
-      profiles: ["payment-channel"],
+      facilitatorAddress: this.operator.address,
+      assetTransferMethod: "payment-channel",
     };
   }
 
@@ -113,7 +114,7 @@ export class UptoSvmScheme implements SchemeNetworkFacilitator {
     }
 
     const operatorAddr = this.operator.address;
-    if (requirements.extra?.feePayer !== operatorAddr) {
+    if (requirements.extra?.facilitatorAddress !== operatorAddr) {
       return { isValid: false, invalidReason: "facilitator_mismatch", payer: p.from };
     }
     // This reference implementation is self-facilitating: the operator settles
