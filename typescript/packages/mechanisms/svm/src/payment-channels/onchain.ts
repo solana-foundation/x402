@@ -8,6 +8,7 @@
  */
 
 import {
+  AccountRole,
   type AccountMeta,
   type Address,
   address,
@@ -22,7 +23,6 @@ import {
 import { findAssociatedTokenPda } from "@solana-program/token-2022";
 
 import { getDistributeInstruction } from "./generated/instructions/distribute";
-import { getSettleAndFinalizeInstruction } from "./generated/instructions/settleAndFinalize";
 import { findEventAuthorityPda } from "./generated/pdas/eventAuthority";
 import { encodeVoucherMessageBytes } from "./voucher";
 
@@ -198,18 +198,19 @@ export function buildSettleAndFinalizeInstructions(
     );
   }
 
-  const ix = getSettleAndFinalizeInstruction(
-    {
-      channel,
-      instructionsSysvar: INSTRUCTIONS_SYSVAR_ADDRESS,
-      merchant: args.merchantSigner,
-      // The program reads the voucher from the ed25519 precompile; the
-      // settle_and_finalize args carry only the hasVoucher flag.
-      settleAndFinalizeArgs: { hasVoucher },
-    },
-    { programAddress: programId },
-  );
-  instructions.push(ix as unknown as ServerInstruction);
+  instructions.push({
+    accounts: [
+      { address: channel, role: AccountRole.WRITABLE },
+      {
+        address: args.merchantSigner.address,
+        role: AccountRole.READONLY_SIGNER,
+        signer: args.merchantSigner,
+      },
+      { address: INSTRUCTIONS_SYSVAR_ADDRESS, role: AccountRole.READONLY },
+    ],
+    data: new Uint8Array([4, hasVoucher]),
+    programAddress: programId,
+  } as unknown as ServerInstruction);
 
   return instructions;
 }
