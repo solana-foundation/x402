@@ -12,10 +12,12 @@ import {
   buildDistributeInstruction,
   buildSettleAndFinalizeInstructions,
   type ServerInstruction,
+  PAYMENT_CHANNELS_PROGRAM_ID,
 } from "../../payment-channels/onchain";
 import { verifyOpenTransaction } from "../../payment-channels/open";
-import { isUptoSvmPayload, type UptoSvmPayloadV2 } from "../../types";
+import { isUptoSvmPayload, type UptoSvmPayloadV2, UPTO_ASSET_TRANSFER_METHOD } from "../../types";
 import { createRpcClient, getStablecoinTokenProgram } from "../../utils";
+import { resolveUptoSvmPaymentChannelConfig } from "../shared";
 import {
   broadcastOpen,
   channelExists,
@@ -31,6 +33,8 @@ export const ERR_SETTLEMENT_EXCEEDS_AMOUNT = "invalid_upto_svm_payload_settlemen
 export interface UptoSvmFacilitatorConfig {
   /** Custom RPC URL (per-network defaults are used when omitted). */
   rpcUrl?: string;
+  /** Facilitator fee in basis points of the settled amount. */
+  facilitatorFee?: number;
 }
 
 /**
@@ -62,18 +66,17 @@ export class UptoSvmScheme implements SchemeNetworkFacilitator {
   ) {}
 
   /**
-   * Advertise the operator as both the facilitator binding and the fee payer.
+   * Advertise the operator as the facilitator binding for payment-channel opens.
    *
    * @param _ - The network identifier (unused)
    * @returns Extra metadata folded into the requirement's `extra`
    */
   getExtra(_: Network): Record<string, unknown> | undefined {
-    // `facilitatorAddress` + `assetTransferMethod` per scheme_upto_svm.md §5.1,
-    // mirroring the EVM upto notation. `facilitatorAddress` is the operator key
-    // that sponsors fees (co-signs the open) and settles.
     return {
+      assetTransferMethod: UPTO_ASSET_TRANSFER_METHOD,
+      channelProgram: PAYMENT_CHANNELS_PROGRAM_ID,
       facilitatorAddress: this.operator.address,
-      assetTransferMethod: "payment-channel",
+      facilitatorFee: this.config?.facilitatorFee ?? 0,
     };
   }
 
@@ -113,21 +116,21 @@ export class UptoSvmScheme implements SchemeNetworkFacilitator {
       return { isValid: false, invalidReason: "network_mismatch", payer: p.from };
     }
 
-    const operatorAddr = this.operator.address;
-    if (requirements.extra?.facilitatorAddress !== operatorAddr) {
-      return { isValid: false, invalidReason: "facilitator_mismatch", payer: p.from };
-    }
-    // This reference implementation is self-facilitating: the operator settles
-    // and finalizes, and the program requires the `settle_and_finalize` merchant
-    // to equal `channel.payee`. So the recipient must be the operator. A separate
-    // facilitator (payTo != operator) needs the distribution-split flow and is
-    // not supported here.
-    if (requirements.payTo !== operatorAddr) {
+    let channelConfig: ReturnType<typeof resolveUptoSvmPaymentChannelConfig>;
+    try {
+      channelConfig = resolveUptoSvmPaymentChannelConfig(requirements);
+    } catch (error) {
       return {
         isValid: false,
-        invalidReason: "invalid_upto_svm_payload_recipient_not_operator",
+        invalidReason: "invalid_upto_svm_payment_requirements",
+        invalidMessage: error instanceof Error ? error.message : String(error),
         payer: p.from,
       };
+    }
+
+    const operatorAddr = this.operator.address;
+    if (channelConfig.operator !== operatorAddr) {
+      return { isValid: false, invalidReason: "facilitator_mismatch", payer: p.from };
     }
     if (p.authorizedSigner !== operatorAddr) {
       return {
@@ -180,9 +183,18 @@ export class UptoSvmScheme implements SchemeNetworkFacilitator {
         operator: operatorAddr,
         maxCap: maxAmount,
         mint: requirements.asset,
-        payee: requirements.payTo,
+        payee: operatorAddr,
         programId: requirements.extra?.channelProgram as string | undefined,
+        recipients: channelConfig.splits,
       });
+      if (open.channelId !== p.channelId) {
+        return {
+          isValid: false,
+          invalidReason: "invalid_upto_svm_payload_channel_id",
+          invalidMessage: `open channel ${open.channelId} != payload.channelId ${p.channelId}`,
+          payer: p.from,
+        };
+      }
       // Bind the channel payer to `payload.from`: settlement builds the
       // distribute (refund) instruction from `p.from`, so a mismatch with the
       // open transaction's payer would make settlement fail on-chain.
@@ -292,6 +304,7 @@ export class UptoSvmScheme implements SchemeNetworkFacilitator {
       const tokenProgram =
         (requirements.extra?.tokenProgram as string | undefined) ??
         getStablecoinTokenProgram(requirements.asset, requirements.network);
+      const channelConfig = resolveUptoSvmPaymentChannelConfig(requirements);
 
       const settle = buildSettleAndFinalizeInstructions({
         channelId: p.channelId,
@@ -315,11 +328,11 @@ export class UptoSvmScheme implements SchemeNetworkFacilitator {
       const distribute = await buildDistributeInstruction({
         channelId: p.channelId,
         mint: requirements.asset,
-        payee: requirements.payTo,
+        payee: channelConfig.operator,
         payer: p.from,
         rentPayer: this.operator.address,
         programId,
-        splits: [],
+        splits: channelConfig.splits,
         tokenProgram,
       });
 

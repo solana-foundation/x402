@@ -30,7 +30,11 @@ import {
 } from "@solana/kit";
 import { findAssociatedTokenPda } from "@solana-program/token-2022";
 
-import { getOpenInstruction, OPEN_DISCRIMINATOR } from "./generated/instructions/open";
+import {
+  getOpenInstruction,
+  getOpenInstructionDataDecoder,
+  OPEN_DISCRIMINATOR,
+} from "./generated/instructions/open";
 import { findEventAuthorityPda } from "./generated/pdas/eventAuthority";
 import { COMPUTE_BUDGET_PROGRAM_ADDRESS } from "../constants";
 import { ASSOCIATED_TOKEN_PROGRAM_ID, PAYMENT_CHANNELS_PROGRAM_ID } from "./onchain";
@@ -52,7 +56,7 @@ export interface ChannelSplit {
 export interface BuildOpenArgs {
   /** Payer (client) signer. Signs the open; pays the deposit. */
   payer: TransactionSigner;
-  /** Channel recipient (payTo). */
+  /** Channel payee. For delegated `upto`, this is the operator/facilitator. */
   payee: string;
   /** SPL mint. */
   mint: string;
@@ -236,6 +240,8 @@ export interface VerifyOpenExpected {
   payee: string;
   /** Optional payment-channels program id override. */
   programId?: string | undefined;
+  /** Expected distribution splits sealed into the channel. */
+  recipients?: readonly ChannelSplit[] | undefined;
 }
 
 /** Channel facts extracted from a verified open transaction. */
@@ -244,6 +250,7 @@ export interface VerifyOpenResult {
   payer: string;
   deposit: bigint;
   gracePeriod: number;
+  recipients: readonly ChannelSplit[];
   salt: bigint;
 }
 
@@ -356,20 +363,37 @@ export async function verifyOpenTransaction(
     );
   }
 
-  // ix data: [discriminator u8][salt u64][deposit u64][grace u32][recipients...]
-  if (openIx.data.length < 1 + 8 + 8 + 4) {
-    throw new Error("verifyOpenTransaction: open instruction data too short");
-  }
-  const view = new DataView(openIx.data.buffer, openIx.data.byteOffset, openIx.data.byteLength);
-  const salt = view.getBigUint64(1, true);
-  const deposit = view.getBigUint64(9, true);
-  const gracePeriod = view.getUint32(17, true);
+  const openData = getOpenInstructionDataDecoder().decode(openIx.data);
+  const { deposit, gracePeriod, recipients, salt } = openData.openArgs;
 
   if (deposit === 0n) throw new Error("verifyOpenTransaction: deposit must be greater than zero");
   if (deposit !== expected.maxCap) {
     throw new Error(
       `verifyOpenTransaction: deposit ${deposit} != maxCap ${expected.maxCap} — the deposit is the enforced ceiling and \`topUp\` can raise an open channel's deposit, so it must equal the authorized amount exactly`,
     );
+  }
+  const expectedRecipients = expected.recipients ?? [];
+  if (recipients.length !== expectedRecipients.length) {
+    throw new Error(
+      `verifyOpenTransaction: expected ${expectedRecipients.length} distribution recipients, found ${recipients.length}`,
+    );
+  }
+  for (let i = 0; i < expectedRecipients.length; i += 1) {
+    const expectedRecipient = expectedRecipients[i];
+    const actualRecipient = recipients[i];
+    if (!expectedRecipient || !actualRecipient) {
+      throw new Error(`verifyOpenTransaction: missing distribution recipient at index ${i}`);
+    }
+    if (actualRecipient.recipient !== expectedRecipient.recipient) {
+      throw new Error(
+        `verifyOpenTransaction: distribution recipient ${actualRecipient.recipient} != expected ${expectedRecipient.recipient} at index ${i}`,
+      );
+    }
+    if (actualRecipient.bps !== expectedRecipient.bps) {
+      throw new Error(
+        `verifyOpenTransaction: distribution bps ${actualRecipient.bps} != expected ${expectedRecipient.bps} at index ${i}`,
+      );
+    }
   }
 
   const derivedChannel = await findPaymentChannelPda({
@@ -386,7 +410,17 @@ export async function verifyOpenTransaction(
     );
   }
 
-  return { channelId: channelAddr, deposit, gracePeriod, payer: payerAddr, salt };
+  return {
+    channelId: channelAddr,
+    deposit,
+    gracePeriod,
+    payer: payerAddr,
+    recipients: recipients.map(recipient => ({
+      bps: recipient.bps,
+      recipient: recipient.recipient,
+    })),
+    salt,
+  };
 }
 
 /**

@@ -5,14 +5,15 @@ import type { PaymentPayload, PaymentRequirements, SchemeNetworkClient } from "@
 
 import { buildOpenPaymentChannelTransaction } from "../../payment-channels/open";
 import type { ClientSvmConfig, ClientSvmSigner } from "../../signer";
-import { type UptoSvmPayloadV2, UPTO_PROFILE_PAYMENT_CHANNEL } from "../../types";
+import { type UptoSvmPayloadV2 } from "../../types";
 import { createRpcClient, resolveBlockhash } from "../../utils";
+import { resolveUptoSvmPaymentChannelConfig } from "../shared";
 
 /**
  * SVM client implementation for the `upto` payment scheme (payment-channel profile).
  *
  * Builds the channel `open` transaction whose `deposit` is the authorized ceiling,
- * with the operator (`extra.facilitatorAddress`) as both the channel authorized
+ * with the operator (`extra.facilitatorAddress ?? payTo`) as both the channel authorized
  * signer and the transaction fee payer. The client signs only the open; the
  * facilitator broadcasts it and later settles the metered amount with a voucher.
  */
@@ -42,12 +43,7 @@ export class UptoSvmScheme implements SchemeNetworkClient {
     x402Version: number,
     paymentRequirements: PaymentRequirements,
   ): Promise<Pick<PaymentPayload, "x402Version" | "payload">> {
-    const operator = paymentRequirements.extra?.facilitatorAddress as string | undefined;
-    if (!operator) {
-      throw new Error(
-        "facilitatorAddress is required in paymentRequirements.extra for the upto scheme",
-      );
-    }
+    const channelConfig = resolveUptoSvmPaymentChannelConfig(paymentRequirements);
 
     const rpc = createRpcClient(paymentRequirements.network, this.config?.rpcUrl);
 
@@ -75,10 +71,11 @@ export class UptoSvmScheme implements SchemeNetworkClient {
       },
       deposit: maxAmount,
       mint: paymentRequirements.asset,
-      operator,
-      payee: paymentRequirements.payTo,
+      operator: channelConfig.operator,
+      payee: channelConfig.operator,
       payer: this.signer,
       programId: paymentRequirements.extra?.channelProgram as string | undefined,
+      recipients: channelConfig.splits,
       tokenProgram,
     });
 
@@ -87,15 +84,14 @@ export class UptoSvmScheme implements SchemeNetworkClient {
     const expiresAt = now + paymentRequirements.maxTimeoutSeconds;
 
     const payload: UptoSvmPayloadV2 = {
-      authorizedSigner: operator,
+      authorizedSigner: channelConfig.operator,
       channelId: open.channelId,
       deposit: maxAmount.toString(),
       expiresAt,
       from: this.signer.address,
       maxAmount: maxAmount.toString(),
-      nonce: crypto.randomUUID(),
+      nonce: open.salt.toString(),
       openTransaction: open.transaction,
-      profile: UPTO_PROFILE_PAYMENT_CHANNEL,
       validAfter,
     };
 

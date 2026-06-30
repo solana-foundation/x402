@@ -35,7 +35,7 @@ export type {
 
 // Export payload types
 export type { ExactSvmPayloadV1, ExactSvmPayloadV2, UptoSvmPayloadV2 } from "./types";
-export { isUptoSvmPayload, UPTO_PROFILE_PAYMENT_CHANNEL } from "./types";
+export { isUptoSvmPayload, UPTO_ASSET_TRANSFER_METHOD } from "./types";
 
 // Export settlement cache (shared across V1/V2 facilitator instances)
 export { SettlementCache } from "./settlement-cache";

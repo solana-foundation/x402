@@ -14,11 +14,11 @@ export type ExactSvmPayloadV1 = {
 export type ExactSvmPayloadV2 = ExactSvmPayloadV1;
 
 /**
- * The settlement profile the `upto` SVM scheme uses. Only `payment-channel`
- * (the normative v1 backend) ships today; the `permit` profile is deferred.
+ * The asset transfer method the `upto` SVM scheme uses. Only `payment-channel`
+ * (the normative v1 backend) ships today.
  * See `specs/schemes/upto/scheme_upto_svm.md`.
  */
-export const UPTO_PROFILE_PAYMENT_CHANNEL = "payment-channel";
+export const UPTO_ASSET_TRANSFER_METHOD = "payment-channel";
 
 /**
  * Client authorization for the `upto` SVM scheme, `payment-channel` profile.
@@ -31,8 +31,6 @@ export const UPTO_PROFILE_PAYMENT_CHANNEL = "payment-channel";
  * `UptoPayload`; the channel fields are the SVM specialization.
  */
 export type UptoSvmPayloadV2 = {
-  /** Settlement profile (`payment-channel` in v1). */
-  profile: typeof UPTO_PROFILE_PAYMENT_CHANNEL;
   /** Payer wallet (base58). */
   from: string;
   /** Signed ceiling (base units). MUST equal verification-phase `amount`. */
@@ -61,7 +59,6 @@ export type UptoSvmPayloadV2 = {
  */
 export function isUptoSvmPayload(payload: Record<string, unknown>): payload is UptoSvmPayloadV2 {
   return (
-    payload.profile === UPTO_PROFILE_PAYMENT_CHANNEL &&
     typeof payload.from === "string" &&
     typeof payload.maxAmount === "string" &&
     typeof payload.deposit === "string" &&

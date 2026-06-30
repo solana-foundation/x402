@@ -20,12 +20,10 @@ const PRICE_STABLECOINS = new Set(["USDC", "USDT", "USDG", "PYUSD", "CASH"]);
  * SVM server implementation for the `upto` payment scheme.
  *
  * Price parsing matches the exact scheme (stablecoin → 6-decimal atomic units);
- * `enhancePaymentRequirements` folds the facilitator's `getExtra` (the
- * operator `facilitatorAddress` / `assetTransferMethod`, plus optional
- * `channelProgram`) into
- * the requirement so the client can build the channel open. The `amount` is
- * phase-dependent: the authorized maximum at verification, the actual charge
- * at settlement.
+ * `enhancePaymentRequirements` folds the facilitator's `getExtra` (the operator
+ * `facilitatorAddress`, optional `facilitatorFee`, and `channelProgram`) into the
+ * requirement so the client can build the channel open. The `amount` is phase-dependent:
+ * the authorized maximum at verification, the actual charge at settlement.
  */
 export class UptoSvmScheme implements SchemeNetworkServer {
   readonly scheme = "upto";
@@ -77,7 +75,7 @@ export class UptoSvmScheme implements SchemeNetworkServer {
 
   /**
    * Fold the facilitator's `getExtra` payload (operator address, fee payer,
-   * optional program id) into the requirement so the client can build the
+   * optional fee/program id) into the requirement so the client can build the
    * channel open against this facilitator.
    *
    * @param paymentRequirements - The base payment requirements
@@ -85,7 +83,7 @@ export class UptoSvmScheme implements SchemeNetworkServer {
    * @param supportedKind.x402Version - The x402 version
    * @param supportedKind.scheme - The payment scheme
    * @param supportedKind.network - The network identifier
-   * @param supportedKind.extra - Facilitator extra (facilitatorAddress / assetTransferMethod / channelProgram)
+   * @param supportedKind.extra - Facilitator extra (facilitatorAddress / facilitatorFee / channelProgram)
    * @param extensionKeys - Extension keys supported by the facilitator (unused)
    * @returns Enhanced payment requirements
    */

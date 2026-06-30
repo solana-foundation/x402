@@ -15,12 +15,13 @@ import {
   verifyOpenTransaction,
 } from "../../src/payment-channels/open";
 import { encodeVoucherMessageBytes } from "../../src/payment-channels/voucher";
+import { UptoSvmScheme as UptoClientScheme } from "../../src/upto/client/scheme";
 import { UptoSvmScheme as UptoServerScheme } from "../../src/upto/server/scheme";
 import {
   ERR_SETTLEMENT_EXCEEDS_AMOUNT,
   UptoSvmScheme as UptoFacilitatorScheme,
 } from "../../src/upto/facilitator/scheme";
-import { UPTO_PROFILE_PAYMENT_CHANNEL, type UptoSvmPayloadV2 } from "../../src/types";
+import { UPTO_ASSET_TRANSFER_METHOD, type UptoSvmPayloadV2 } from "../../src/types";
 
 // A valid 32-byte base58 pubkey reused as a deterministic blockhash in tests.
 const DUMMY_BLOCKHASH = USDC_MAINNET_ADDRESS;
@@ -72,14 +73,19 @@ describe("upto SVM scheme", () => {
           x402Version: 2,
           scheme: "upto",
           network: SOLANA_DEVNET_CAIP2,
-          extra: { facilitatorAddress: "Op111", assetTransferMethod: "payment-channel" },
+          extra: {
+            assetTransferMethod: UPTO_ASSET_TRANSFER_METHOD,
+            facilitatorAddress: "Op111",
+            facilitatorFee: 25,
+          },
         },
         [],
       );
       expect(result.extra).toEqual({
+        assetTransferMethod: UPTO_ASSET_TRANSFER_METHOD,
         custom: "value",
         facilitatorAddress: "Op111",
-        assetTransferMethod: "payment-channel",
+        facilitatorFee: 25,
       });
     });
   });
@@ -156,6 +162,58 @@ describe("upto SVM scheme", () => {
       expect(result.payer).toBe(payer.address);
     });
 
+    it("verifyOpenTransaction accepts a delegated facilitator split", async () => {
+      const payer = await generateKeyPairSigner();
+      const operator = await generateKeyPairSigner();
+      const split = { bps: 9_875, recipient: PAY_TO };
+      const open = await buildOpenPaymentChannelTransaction({
+        blockhash: { blockhash: DUMMY_BLOCKHASH, lastValidBlockHeight: 0n },
+        deposit: 1_000_000n,
+        mint: MINT,
+        operator: operator.address,
+        payee: operator.address,
+        payer,
+        recipients: [split],
+        tokenProgram: TOKEN_PROGRAM_ADDRESS,
+      });
+
+      const result = await verifyOpenTransaction(open.transaction, {
+        authorizedSigner: operator.address,
+        operator: operator.address,
+        maxCap: 1_000_000n,
+        mint: MINT,
+        payee: operator.address,
+        recipients: [split],
+      });
+      expect(result.recipients).toEqual([split]);
+    });
+
+    it("verifyOpenTransaction rejects a mismatched delegated split", async () => {
+      const payer = await generateKeyPairSigner();
+      const operator = await generateKeyPairSigner();
+      const open = await buildOpenPaymentChannelTransaction({
+        blockhash: { blockhash: DUMMY_BLOCKHASH, lastValidBlockHeight: 0n },
+        deposit: 1_000_000n,
+        mint: MINT,
+        operator: operator.address,
+        payee: operator.address,
+        payer,
+        recipients: [{ bps: 9_900, recipient: PAY_TO }],
+        tokenProgram: TOKEN_PROGRAM_ADDRESS,
+      });
+
+      await expect(
+        verifyOpenTransaction(open.transaction, {
+          authorizedSigner: operator.address,
+          operator: operator.address,
+          maxCap: 1_000_000n,
+          mint: MINT,
+          payee: operator.address,
+          recipients: [{ bps: 9_875, recipient: PAY_TO }],
+        }),
+      ).rejects.toThrow(/distribution bps/);
+    });
+
     it("verifyOpenTransaction rejects a deposit above the ceiling", async () => {
       const payer = await generateKeyPairSigner();
       const operator = await generateKeyPairSigner();
@@ -226,6 +284,45 @@ describe("upto SVM scheme", () => {
     });
   });
 
+  describe("client.createPaymentPayload", () => {
+    it("builds a delegated open with the payTo split and decimal salt nonce", async () => {
+      const payer = await generateKeyPairSigner();
+      const operator = await generateKeyPairSigner();
+      const client = new UptoClientScheme(payer);
+      const requirements: PaymentRequirements = {
+        scheme: "upto",
+        network: SOLANA_DEVNET_CAIP2,
+        asset: MINT,
+        amount: "1000000",
+        payTo: PAY_TO,
+        maxTimeoutSeconds: 300,
+        extra: {
+          assetTransferMethod: UPTO_ASSET_TRANSFER_METHOD,
+          facilitatorAddress: operator.address,
+          facilitatorFee: 125,
+          recentBlockhash: DUMMY_BLOCKHASH,
+          tokenProgram: TOKEN_PROGRAM_ADDRESS,
+        },
+      };
+
+      const result = await client.createPaymentPayload(2, requirements);
+      const payload = result.payload as unknown as UptoSvmPayloadV2;
+      const open = await verifyOpenTransaction(payload.openTransaction, {
+        authorizedSigner: operator.address,
+        operator: operator.address,
+        maxCap: 1_000_000n,
+        mint: MINT,
+        payee: operator.address,
+        recipients: [{ bps: 9_875, recipient: PAY_TO }],
+      });
+
+      expect(payload.authorizedSigner).toBe(operator.address);
+      expect(payload.channelId).toBe(open.channelId);
+      expect(payload.nonce).toBe(open.salt.toString());
+      expect(payload).not.toHaveProperty("profile");
+    });
+  });
+
   describe("facilitator verify (pre-broadcast rejections)", () => {
     let operatorAddress: string;
     let facilitator: UptoFacilitatorScheme;
@@ -254,7 +351,6 @@ describe("upto SVM scheme", () => {
         maxAmount: "1000000",
         nonce: "n-1",
         openTransaction: open.transaction,
-        profile: UPTO_PROFILE_PAYMENT_CHANNEL,
         validAfter: 0,
       };
     });
@@ -266,7 +362,11 @@ describe("upto SVM scheme", () => {
       amount: "1000000",
       payTo: operatorAddress,
       maxTimeoutSeconds: 300,
-      extra: { facilitatorAddress: operatorAddress },
+      extra: {
+        assetTransferMethod: UPTO_ASSET_TRANSFER_METHOD,
+        facilitatorAddress: operatorAddress,
+        facilitatorFee: 0,
+      },
       ...overrides,
     });
 
@@ -297,11 +397,44 @@ describe("upto SVM scheme", () => {
 
     it("rejects a facilitator-address mismatch", async () => {
       const req = requirements({
-        extra: { facilitatorAddress: "OtherOperator11111111111111111111111111" },
+        extra: {
+          assetTransferMethod: UPTO_ASSET_TRANSFER_METHOD,
+          facilitatorAddress: "OtherOperator11111111111111111111111111",
+          facilitatorFee: 0,
+        },
       });
       const result = await facilitator.verify(wrap(basePayload, req), req);
       expect(result.isValid).toBe(false);
       expect(result.invalidReason).toBe("facilitator_mismatch");
+    });
+
+    it("rejects a missing payment-channel assetTransferMethod", async () => {
+      const req = requirements({ extra: { facilitatorAddress: operatorAddress } });
+      const result = await facilitator.verify(wrap(basePayload, req), req);
+      expect(result.isValid).toBe(false);
+      expect(result.invalidReason).toBe("invalid_upto_svm_payment_requirements");
+    });
+
+    it("rejects a non-integer facilitator fee", async () => {
+      const req = requirements({
+        extra: {
+          assetTransferMethod: UPTO_ASSET_TRANSFER_METHOD,
+          facilitatorAddress: operatorAddress,
+          facilitatorFee: 12.5,
+        },
+      });
+      const result = await facilitator.verify(wrap(basePayload, req), req);
+      expect(result.isValid).toBe(false);
+      expect(result.invalidReason).toBe("invalid_upto_svm_payment_requirements");
+    });
+
+    it("rejects a nonzero facilitator fee without facilitatorAddress", async () => {
+      const req = requirements({
+        extra: { assetTransferMethod: UPTO_ASSET_TRANSFER_METHOD, facilitatorFee: 100 },
+      });
+      const result = await facilitator.verify(wrap(basePayload, req), req);
+      expect(result.isValid).toBe(false);
+      expect(result.invalidReason).toBe("invalid_upto_svm_payment_requirements");
     });
 
     it("rejects maxAmount ≠ requirements.amount", async () => {
@@ -327,13 +460,23 @@ describe("upto SVM scheme", () => {
       expect(result.invalidReason).toBe("invalid_upto_svm_payload_deposit_not_ceiling");
     });
 
-    it("rejects a recipient that is not the operator (self-facilitating only)", async () => {
+    it("rejects delegated requirements when the open omits the payTo split", async () => {
       const result = await facilitator.verify(
         wrap(basePayload, requirements()),
         requirements({ payTo: PAY_TO }),
       );
       expect(result.isValid).toBe(false);
-      expect(result.invalidReason).toBe("invalid_upto_svm_payload_recipient_not_operator");
+      expect(result.invalidReason).toBe("invalid_upto_svm_payload_open_transaction");
+      expect(result.invalidMessage).toMatch(/distribution recipients/);
+    });
+
+    it("rejects a payload channelId that does not match the open transaction", async () => {
+      const result = await facilitator.verify(
+        wrap({ ...basePayload, channelId: PAY_TO }, requirements()),
+        requirements(),
+      );
+      expect(result.isValid).toBe(false);
+      expect(result.invalidReason).toBe("invalid_upto_svm_payload_channel_id");
     });
 
     it("rejects an expired authorization", async () => {
@@ -391,7 +534,6 @@ describe("upto SVM scheme", () => {
         maxAmount: "1000000",
         nonce: "n-1",
         openTransaction: open.transaction,
-        profile: UPTO_PROFILE_PAYMENT_CHANNEL,
         validAfter: 0,
       };
       const requirements: PaymentRequirements = {
@@ -401,7 +543,11 @@ describe("upto SVM scheme", () => {
         amount: "1000001", // one over the ceiling
         payTo: PAY_TO,
         maxTimeoutSeconds: 300,
-        extra: { facilitatorAddress: operator.address },
+        extra: {
+          assetTransferMethod: UPTO_ASSET_TRANSFER_METHOD,
+          facilitatorAddress: operator.address,
+          facilitatorFee: 0,
+        },
       };
 
       const result = await facilitator.settle(

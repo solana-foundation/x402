@@ -11,6 +11,8 @@ export interface UptoSvmFacilitatorRegisterConfig {
   networks: Network | Network[];
   /** Optional custom RPC URL. */
   rpcUrl?: string;
+  /** Optional facilitator fee in basis points. */
+  facilitatorFee?: number;
 }
 
 /**
@@ -26,7 +28,10 @@ export function registerUptoSvmScheme(
 ): x402Facilitator {
   facilitator.register(
     config.networks,
-    new UptoSvmScheme(config.operator, config.rpcUrl ? { rpcUrl: config.rpcUrl } : undefined),
+    new UptoSvmScheme(config.operator, {
+      ...(config.rpcUrl ? { rpcUrl: config.rpcUrl } : {}),
+      ...(config.facilitatorFee !== undefined ? { facilitatorFee: config.facilitatorFee } : {}),
+    }),
   );
   return facilitator;
 }
