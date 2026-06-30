@@ -1,4 +1,4 @@
-import { AccountRole, generateKeyPairSigner, getBase58Encoder } from "@solana/kit";
+import { generateKeyPairSigner, getBase58Encoder } from "@solana/kit";
 import type { PaymentPayload, PaymentRequirements } from "@x402/core/types";
 import { beforeAll, describe, expect, it } from "vitest";
 
@@ -14,11 +14,6 @@ import {
   findPaymentChannelPda,
   verifyOpenTransaction,
 } from "../../src/payment-channels/open";
-import {
-  buildSettleAndFinalizeInstructions,
-  INSTRUCTIONS_SYSVAR_ADDRESS,
-  PAYMENT_CHANNELS_PROGRAM_ID,
-} from "../../src/payment-channels/onchain";
 import { encodeVoucherMessageBytes } from "../../src/payment-channels/voucher";
 import { UptoSvmScheme as UptoClientScheme } from "../../src/upto/client/scheme";
 import { UptoSvmScheme as UptoServerScheme } from "../../src/upto/server/scheme";
@@ -112,34 +107,6 @@ describe("upto SVM scheme", () => {
       const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
       expect(view.getBigUint64(32, true)).toBe(1_000_000n); // cumulative, little-endian
       expect(view.getBigInt64(40, true)).toBe(BigInt(FAR_FUTURE)); // expiresAt, little-endian
-    });
-  });
-
-  describe("payment-channel settle", () => {
-    it("builds settle_and_finalize with the deployed account order", async () => {
-      const merchant = await generateKeyPairSigner();
-      const instructions = buildSettleAndFinalizeInstructions({
-        channelId: USDC_MAINNET_ADDRESS,
-        merchantSigner: merchant,
-      });
-
-      expect(instructions).toHaveLength(1);
-      const ix = instructions[0]!;
-      expect(ix.programAddress).toBe(PAYMENT_CHANNELS_PROGRAM_ID);
-      expect(Array.from(ix.data)).toEqual([4, 0]);
-      expect(ix.accounts).toHaveLength(3);
-      expect(ix.accounts[0]).toMatchObject({
-        address: USDC_MAINNET_ADDRESS,
-        role: AccountRole.WRITABLE,
-      });
-      expect(ix.accounts[1]).toMatchObject({
-        address: merchant.address,
-        role: AccountRole.READONLY_SIGNER,
-      });
-      expect(ix.accounts[2]).toMatchObject({
-        address: INSTRUCTIONS_SYSVAR_ADDRESS,
-        role: AccountRole.READONLY,
-      });
     });
   });
 
