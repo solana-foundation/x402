@@ -22,6 +22,7 @@ import {
 import { findAssociatedTokenPda } from "@solana-program/token-2022";
 
 import { getDistributeInstruction } from "./generated/instructions/distribute";
+import { getSettleInstruction } from "./generated/instructions/settle";
 import { getSettleAndFinalizeInstruction } from "./generated/instructions/settleAndFinalize";
 import { findEventAuthorityPda } from "./generated/pdas/eventAuthority";
 import { encodeVoucherMessageBytes } from "./voucher";
@@ -212,6 +213,62 @@ export function buildSettleAndFinalizeInstructions(
   instructions.push(ix as unknown as ServerInstruction);
 
   return instructions;
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// settle (watermark-only, batched redemption)
+// ─────────────────────────────────────────────────────────────────────
+
+/** Arguments to {@link buildSettleInstructions}. */
+export interface SettleBuildArgs {
+  /** Payment-channel address being settled (base58). */
+  channelId: string;
+  /** The cumulative voucher to redeem (signed by the channel's authorized signer). */
+  voucher: SettleVoucher;
+  /** Payment-channels program id override. */
+  programId?: Address | undefined;
+}
+
+/**
+ * Build the instruction pair for an on-chain `settle`: an Ed25519 precompile
+ * verifying the voucher, followed by the `settle` instruction that advances the
+ * channel's `settled` watermark to the voucher's cumulative amount. Unlike
+ * {@link buildSettleAndFinalizeInstructions}, this neither finalizes the channel
+ * nor moves tokens — it is the batched redemption step. `settle` is
+ * permissionless; the precompile signature is the authority, so the operator
+ * only fee-pays.
+ *
+ * @param args - Build inputs
+ * @returns `[ed25519_verify, settle]` in submit order
+ */
+export function buildSettleInstructions(args: SettleBuildArgs): ServerInstruction[] {
+  const programId = args.programId ?? PAYMENT_CHANNELS_PROGRAM_ID;
+  const channel = address(args.channelId);
+
+  const signerBytes = getBase58Bytes(args.voucher.authorizedSigner);
+  if (signerBytes.byteLength !== 32) {
+    throw new Error(`authorizedSigner must decode to 32 bytes; got ${signerBytes.byteLength}`);
+  }
+  const signatureBytes = getBase58Bytes(args.voucher.signatureBase58);
+  if (signatureBytes.byteLength !== 64) {
+    throw new Error(`voucher signature must decode to 64 bytes; got ${signatureBytes.byteLength}`);
+  }
+  const message = encodeVoucherMessageBytes({
+    channelId: args.channelId,
+    cumulativeAmount: args.voucher.cumulativeAmount,
+    expiresAt: args.voucher.expiresAt,
+  });
+
+  const verify = buildEd25519VerifyInstruction({
+    message,
+    signature: signatureBytes,
+    signer: signerBytes,
+  });
+  const settle = getSettleInstruction(
+    { channel, instructionsSysvar: INSTRUCTIONS_SYSVAR_ADDRESS },
+    { programAddress: programId },
+  );
+  return [verify, settle as unknown as ServerInstruction];
 }
 
 // ─────────────────────────────────────────────────────────────────────

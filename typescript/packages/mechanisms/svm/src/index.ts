@@ -8,6 +8,7 @@
 export { ExactSvmScheme } from "./exact";
 export type { ExactSvmSchemeOptions } from "./exact/facilitator/scheme";
 export { UptoSvmScheme } from "./upto";
+export { BatchSvmScheme } from "./batch-settlement";
 
 // Export smart wallet verification helpers
 export {
@@ -36,6 +37,26 @@ export type {
 // Export payload types
 export type { ExactSvmPayloadV1, ExactSvmPayloadV2, UptoSvmPayloadV2 } from "./types";
 export { isUptoSvmPayload, UPTO_ASSET_TRANSFER_METHOD } from "./types";
+
+// Export batch-settlement wire types
+export type {
+  BatchExtra,
+  BatchSplit,
+  BatchVoucher,
+  BatchChannelConfig,
+  BatchPayload,
+  BatchDepositPayload,
+  BatchVoucherPayload,
+  BatchRefundPayload,
+  BatchChannelSnapshot,
+  BatchChannelStatus,
+} from "./batch-settlement/types";
+export {
+  BATCH_SETTLEMENT_SCHEME,
+  BATCH_PROFILE_PAYMENT_CHANNEL,
+  isBatchPayload,
+  isBatchVoucher,
+} from "./batch-settlement/types";
 
 // Export settlement cache (shared across V1/V2 facilitator instances)
 export { SettlementCache } from "./settlement-cache";
