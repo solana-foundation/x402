@@ -3,7 +3,7 @@
  *
  * Ported from pay-kit `@solana/mpp` (src/server/session/on-chain.ts), scoped to
  * what the `upto` payment-channel scheme needs: the Ed25519 verify precompile,
- * settle_and_finalize (with optional voucher), and distribute. The multi-delegator
+ * settle_and_seal (with optional voucher), and distribute. The multi-delegator
  * and session-store helpers from the source are intentionally omitted.
  */
 
@@ -22,7 +22,7 @@ import {
 import { findAssociatedTokenPda } from "@solana-program/token-2022";
 
 import { getDistributeInstruction } from "./generated/instructions/distribute";
-import { getSettleAndFinalizeInstruction } from "./generated/instructions/settleAndFinalize";
+import { getSettleAndSealInstruction } from "./generated/instructions/settleAndSeal";
 import { findEventAuthorityPda } from "./generated/pdas/eventAuthority";
 import { encodeVoucherMessageBytes } from "./voucher";
 
@@ -71,12 +71,12 @@ const U16_LE = (n: number) => new Uint8Array([n & 0xff, (n >> 8) & 0xff]);
 // ─────────────────────────────────────────────────────────────────────
 
 /**
- * Build an Ed25519 verify precompile instruction over the 48-byte voucher
+ * Build an Ed25519 verify precompile instruction over the 50-byte voucher
  * message. Layout matches `build_ed25519_verify_instruction` in the Rust
  * payment-channels program helpers.
  *
  * @param args - Precompile inputs
- * @param args.message - The canonical voucher payload (48 bytes)
+ * @param args.message - The canonical voucher payload (50 bytes, magic-prefixed)
  * @param args.signature - 64-byte Ed25519 signature
  * @param args.signer - 32-byte verifying key
  * @returns The precompile instruction
@@ -125,7 +125,7 @@ export function buildEd25519VerifyInstruction(args: {
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// settle_and_finalize
+// settle_and_seal
 // ─────────────────────────────────────────────────────────────────────
 
 /** A voucher to settle: the operator-signed cumulative amount for a channel. */
@@ -140,12 +140,12 @@ export interface SettleVoucher {
   expiresAt: bigint;
 }
 
-/** Arguments to {@link buildSettleAndFinalizeInstructions}. */
-export interface SettleAndFinalizeBuildArgs {
+/** Arguments to {@link buildSettleAndSealInstructions}. */
+export interface SettleAndSealBuildArgs {
   /** Payment-channel address being settled (base58). */
   channelId: string;
-  /** Merchant signer authorized to settle the channel (the operator). */
-  merchantSigner: TransactionSigner;
+  /** Payee signer authorized to settle the channel (the operator). */
+  payeeSigner: TransactionSigner;
   /** Payment-channels program id override. */
   programId?: Address | undefined;
   /** Optional final voucher. When present, an Ed25519 precompile IX is prepended. */
@@ -153,18 +153,16 @@ export interface SettleAndFinalizeBuildArgs {
 }
 
 /**
- * Build the instruction(s) for an on-chain settle_and_finalize. If a voucher
+ * Build the instruction(s) for an on-chain settle_and_seal. If a voucher
  * is provided, an Ed25519 precompile IX is prepended at index 0 — the
- * settle_and_finalize IX references the instructions sysvar at index `-1`
+ * settle_and_seal IX references the instructions sysvar at index `-1`
  * (the precompile immediately before it). With no voucher, the channel is
- * finalized with a zero settlement (full refund).
+ * sealed with a zero settlement (full refund).
  *
  * @param args - Build inputs
  * @returns Instructions in submit order (precompile first when a voucher is settled)
  */
-export function buildSettleAndFinalizeInstructions(
-  args: SettleAndFinalizeBuildArgs,
-): ServerInstruction[] {
+export function buildSettleAndSealInstructions(args: SettleAndSealBuildArgs): ServerInstruction[] {
   const programId = args.programId ?? PAYMENT_CHANNELS_PROGRAM_ID;
   const channel = address(args.channelId);
   const instructions: ServerInstruction[] = [];
@@ -198,14 +196,14 @@ export function buildSettleAndFinalizeInstructions(
     );
   }
 
-  const ix = getSettleAndFinalizeInstruction(
+  const ix = getSettleAndSealInstruction(
     {
       channel,
       instructionsSysvar: INSTRUCTIONS_SYSVAR_ADDRESS,
-      merchant: args.merchantSigner,
+      payee: args.payeeSigner,
       // The program reads the voucher from the ed25519 precompile; the
-      // settle_and_finalize args carry only the hasVoucher flag.
-      settleAndFinalizeArgs: { hasVoucher },
+      // settle_and_seal args carry only the hasVoucher flag.
+      settleAndSealArgs: { hasVoucher },
     },
     { programAddress: programId },
   );

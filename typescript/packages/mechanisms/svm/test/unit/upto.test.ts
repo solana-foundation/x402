@@ -14,7 +14,7 @@ import {
   findPaymentChannelPda,
   verifyOpenTransaction,
 } from "../../src/payment-channels/open";
-import { encodeVoucherMessageBytes } from "../../src/payment-channels/voucher";
+import { encodeVoucherMessageBytes, VOUCHER_MAGIC } from "../../src/payment-channels/voucher";
 import { UptoSvmScheme as UptoClientScheme } from "../../src/upto/client/scheme";
 import { UptoSvmScheme as UptoServerScheme } from "../../src/upto/server/scheme";
 import {
@@ -28,6 +28,8 @@ const DUMMY_BLOCKHASH = USDC_MAINNET_ADDRESS;
 const PAY_TO = USDC_MAINNET_ADDRESS; // any valid base58 pubkey works as the recipient
 const MINT = USDC_DEVNET_ADDRESS;
 const FAR_FUTURE = 4_102_444_800; // 2100-01-01
+// Challenge-bound open slot (`extra.recentSlot`), a channel-PDA seed.
+const OPEN_SLOT = 123_456_789n;
 
 describe("upto SVM scheme", () => {
   describe("server.parsePrice", () => {
@@ -91,22 +93,26 @@ describe("upto SVM scheme", () => {
   });
 
   describe("voucher encoding (cross-language golden)", () => {
-    it("encodes channelId ‖ cumulative_le ‖ expiresAt_le into 48 bytes", () => {
+    it("encodes magic ‖ channelId ‖ cumulative_le ‖ expiresAt_le into 50 bytes", () => {
       const channelId = USDC_MAINNET_ADDRESS;
       const bytes = encodeVoucherMessageBytes({
         channelId,
         cumulativeAmount: 1_000_000n,
         expiresAt: BigInt(FAR_FUTURE),
       });
-      expect(bytes.byteLength).toBe(48);
+      expect(bytes.byteLength).toBe(50);
 
-      // bytes[0..32] == base58-decoded channelId
+      // bytes[0..2] == constant magic [0x56, 0x01]
+      expect(Array.from(bytes.slice(0, 2))).toEqual([...VOUCHER_MAGIC]);
+      expect([...VOUCHER_MAGIC]).toEqual([0x56, 0x01]);
+
+      // bytes[2..34] == base58-decoded channelId
       const channelBytes = getBase58Encoder().encode(channelId) as Uint8Array;
-      expect(Array.from(bytes.slice(0, 32))).toEqual(Array.from(channelBytes));
+      expect(Array.from(bytes.slice(2, 34))).toEqual(Array.from(channelBytes));
 
       const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-      expect(view.getBigUint64(32, true)).toBe(1_000_000n); // cumulative, little-endian
-      expect(view.getBigInt64(40, true)).toBe(BigInt(FAR_FUTURE)); // expiresAt, little-endian
+      expect(view.getBigUint64(34, true)).toBe(1_000_000n); // cumulative, little-endian
+      expect(view.getBigInt64(42, true)).toBe(BigInt(FAR_FUTURE)); // expiresAt, little-endian
     });
   });
 
@@ -119,6 +125,7 @@ describe("upto SVM scheme", () => {
         blockhash: { blockhash: DUMMY_BLOCKHASH, lastValidBlockHeight: 0n },
         deposit: 1_000_000n,
         mint: MINT,
+        openSlot: OPEN_SLOT,
         operator: operator.address,
         payee: PAY_TO,
         payer,
@@ -129,12 +136,25 @@ describe("upto SVM scheme", () => {
       const derived = await findPaymentChannelPda({
         authorizedSigner: operator.address,
         mint: MINT,
+        openSlot: OPEN_SLOT,
         payee: PAY_TO,
         payer: payer.address,
         salt,
       });
       expect(open.channelId).toBe(derived);
       expect(open.deposit).toBe(1_000_000n);
+      expect(open.openSlot).toBe(OPEN_SLOT);
+
+      // open_slot is a PDA seed: a different slot yields a different channel.
+      const otherSlot = await findPaymentChannelPda({
+        authorizedSigner: operator.address,
+        mint: MINT,
+        openSlot: OPEN_SLOT + 1n,
+        payee: PAY_TO,
+        payer: payer.address,
+        salt,
+      });
+      expect(otherSlot).not.toBe(derived);
     });
 
     it("verifyOpenTransaction accepts a well-formed open and extracts facts", async () => {
@@ -144,6 +164,7 @@ describe("upto SVM scheme", () => {
         blockhash: { blockhash: DUMMY_BLOCKHASH, lastValidBlockHeight: 0n },
         deposit: 1_000_000n,
         mint: MINT,
+        openSlot: OPEN_SLOT,
         operator: operator.address,
         payee: PAY_TO,
         payer,
@@ -159,6 +180,7 @@ describe("upto SVM scheme", () => {
       });
       expect(result.channelId).toBe(open.channelId);
       expect(result.deposit).toBe(1_000_000n);
+      expect(result.openSlot).toBe(OPEN_SLOT);
       expect(result.payer).toBe(payer.address);
     });
 
@@ -170,6 +192,7 @@ describe("upto SVM scheme", () => {
         blockhash: { blockhash: DUMMY_BLOCKHASH, lastValidBlockHeight: 0n },
         deposit: 1_000_000n,
         mint: MINT,
+        openSlot: OPEN_SLOT,
         operator: operator.address,
         payee: operator.address,
         payer,
@@ -195,6 +218,7 @@ describe("upto SVM scheme", () => {
         blockhash: { blockhash: DUMMY_BLOCKHASH, lastValidBlockHeight: 0n },
         deposit: 1_000_000n,
         mint: MINT,
+        openSlot: OPEN_SLOT,
         operator: operator.address,
         payee: operator.address,
         payer,
@@ -221,6 +245,7 @@ describe("upto SVM scheme", () => {
         blockhash: { blockhash: DUMMY_BLOCKHASH, lastValidBlockHeight: 0n },
         deposit: 2_000_000n,
         mint: MINT,
+        openSlot: OPEN_SLOT,
         operator: operator.address,
         payee: PAY_TO,
         payer,
@@ -244,6 +269,7 @@ describe("upto SVM scheme", () => {
         blockhash: { blockhash: DUMMY_BLOCKHASH, lastValidBlockHeight: 0n },
         deposit: 500_000n,
         mint: MINT,
+        openSlot: OPEN_SLOT,
         operator: operator.address,
         payee: PAY_TO,
         payer,
@@ -267,6 +293,7 @@ describe("upto SVM scheme", () => {
         blockhash: { blockhash: DUMMY_BLOCKHASH, lastValidBlockHeight: 0n },
         deposit: 1_000_000n,
         mint: MINT,
+        openSlot: OPEN_SLOT,
         operator: operator.address,
         payee: PAY_TO,
         payer,
@@ -301,6 +328,7 @@ describe("upto SVM scheme", () => {
           facilitatorAddress: operator.address,
           facilitatorFee: 125,
           recentBlockhash: DUMMY_BLOCKHASH,
+          recentSlot: OPEN_SLOT.toString(),
           tokenProgram: TOKEN_PROGRAM_ADDRESS,
         },
       };
@@ -319,7 +347,33 @@ describe("upto SVM scheme", () => {
       expect(payload.authorizedSigner).toBe(operator.address);
       expect(payload.channelId).toBe(open.channelId);
       expect(payload.nonce).toBe(open.salt.toString());
+      expect(open.openSlot).toBe(OPEN_SLOT); // challenge slot, not a client-fetched one
       expect(payload).not.toHaveProperty("profile");
+    });
+
+    it("rejects a challenge without extra.recentSlot (never fetches its own slot)", async () => {
+      const payer = await generateKeyPairSigner();
+      const operator = await generateKeyPairSigner();
+      const client = new UptoClientScheme(payer);
+      const requirements: PaymentRequirements = {
+        scheme: "upto",
+        network: SOLANA_DEVNET_CAIP2,
+        asset: MINT,
+        amount: "1000000",
+        payTo: PAY_TO,
+        maxTimeoutSeconds: 300,
+        extra: {
+          assetTransferMethod: UPTO_ASSET_TRANSFER_METHOD,
+          facilitatorAddress: operator.address,
+          facilitatorFee: 125,
+          recentBlockhash: DUMMY_BLOCKHASH,
+          tokenProgram: TOKEN_PROGRAM_ADDRESS,
+        },
+      };
+
+      await expect(client.createPaymentPayload(2, requirements)).rejects.toThrow(
+        /extra\.recentSlot/,
+      );
     });
   });
 
@@ -337,6 +391,7 @@ describe("upto SVM scheme", () => {
         blockhash: { blockhash: DUMMY_BLOCKHASH, lastValidBlockHeight: 0n },
         deposit: 1_000_000n,
         mint: MINT,
+        openSlot: OPEN_SLOT,
         operator: operator.address,
         payee: operator.address,
         payer,
@@ -520,6 +575,7 @@ describe("upto SVM scheme", () => {
         blockhash: { blockhash: DUMMY_BLOCKHASH, lastValidBlockHeight: 0n },
         deposit: 1_000_000n,
         mint: MINT,
+        openSlot: OPEN_SLOT,
         operator: operator.address,
         payee: PAY_TO,
         payer,

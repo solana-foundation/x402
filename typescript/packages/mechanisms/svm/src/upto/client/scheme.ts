@@ -3,7 +3,7 @@ import { TOKEN_PROGRAM_ADDRESS } from "@solana-program/token";
 import { type Address } from "@solana/kit";
 import type { PaymentPayload, PaymentRequirements, SchemeNetworkClient } from "@x402/core/types";
 
-import { buildOpenPaymentChannelTransaction } from "../../payment-channels/open";
+import { buildOpenPaymentChannelTransaction, parseU64 } from "../../payment-channels/open";
 import type { ClientSvmConfig, ClientSvmSigner } from "../../signer";
 import { type UptoSvmPayloadV2 } from "../../types";
 import { createRpcClient, resolveBlockhash } from "../../utils";
@@ -63,6 +63,7 @@ export class UptoSvmScheme implements SchemeNetworkClient {
 
     const maxAmount = BigInt(paymentRequirements.amount);
     const latestBlockhash = await resolveBlockhash(rpc, paymentRequirements);
+    const openSlot = resolveRecentSlot(paymentRequirements);
 
     const open = await buildOpenPaymentChannelTransaction({
       blockhash: {
@@ -71,6 +72,7 @@ export class UptoSvmScheme implements SchemeNetworkClient {
       },
       deposit: maxAmount,
       mint: paymentRequirements.asset,
+      openSlot,
       operator: channelConfig.operator,
       payee: channelConfig.operator,
       payer: this.signer,
@@ -97,4 +99,26 @@ export class UptoSvmScheme implements SchemeNetworkClient {
 
     return { x402Version, payload };
   }
+}
+
+/**
+ * Read the challenge-bound open slot (`extra.recentSlot`) from the requirements.
+ *
+ * The slot is a channel-PDA seed (`open_slot`) and the program only accepts
+ * opens within 1500 slots of it, so it MUST come from the server's 402
+ * challenge — the client never substitutes one fetched from its own RPC.
+ * Accepts a base-10 string (canonical) or a safe number.
+ *
+ * @param requirements - The payment requirements (challenge) being paid
+ * @returns The open slot as a u64 bigint
+ */
+function resolveRecentSlot(requirements: PaymentRequirements): bigint {
+  const provided = requirements.extra?.recentSlot;
+  if (provided === undefined || provided === null) {
+    throw new Error(
+      "upto SVM requires `extra.recentSlot` in the 402 challenge (server-fetched current slot); " +
+        "the channel PDA is derived from it and the client must not use its own slot",
+    );
+  }
+  return parseU64(provided as bigint | number | string, "extra.recentSlot");
 }

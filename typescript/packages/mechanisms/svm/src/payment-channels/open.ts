@@ -68,6 +68,12 @@ export interface BuildOpenArgs {
   tokenProgram: string;
   /** Recent blockhash for the transaction lifetime. */
   blockhash: { blockhash: string; lastValidBlockHeight: bigint };
+  /**
+   * Slot the channel is opened at (`openArgs.openSlot`, also a channel PDA
+   * seed). Comes from the 402 challenge (`extra.recentSlot`, server-fetched);
+   * the program requires `openSlot <= clock.slot <= openSlot + 1500`.
+   */
+  openSlot: bigint;
   /** Optional channel-derivation salt; random when omitted. */
   salt?: bigint | undefined;
   /** Optional grace period (seconds). */
@@ -88,6 +94,8 @@ export interface BuiltOpen {
   deposit: bigint;
   /** Channel-derivation salt. */
   salt: bigint;
+  /** Slot the open is anchored to (channel PDA seed). */
+  openSlot: bigint;
 }
 
 /**
@@ -99,6 +107,7 @@ export interface BuiltOpen {
  * @param args.mint
  * @param args.authorizedSigner
  * @param args.salt
+ * @param args.openSlot
  * @param args.programId
  * @returns The channel PDA (base58)
  */
@@ -108,6 +117,7 @@ export async function findPaymentChannelPda(args: {
   mint: string;
   authorizedSigner: string;
   salt: bigint;
+  openSlot: bigint;
   programId?: string | undefined;
 }): Promise<string> {
   const [pda] = await getProgramDerivedAddress({
@@ -119,6 +129,7 @@ export async function findPaymentChannelPda(args: {
       getAddressEncoder().encode(address(args.mint)),
       getAddressEncoder().encode(address(args.authorizedSigner)),
       getU64Encoder().encode(args.salt),
+      getU64Encoder().encode(args.openSlot),
     ],
   });
   return pda;
@@ -142,6 +153,7 @@ export async function buildOpenPaymentChannelTransaction(args: BuildOpenArgs): P
   const mint = address(args.mint);
   const operator = address(args.operator);
   const salt = args.salt ?? randomU64();
+  const openSlot = args.openSlot;
   const gracePeriod = args.gracePeriod ?? DEFAULT_GRACE_PERIOD_SECONDS;
   const recipients = (args.recipients ?? []).map(r => ({
     bps: r.bps,
@@ -154,6 +166,7 @@ export async function buildOpenPaymentChannelTransaction(args: BuildOpenArgs): P
     mint: args.mint,
     authorizedSigner: args.operator,
     salt,
+    openSlot,
     programId: args.programId,
   });
 
@@ -186,7 +199,7 @@ export async function buildOpenPaymentChannelTransaction(args: BuildOpenArgs): P
       channelTokenAccount,
       eventAuthority,
       mint,
-      openArgs: { deposit: args.deposit, gracePeriod, recipients, salt },
+      openArgs: { deposit: args.deposit, gracePeriod, openSlot, recipients, salt },
       payee,
       payer,
       rentPayer: rentPayerSigner,
@@ -216,6 +229,7 @@ export async function buildOpenPaymentChannelTransaction(args: BuildOpenArgs): P
   return {
     channelId,
     deposit: args.deposit,
+    openSlot,
     salt,
     transaction: getBase64EncodedWireTransaction(signed),
   };
@@ -250,6 +264,8 @@ export interface VerifyOpenResult {
   payer: string;
   deposit: bigint;
   gracePeriod: number;
+  /** Slot the open is anchored to (channel PDA seed); the program enforces its freshness. */
+  openSlot: bigint;
   recipients: readonly ChannelSplit[];
   salt: bigint;
 }
@@ -364,7 +380,7 @@ export async function verifyOpenTransaction(
   }
 
   const openData = getOpenInstructionDataDecoder().decode(openIx.data);
-  const { deposit, gracePeriod, recipients, salt } = openData.openArgs;
+  const { deposit, gracePeriod, openSlot, recipients, salt } = openData.openArgs;
 
   if (deposit === 0n) throw new Error("verifyOpenTransaction: deposit must be greater than zero");
   if (deposit !== expected.maxCap) {
@@ -396,12 +412,16 @@ export async function verifyOpenTransaction(
     }
   }
 
+  // `openSlot` is taken from the decoded args: it is a PDA seed, so a wrong
+  // value yields a mismatched channel address, and the program itself enforces
+  // the freshness window (`openSlot <= clock.slot <= openSlot + 1500`).
   const derivedChannel = await findPaymentChannelPda({
     payer: payerAddr,
     payee: payeeAddr,
     mint: mintAddr,
     authorizedSigner: authorizedSignerAddr,
     salt,
+    openSlot,
     programId: expected.programId,
   });
   if (derivedChannel !== channelAddr) {
@@ -414,6 +434,7 @@ export async function verifyOpenTransaction(
     channelId: channelAddr,
     deposit,
     gracePeriod,
+    openSlot,
     payer: payerAddr,
     recipients: recipients.map(recipient => ({
       bps: recipient.bps,

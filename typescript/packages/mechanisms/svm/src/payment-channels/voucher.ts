@@ -1,8 +1,9 @@
 /**
  * Canonical payment-channel voucher payload + Ed25519 verifier.
  *
- * The 48-byte voucher message is the exact byte layout the on-chain
+ * The 50-byte voucher message is the exact byte layout the on-chain
  * payment-channels program signs over:
+ *   magic             (2 bytes, constant [0x56, 0x01])
  *   channel_id        (32 bytes, base58-decoded pubkey)
  *   cumulative_amount (u64 little-endian)
  *   expires_at        (i64 little-endian)
@@ -15,13 +16,20 @@
 import { getBase58Encoder, getI64Encoder, getU64Encoder } from "@solana/kit";
 
 /**
- * Encode the canonical 48-byte voucher payload.
+ * Constant 2-byte magic prefix of the signed voucher payload. The program
+ * rejects vouchers without it (`voucherBadMagic`). Wire JSON never carries it —
+ * it exists only in the signed bytes.
+ */
+export const VOUCHER_MAGIC: readonly [number, number] = [0x56, 0x01];
+
+/**
+ * Encode the canonical 50-byte voucher payload.
  *
  * @param args - The voucher fields
  * @param args.channelId - Channel PDA (base58); must decode to 32 bytes
  * @param args.cumulativeAmount - Cumulative settled amount (base units)
  * @param args.expiresAt - Voucher deadline (Unix seconds, i64)
- * @returns The 48-byte message the authorized signer signs
+ * @returns The 50-byte message the authorized signer signs
  */
 export function encodeVoucherMessageBytes(args: {
   channelId: string;
@@ -32,10 +40,12 @@ export function encodeVoucherMessageBytes(args: {
   if (channelBytes.byteLength !== 32) {
     throw new Error(`channelId must decode to 32 bytes; got ${channelBytes.byteLength}`);
   }
-  const out = new Uint8Array(48);
-  out.set(channelBytes as Uint8Array, 0);
-  out.set(getU64Encoder().encode(args.cumulativeAmount) as Uint8Array, 32);
-  out.set(getI64Encoder().encode(args.expiresAt) as Uint8Array, 40);
+  const out = new Uint8Array(50);
+  out[0] = VOUCHER_MAGIC[0];
+  out[1] = VOUCHER_MAGIC[1];
+  out.set(channelBytes as Uint8Array, 2);
+  out.set(getU64Encoder().encode(args.cumulativeAmount) as Uint8Array, 34);
+  out.set(getI64Encoder().encode(args.expiresAt) as Uint8Array, 42);
   return out;
 }
 
@@ -46,7 +56,7 @@ export function encodeVoucherMessageBytes(args: {
  * @param args - Verification inputs
  * @param args.signatureBase58 - 64-byte signature, base58
  * @param args.signerBase58 - 32-byte verifying key, base58
- * @param args.message - The canonical 48-byte voucher payload
+ * @param args.message - The canonical 50-byte voucher payload
  * @returns Whether the signature is valid
  */
 export async function verifyVoucherSignature(args: {

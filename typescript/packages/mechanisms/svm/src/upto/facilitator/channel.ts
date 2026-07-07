@@ -104,7 +104,7 @@ export async function broadcastOpen(
  *
  * @param operator - The operator signer
  * @param rpc - The RPC client
- * @param instructions - settle_and_finalize (+ optional Ed25519 precompile) then distribute
+ * @param instructions - settle_and_seal (+ optional Ed25519 precompile) then distribute
  * @returns The broadcast signature
  */
 export async function submitSettle(

@@ -7,7 +7,25 @@ import type {
   SchemeNetworkServer,
 } from "@x402/core/types";
 import type { SvmStablecoinSymbol } from "../../constants";
-import { convertToTokenAmount, getStablecoinAddress, numberToDecimalString } from "../../utils";
+import {
+  convertToTokenAmount,
+  createRpcClient,
+  getStablecoinAddress,
+  numberToDecimalString,
+} from "../../utils";
+
+/** Options for the server-side {@link UptoSvmScheme}. */
+export interface UptoSvmServerOptions {
+  /**
+   * RPC endpoint used to fetch a recent blockhash + slot to embed in the 402
+   * challenge (`extra.recentBlockhash`, `extra.recentSlot`). The blockhash is
+   * optional for clients (they can fetch their own), but `recentSlot` is
+   * REQUIRED by `upto` payment-channel clients: it anchors the channel PDA
+   * (`open_slot` seed) and clients must take it from the challenge, never
+   * from their own RPC.
+   */
+  rpcUrl?: string;
+}
 
 type ParsedMoney = {
   amount: number;
@@ -22,12 +40,22 @@ const PRICE_STABLECOINS = new Set(["USDC", "USDT", "USDG", "PYUSD", "CASH"]);
  * Price parsing matches the exact scheme (stablecoin → 6-decimal atomic units);
  * `enhancePaymentRequirements` folds the facilitator's `getExtra` (the operator
  * `facilitatorAddress`, optional `facilitatorFee`, and `channelProgram`) into the
- * requirement so the client can build the channel open. The `amount` is phase-dependent:
+ * requirement so the client can build the channel open, and — when an `rpcUrl`
+ * is configured — embeds a fresh `recentBlockhash`/`recentSlot` pair in the
+ * challenge. The `amount` is phase-dependent:
  * the authorized maximum at verification, the actual charge at settlement.
  */
 export class UptoSvmScheme implements SchemeNetworkServer {
   readonly scheme = "upto";
   private moneyParsers: MoneyParser[] = [];
+
+  /**
+   * Construct the server-side upto scheme.
+   *
+   * @param options - Optional server configuration (e.g. an `rpcUrl` to embed
+   *   the challenge `recentBlockhash`/`recentSlot`).
+   */
+  constructor(private readonly options: UptoSvmServerOptions = {}) {}
 
   /**
    * Register a custom money parser in the parser chain (tried in order).
@@ -78,6 +106,12 @@ export class UptoSvmScheme implements SchemeNetworkServer {
    * optional fee/program id) into the requirement so the client can build the
    * channel open against this facilitator.
    *
+   * When an RPC is configured, a single `getLatestBlockhash` call also embeds
+   * `extra.recentBlockhash` + `extra.lastValidBlockHeight` (transaction
+   * lifetime) and `extra.recentSlot` (from the response context — the
+   * channel-PDA `open_slot` anchor). Clients derive the channel PDA from
+   * `recentSlot` and must not substitute their own slot.
+   *
    * @param paymentRequirements - The base payment requirements
    * @param supportedKind - The supported kind from the facilitator's /supported endpoint
    * @param supportedKind.x402Version - The x402 version
@@ -87,7 +121,7 @@ export class UptoSvmScheme implements SchemeNetworkServer {
    * @param extensionKeys - Extension keys supported by the facilitator (unused)
    * @returns Enhanced payment requirements
    */
-  enhancePaymentRequirements(
+  async enhancePaymentRequirements(
     paymentRequirements: PaymentRequirements,
     supportedKind: {
       x402Version: number;
@@ -98,13 +132,29 @@ export class UptoSvmScheme implements SchemeNetworkServer {
     extensionKeys: string[],
   ): Promise<PaymentRequirements> {
     void extensionKeys;
-    return Promise.resolve({
-      ...paymentRequirements,
-      extra: {
-        ...paymentRequirements.extra,
-        ...supportedKind.extra,
-      },
-    });
+    const extra: Record<string, unknown> = {
+      ...paymentRequirements.extra,
+      ...supportedKind.extra,
+    };
+
+    // Fetch the blockhash and the slot from the SAME response: the RPC result
+    // context carries the slot the blockhash was produced at, so no separate
+    // `getSlot` round-trip is needed and the two values are consistent.
+    // Best-effort like the exact scheme — but note that without `recentSlot`
+    // the upto client cannot build the channel open.
+    if (this.options.rpcUrl) {
+      try {
+        const rpc = createRpcClient(supportedKind.network, this.options.rpcUrl);
+        const { context, value } = await rpc.getLatestBlockhash().send();
+        extra.recentBlockhash = value.blockhash;
+        extra.lastValidBlockHeight = value.lastValidBlockHeight.toString();
+        extra.recentSlot = context.slot.toString();
+      } catch {
+        // Leave the fields out; the client fails fast on the missing slot.
+      }
+    }
+
+    return { ...paymentRequirements, extra };
   }
 
   /**

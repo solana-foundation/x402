@@ -6,6 +6,12 @@ import { UptoSvmScheme } from "./scheme";
 export interface UptoSvmResourceServerConfig {
   /** Optional specific networks (defaults to the `solana:*` family). */
   networks?: Network[];
+  /**
+   * Optional RPC endpoint. When set, the scheme embeds a recent blockhash and
+   * slot in the 402 challenge (`extra.recentBlockhash`, `extra.recentSlot`).
+   * The `recentSlot` is required by upto clients to derive the channel PDA.
+   */
+  rpcUrl?: string;
 }
 
 /**
@@ -19,10 +25,11 @@ export function registerUptoSvmScheme(
   server: x402ResourceServer,
   config: UptoSvmResourceServerConfig = {},
 ): x402ResourceServer {
+  const options = { rpcUrl: config.rpcUrl };
   if (config.networks && config.networks.length > 0) {
-    config.networks.forEach(network => server.register(network, new UptoSvmScheme()));
+    config.networks.forEach(network => server.register(network, new UptoSvmScheme(options)));
   } else {
-    server.register("solana:*", new UptoSvmScheme());
+    server.register("solana:*", new UptoSvmScheme(options));
   }
   return server;
 }

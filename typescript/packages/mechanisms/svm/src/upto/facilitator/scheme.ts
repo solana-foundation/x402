@@ -10,7 +10,7 @@ import type {
 
 import {
   buildDistributeInstruction,
-  buildSettleAndFinalizeInstructions,
+  buildSettleAndSealInstructions,
   type ServerInstruction,
   PAYMENT_CHANNELS_PROGRAM_ID,
 } from "../../payment-channels/onchain";
@@ -43,7 +43,7 @@ export interface UptoSvmFacilitatorConfig {
  * `verify` validates the client authorization and broadcasts the channel `open`
  * (escrowing the ceiling before the resource is served); `settle` signs a single
  * operator voucher for the actual metered amount (`actual ≤ max`), then
- * `settle_and_finalize` + `distribute`, refunding the remainder to the payer.
+ * `settle_and_seal` + `distribute`, refunding the remainder to the payer.
  *
  * Unlike the exact scheme's minimal `FacilitatorSvmSigner`, this facilitator
  * needs an operator that can sign raw messages (the voucher) and access the RPC
@@ -236,8 +236,8 @@ export class UptoSvmScheme implements SchemeNetworkFacilitator {
 
   /**
    * Settle the actual metered amount (`requirements.amount`) against the open
-   * channel: operator voucher + settle_and_finalize + distribute, refunding the
-   * remainder. `actual === 0` still finalizes (full refund).
+   * channel: operator voucher + settle_and_seal + distribute, refunding the
+   * remainder. `actual === 0` still seals (full refund).
    *
    * @param payload - The payment payload
    * @param requirements - The payment requirements (amount = actual charge)
@@ -306,9 +306,9 @@ export class UptoSvmScheme implements SchemeNetworkFacilitator {
         getStablecoinTokenProgram(requirements.asset, requirements.network);
       const channelConfig = resolveUptoSvmPaymentChannelConfig(requirements);
 
-      const settle = buildSettleAndFinalizeInstructions({
+      const settle = buildSettleAndSealInstructions({
         channelId: p.channelId,
-        merchantSigner: this.operator,
+        payeeSigner: this.operator,
         programId,
         voucher:
           actual > 0n
