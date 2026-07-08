@@ -10,12 +10,13 @@ import { createRpcClient, resolveBlockhash } from "../../utils";
 import { resolveUptoSvmPaymentChannelConfig } from "../shared";
 
 /**
- * SVM client implementation for the `upto` payment scheme (payment-channel profile).
+ * SVM client implementation for the `upto` payment scheme.
  *
  * Builds the channel `open` transaction whose `deposit` is the authorized ceiling,
- * with the operator (`extra.facilitatorAddress ?? payTo`) as both the channel authorized
- * signer and the transaction fee payer. The client signs only the open; the
- * facilitator broadcasts it and later settles the metered amount with a voucher.
+ * with `extra.receiverAuthorizer` as both channel payee and authorized signer,
+ * and `extra.feePayer` as transaction fee payer and rent payer. The client
+ * signs only the open; the fee payer broadcasts it and the receiver authorizer
+ * later settles the metered amount with a voucher.
  */
 export class UptoSvmScheme implements SchemeNetworkClient {
   readonly scheme = "upto";
@@ -66,17 +67,18 @@ export class UptoSvmScheme implements SchemeNetworkClient {
     const openSlot = resolveRecentSlot(paymentRequirements);
 
     const open = await buildOpenPaymentChannelTransaction({
+      authorizedSigner: channelConfig.receiverAuthorizer,
       blockhash: {
         blockhash: latestBlockhash.blockhash,
         lastValidBlockHeight: latestBlockhash.lastValidBlockHeight,
       },
       deposit: maxAmount,
+      feePayer: channelConfig.feePayer,
+      gracePeriod: channelConfig.withdrawDelay,
       mint: paymentRequirements.asset,
       openSlot,
-      operator: channelConfig.operator,
-      payee: channelConfig.operator,
+      payee: channelConfig.receiverAuthorizer,
       payer: this.signer,
-      programId: paymentRequirements.extra?.channelProgram as string | undefined,
       recipients: channelConfig.splits,
       tokenProgram,
     });
@@ -86,13 +88,14 @@ export class UptoSvmScheme implements SchemeNetworkClient {
     const expiresAt = now + paymentRequirements.maxTimeoutSeconds;
 
     const payload: UptoSvmPayloadV2 = {
-      authorizedSigner: channelConfig.operator,
+      authorizedSigner: channelConfig.receiverAuthorizer,
       channelId: open.channelId,
       deposit: maxAmount.toString(),
       expiresAt,
       from: this.signer.address,
       maxAmount: maxAmount.toString(),
       nonce: open.salt.toString(),
+      openSlot: open.openSlot.toString(),
       openTransaction: open.transaction,
       validAfter,
     };

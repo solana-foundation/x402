@@ -1,8 +1,8 @@
 /**
- * Channel-flow glue for the `upto` facilitator: voucher signing, co-signing and
+ * Channel-flow glue for the `upto` facilitator: voucher signing, co-signing,
  * broadcasting the client `open` (idempotent), and submitting settle+distribute.
  *
- * Kept separate from the scheme orchestration so the on-chain mechanics stay
+ * Kept separate from the scheme orchestration so the onchain mechanics stay
  * readable. All RPC access is threaded in by the caller.
  */
 
@@ -29,8 +29,8 @@ import { type ServerInstruction } from "../../payment-channels/onchain";
 import { encodeVoucherMessageBytes } from "../../payment-channels/voucher";
 import { createRpcClient } from "../../utils";
 
-/** The operator signer: signs vouchers (messages) and settlement transactions. */
-export type OperatorSigner = TransactionSigner & MessagePartialSigner;
+/** Signer capable of signing Solana transactions and raw Ed25519 messages. */
+export type UptoSvmSigner = TransactionSigner & MessagePartialSigner;
 
 /** RPC client shape used by the channel helpers. */
 export type ChannelRpc = ReturnType<typeof createRpcClient>;
@@ -38,7 +38,7 @@ export type ChannelRpc = ReturnType<typeof createRpcClient>;
 /**
  * Sign a payment-channel voucher and return the base58 signature.
  *
- * @param operator - The operator signer (the channel's authorized signer)
+ * @param receiverAuthorizer - The channel's authorized signer
  * @param voucher - The voucher fields
  * @param voucher.channelId - Channel PDA (base58)
  * @param voucher.cumulativeAmount - Cumulative settled amount (base units)
@@ -46,18 +46,18 @@ export type ChannelRpc = ReturnType<typeof createRpcClient>;
  * @returns The base58-encoded 64-byte Ed25519 signature
  */
 export async function signVoucher(
-  operator: OperatorSigner,
+  receiverAuthorizer: UptoSvmSigner,
   voucher: { channelId: string; cumulativeAmount: bigint; expiresAt: bigint },
 ): Promise<string> {
   const message = encodeVoucherMessageBytes(voucher);
-  const [dict] = await operator.signMessages([createSignableMessage(message)]);
-  const signature = dict[operator.address];
-  if (!signature) throw new Error("operator did not return a voucher signature");
+  const [dict] = await receiverAuthorizer.signMessages([createSignableMessage(message)]);
+  const signature = dict[receiverAuthorizer.address];
+  if (!signature) throw new Error("receiverAuthorizer did not return a voucher signature");
   return getBase58Decoder().decode(signature as Uint8Array);
 }
 
 /**
- * Whether the channel account already exists on-chain (open already broadcast).
+ * Whether the channel account already exists onchain (open already broadcast).
  *
  * @param rpc - The RPC client
  * @param channelId - Channel PDA (base58)
@@ -69,23 +69,23 @@ export async function channelExists(rpc: ChannelRpc, channelId: string): Promise
 }
 
 /**
- * Co-sign the operator (fee-payer) slot of a partially-signed open transaction,
+ * Co-sign the fee-payer slot of a partially-signed open transaction,
  * broadcast it, and wait for confirmation. No-op skip is the caller's job
  * (see {@link channelExists}).
  *
- * @param operator - The operator signer (fee payer)
+ * @param feePayer - The fee-payer signer
  * @param rpc - The RPC client
  * @param openTransactionBase64 - The client-signed open transaction
  * @returns The broadcast signature
  */
 export async function broadcastOpen(
-  operator: OperatorSigner,
+  feePayer: UptoSvmSigner,
   rpc: ChannelRpc,
   openTransactionBase64: string,
 ): Promise<Signature> {
   const tx = getTransactionDecoder().decode(getBase64Codec().encode(openTransactionBase64));
   const signable = { content: tx.messageBytes, signatures: tx.signatures };
-  const [dict] = await operator.signMessages([signable as never]);
+  const [dict] = await feePayer.signMessages([signable as never]);
   const fullySigned = {
     ...tx,
     signatures: { ...tx.signatures, ...dict },
@@ -100,22 +100,23 @@ export async function broadcastOpen(
 
 /**
  * Compile the settle+distribute instructions into a transaction signed by the
- * operator (fee payer + merchant signer), broadcast it, and confirm.
+ * fee payer, broadcast it, and confirm. Other signers, such as the channel
+ * payee on `settle_and_seal`, are carried by the instruction list.
  *
- * @param operator - The operator signer
+ * @param feePayer - The fee-payer signer
  * @param rpc - The RPC client
  * @param instructions - settle_and_seal (+ optional Ed25519 precompile) then distribute
  * @returns The broadcast signature
  */
 export async function submitSettle(
-  operator: OperatorSigner,
+  feePayer: UptoSvmSigner,
   rpc: ChannelRpc,
   instructions: readonly ServerInstruction[],
 ): Promise<Signature> {
   const { value: latestBlockhash } = await rpc.getLatestBlockhash().send();
   const message = pipe(
     createTransactionMessage({ version: 0 }),
-    m => setTransactionMessageFeePayerSigner(operator, m),
+    m => setTransactionMessageFeePayerSigner(feePayer, m),
     m =>
       setTransactionMessageLifetimeUsingBlockhash(
         {
@@ -139,7 +140,7 @@ export async function submitSettle(
  * @param rpc - The RPC client
  * @param signature - The transaction signature
  * @param timeoutMs - Total time budget (default 30s)
- * @throws If the transaction failed on-chain or the timeout elapses
+ * @throws If the transaction failed onchain or the timeout elapses
  */
 export async function confirmSignature(
   rpc: ChannelRpc,
@@ -152,7 +153,7 @@ export async function confirmSignature(
     const status = value[0];
     if (status) {
       if (status.err) {
-        throw new Error(`tx ${signature} failed on-chain: ${JSON.stringify(status.err)}`);
+        throw new Error(`tx ${signature} failed onchain: ${JSON.stringify(status.err)}`);
       }
       const level = status.confirmationStatus;
       if (level === undefined || level === null || level === "confirmed" || level === "finalized") {

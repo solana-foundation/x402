@@ -15,8 +15,9 @@ if (!svmAddress) {
 }
 
 // The facilitator must support the upto scheme on `solana:*` — i.e. run the
-// `@x402/svm/upto/facilitator` UptoSvmScheme with an operator key. That operator
-// fee-pays the channel open and signs the settlement voucher.
+// `@x402/svm/upto/facilitator` UptoSvmScheme with a fee-payer key and a
+// receiver-authorizer key. Self-facilitated servers can use the same key for
+// both roles.
 const facilitatorUrl = process.env.FACILITATOR_URL;
 if (!facilitatorUrl) {
   console.error("Missing required FACILITATOR_URL environment variable");
@@ -28,8 +29,9 @@ const app = express();
 
 // "upto" authorizes up to a maximum but settles only the actual usage. On
 // Solana the client opens a payment channel depositing the ceiling; the
-// facilitator settles the metered amount with a single voucher and refunds the
-// remainder. Ideal for usage-based billing (LLM tokens, bytes served, compute).
+// receiver authorizer settles the metered amount with a single voucher and the
+// fee payer sponsors the transaction that refunds the remainder. Ideal for
+// usage-based billing (LLM tokens, bytes served, compute).
 const maxPrice = "$0.10"; // Maximum the client authorizes (10 cents)
 
 app.use(
@@ -57,7 +59,8 @@ app.get("/api/generate", (req, res) => {
   const actualUsage = Math.floor(Math.random() * (maxAmountAtomic + 1));
 
   // Tell the middleware to settle only what was actually used. The facilitator
-  // signs a voucher for this amount (≤ the deposited ceiling) and refunds the rest.
+  // The receiver authorizer signs a voucher for this amount (≤ the deposited
+  // ceiling), and settlement refunds the rest.
   setSettlementOverrides(res, { amount: String(actualUsage) });
 
   res.json({

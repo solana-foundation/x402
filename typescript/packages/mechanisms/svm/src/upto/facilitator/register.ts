@@ -1,18 +1,20 @@
 import { x402Facilitator } from "@x402/core/facilitator";
 import { Network } from "@x402/core/types";
-import { type OperatorSigner } from "./channel";
+import { type UptoSvmSigner } from "./channel";
 import { UptoSvmScheme } from "./scheme";
 
 /** Configuration for registering the upto SVM facilitator scheme to an x402Facilitator. */
 export interface UptoSvmFacilitatorRegisterConfig {
-  /** The operator signer: channel authorized signer, fee payer, and voucher signer. */
-  operator: OperatorSigner;
+  /** Transaction fee payer and channel rent payer. */
+  feePayer: UptoSvmSigner;
+  /** Channel payee and voucher signer. Defaults to `feePayer` for self-facilitation. */
+  receiverAuthorizer?: UptoSvmSigner;
   /** Networks to register (single network or array). */
   networks: Network | Network[];
   /** Optional custom RPC URL. */
   rpcUrl?: string;
-  /** Optional facilitator fee in basis points. */
-  facilitatorFee?: number;
+  /** Optional forced-close grace period advertised as `extra.withdrawDelay`. */
+  withdrawDelay?: number;
 }
 
 /**
@@ -28,9 +30,9 @@ export function registerUptoSvmScheme(
 ): x402Facilitator {
   facilitator.register(
     config.networks,
-    new UptoSvmScheme(config.operator, {
+    new UptoSvmScheme(config.feePayer, config.receiverAuthorizer, {
       ...(config.rpcUrl ? { rpcUrl: config.rpcUrl } : {}),
-      ...(config.facilitatorFee !== undefined ? { facilitatorFee: config.facilitatorFee } : {}),
+      ...(config.withdrawDelay !== undefined ? { withdrawDelay: config.withdrawDelay } : {}),
     }),
   );
   return facilitator;

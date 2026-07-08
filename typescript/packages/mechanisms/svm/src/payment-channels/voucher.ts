@@ -1,7 +1,7 @@
 /**
  * Canonical payment-channel voucher payload + Ed25519 verifier.
  *
- * The 50-byte voucher message is the exact byte layout the on-chain
+ * The 50-byte voucher message is the exact byte layout the onchain
  * payment-channels program signs over:
  *   magic             (2 bytes, constant [0x56, 0x01])
  *   channel_id        (32 bytes, base58-decoded pubkey)

@@ -14,20 +14,13 @@ export type ExactSvmPayloadV1 = {
 export type ExactSvmPayloadV2 = ExactSvmPayloadV1;
 
 /**
- * The asset transfer method the `upto` SVM scheme uses. Only `payment-channel`
- * (the normative v1 backend) ships today.
- * See `specs/schemes/upto/scheme_upto_svm.md`.
- */
-export const UPTO_ASSET_TRANSFER_METHOD = "payment-channel";
-
-/**
- * Client authorization for the `upto` SVM scheme, `payment-channel` profile.
+ * Client authorization for the `upto` SVM scheme.
  *
  * The client opens a payment channel whose `deposit` is the authorized ceiling,
- * with `authorizedSigner` set to the operator so the operator can settle the
- * actual metered amount with a single voucher. The client signs only the
- * `open` transaction (pull mode); the facilitator broadcasts it. The `from`,
- * `maxAmount`, `validAfter`, and `expiresAt` fields mirror the network-agnostic
+ * with `authorizedSigner` set to the receiver authorizer so the server can
+ * settle the actual metered amount with a single voucher. The client signs only
+ * the `open` transaction; the fee payer broadcasts it. The `from`, `maxAmount`,
+ * `validAfter`, and `expiresAt` fields mirror the network-agnostic
  * `UptoPayload`; the channel fields are the SVM specialization.
  */
 export type UptoSvmPayloadV2 = {
@@ -41,13 +34,15 @@ export type UptoSvmPayloadV2 = {
   validAfter: number;
   /** Unique per-authorization identifier. */
   nonce: string;
+  /** Slot encoded in the open instruction and used as a channel PDA seed. */
+  openSlot: string;
   /** Channel PDA (base58). */
   channelId: string;
   /** On-chain escrow ceiling (base units); MUST equal `maxAmount`. */
   deposit: string;
-  /** Voucher signer — the operator/facilitator key (base58). */
+  /** Voucher signer; MUST equal `extra.receiverAuthorizer` (base58). */
   authorizedSigner: string;
-  /** Base64 client-signed `open` transaction for the facilitator to broadcast (pull). */
+  /** Base64 client-signed `open` transaction for the fee payer to broadcast. */
   openTransaction: string;
 };
 
@@ -65,6 +60,7 @@ export function isUptoSvmPayload(payload: Record<string, unknown>): payload is U
     typeof payload.channelId === "string" &&
     typeof payload.authorizedSigner === "string" &&
     typeof payload.openTransaction === "string" &&
+    typeof payload.openSlot === "string" &&
     typeof payload.expiresAt === "number" &&
     typeof payload.validAfter === "number" &&
     typeof payload.nonce === "string"

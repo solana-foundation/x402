@@ -11,6 +11,7 @@ import {
   convertToTokenAmount,
   createRpcClient,
   getStablecoinAddress,
+  getStablecoinTokenProgram,
   numberToDecimalString,
 } from "../../utils";
 
@@ -38,11 +39,11 @@ const PRICE_STABLECOINS = new Set(["USDC", "USDT", "USDG", "PYUSD", "CASH"]);
  * SVM server implementation for the `upto` payment scheme.
  *
  * Price parsing matches the exact scheme (stablecoin → 6-decimal atomic units);
- * `enhancePaymentRequirements` folds the facilitator's `getExtra` (the operator
- * `facilitatorAddress`, optional `facilitatorFee`, and `channelProgram`) into the
- * requirement so the client can build the channel open, and — when an `rpcUrl`
- * is configured — embeds a fresh `recentBlockhash`/`recentSlot` pair in the
- * challenge. The `amount` is phase-dependent:
+ * `enhancePaymentRequirements` folds the facilitator's `getExtra`
+ * (`feePayer`, `receiverAuthorizer`, and `withdrawDelay`) into the requirement
+ * so the client can build the channel open, and — when an `rpcUrl` is configured
+ * — embeds a fresh `recentBlockhash`/`recentSlot` pair in the challenge. The
+ * `amount` is phase-dependent:
  * the authorized maximum at verification, the actual charge at settlement.
  */
 export class UptoSvmScheme implements SchemeNetworkServer {
@@ -102,9 +103,9 @@ export class UptoSvmScheme implements SchemeNetworkServer {
   }
 
   /**
-   * Fold the facilitator's `getExtra` payload (operator address, fee payer,
-   * optional fee/program id) into the requirement so the client can build the
-   * channel open against this facilitator.
+   * Fold the facilitator's `getExtra` payload into the requirement so the
+   * client can build the channel open against the advertised fee payer and
+   * receiver authorizer.
    *
    * When an RPC is configured, a single `getLatestBlockhash` call also embeds
    * `extra.recentBlockhash` + `extra.lastValidBlockHeight` (transaction
@@ -117,7 +118,7 @@ export class UptoSvmScheme implements SchemeNetworkServer {
    * @param supportedKind.x402Version - The x402 version
    * @param supportedKind.scheme - The payment scheme
    * @param supportedKind.network - The network identifier
-   * @param supportedKind.extra - Facilitator extra (facilitatorAddress / facilitatorFee / channelProgram)
+   * @param supportedKind.extra - Facilitator extra (`feePayer`, `receiverAuthorizer`, `withdrawDelay`)
    * @param extensionKeys - Extension keys supported by the facilitator (unused)
    * @returns Enhanced payment requirements
    */
@@ -136,6 +137,10 @@ export class UptoSvmScheme implements SchemeNetworkServer {
       ...paymentRequirements.extra,
       ...supportedKind.extra,
     };
+    extra.tokenProgram ??= getStablecoinTokenProgram(
+      paymentRequirements.asset,
+      supportedKind.network,
+    );
 
     // Fetch the blockhash and the slot from the SAME response: the RPC result
     // context carries the slot the blockhash was produced at, so no separate

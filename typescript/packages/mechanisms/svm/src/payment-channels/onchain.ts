@@ -1,10 +1,8 @@
 /**
- * Server-side on-chain instruction builders for the payment-channels program.
+ * Server-side onchain instruction builders for the payment-channels program.
  *
- * Ported from pay-kit `@solana/mpp` (src/server/session/on-chain.ts), scoped to
- * what the `upto` payment-channel scheme needs: the Ed25519 verify precompile,
- * settle_and_seal (with optional voucher), and distribute. The multi-delegator
- * and session-store helpers from the source are intentionally omitted.
+ * Scoped to what the `upto` payment-channel scheme needs: the Ed25519 verify
+ * precompile, settle_and_seal (with optional voucher), and distribute.
  */
 
 import {
@@ -55,9 +53,9 @@ export const PAYMENT_CHANNELS_PROGRAM_ID =
  * Treasury owner baked into the deployed (mainnet-build) payment-channels
  * program: `Cs2zdfUNonRdRGsiZUQQLdTxzxVvJZmgiX2mpLYKuEqP`. `distribute` validates
  * the treasury token account against `ATA(TREASURY_OWNER, mint, token_program)`,
- * so this must match the on-chain constant exactly — otherwise settlement fails
+ * so this must match the onchain constant exactly — otherwise settlement fails
  * with `TreasuryAccountMismatch` (0x961). Mirrors `TREASURY_OWNER` in the Rust
- * program helpers (pay-kit rust/crates/core/src/payment_channels.rs).
+ * program helpers.
  */
 const TREASURY_OWNER_BYTES = new Uint8Array([
   0xb0, 0x41, 0xd9, 0xd3, 0x37, 0xb7, 0x21, 0xbe, 0x57, 0x89, 0x4e, 0xb6, 0x9c, 0x3b, 0x68, 0x09,
@@ -128,9 +126,9 @@ export function buildEd25519VerifyInstruction(args: {
 // settle_and_seal
 // ─────────────────────────────────────────────────────────────────────
 
-/** A voucher to settle: the operator-signed cumulative amount for a channel. */
+/** A voucher to settle: the receiver-authorizer-signed cumulative amount for a channel. */
 export interface SettleVoucher {
-  /** The voucher signer (base58); for `upto` this is the operator. */
+  /** The voucher signer (base58); for `upto` this is the receiver authorizer. */
   authorizedSigner: string;
   /** 64-byte Ed25519 signature over the voucher message, base58. */
   signatureBase58: string;
@@ -144,7 +142,7 @@ export interface SettleVoucher {
 export interface SettleAndSealBuildArgs {
   /** Payment-channel address being settled (base58). */
   channelId: string;
-  /** Payee signer authorized to settle the channel (the operator). */
+  /** Payee signer authorized to settle the channel. */
   payeeSigner: TransactionSigner;
   /** Payment-channels program id override. */
   programId?: Address | undefined;
@@ -153,7 +151,7 @@ export interface SettleAndSealBuildArgs {
 }
 
 /**
- * Build the instruction(s) for an on-chain settle_and_seal. If a voucher
+ * Build the instruction(s) for an onchain settle_and_seal. If a voucher
  * is provided, an Ed25519 precompile IX is prepended at index 0 — the
  * settle_and_seal IX references the instructions sysvar at index `-1`
  * (the precompile immediately before it). With no voucher, the channel is

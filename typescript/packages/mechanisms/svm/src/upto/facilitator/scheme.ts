@@ -1,4 +1,3 @@
-import { type Address, address } from "@solana/kit";
 import type {
   Network,
   PaymentPayload,
@@ -12,18 +11,21 @@ import {
   buildDistributeInstruction,
   buildSettleAndSealInstructions,
   type ServerInstruction,
-  PAYMENT_CHANNELS_PROGRAM_ID,
 } from "../../payment-channels/onchain";
-import { verifyOpenTransaction } from "../../payment-channels/open";
-import { isUptoSvmPayload, type UptoSvmPayloadV2, UPTO_ASSET_TRANSFER_METHOD } from "../../types";
+import {
+  DEFAULT_GRACE_PERIOD_SECONDS,
+  parseU64,
+  verifyOpenTransaction,
+} from "../../payment-channels/open";
+import { isUptoSvmPayload, type UptoSvmPayloadV2 } from "../../types";
 import { createRpcClient, getStablecoinTokenProgram } from "../../utils";
 import { resolveUptoSvmPaymentChannelConfig } from "../shared";
 import {
   broadcastOpen,
   channelExists,
-  type OperatorSigner,
   signVoucher,
   submitSettle,
+  type UptoSvmSigner,
 } from "./channel";
 
 /** Scheme-specific error returned when the settlement amount exceeds the ceiling. */
@@ -33,61 +35,69 @@ export const ERR_SETTLEMENT_EXCEEDS_AMOUNT = "invalid_upto_svm_payload_settlemen
 export interface UptoSvmFacilitatorConfig {
   /** Custom RPC URL (per-network defaults are used when omitted). */
   rpcUrl?: string;
-  /** Facilitator fee in basis points of the settled amount. */
-  facilitatorFee?: number;
+  /** Forced-close grace period advertised as `extra.withdrawDelay`. */
+  withdrawDelay?: number;
 }
 
 /**
- * SVM facilitator for the `upto` payment scheme (payment-channel profile).
+ * SVM facilitator for the `upto` payment scheme.
  *
  * `verify` validates the client authorization and broadcasts the channel `open`
  * (escrowing the ceiling before the resource is served); `settle` signs a single
- * operator voucher for the actual metered amount (`actual ≤ max`), then
- * `settle_and_seal` + `distribute`, refunding the remainder to the payer.
+ * receiver-authorizer voucher for the actual metered amount (`actual ≤ max`),
+ * then `settle_and_seal` + `distribute`, refunding the remainder to the payer.
  *
  * Unlike the exact scheme's minimal `FacilitatorSvmSigner`, this facilitator
- * needs an operator that can sign raw messages (the voucher) and access the RPC
- * (open broadcast + channel reads), so it takes a `TransactionSigner &
- * MessagePartialSigner` directly.
+ * needs a fee-payer signer for transactions and a receiver-authorizer signer for
+ * vouchers/close authorization, so it takes Solana signers directly.
  */
 export class UptoSvmScheme implements SchemeNetworkFacilitator {
   readonly scheme = "upto";
   readonly caipFamily = "solana:*";
 
+  private readonly feePayer: UptoSvmSigner;
+  private readonly receiverAuthorizer: UptoSvmSigner;
+  private readonly config: UptoSvmFacilitatorConfig;
+
   /**
    * Create the upto SVM facilitator.
    *
-   * @param operator - The operator signer: channel authorized signer, fee payer, and voucher signer
+   * @param feePayer - Transaction fee payer and channel rent payer
+   * @param receiverAuthorizer - Channel payee and voucher signer. Defaults to `feePayer` for self-facilitation.
    * @param config - Optional RPC configuration
    */
   constructor(
-    private readonly operator: OperatorSigner,
-    private readonly config?: UptoSvmFacilitatorConfig,
-  ) {}
+    feePayer: UptoSvmSigner,
+    receiverAuthorizer?: UptoSvmSigner,
+    config: UptoSvmFacilitatorConfig = {},
+  ) {
+    this.feePayer = feePayer;
+    this.receiverAuthorizer = receiverAuthorizer ?? feePayer;
+    this.config = config;
+  }
 
   /**
-   * Advertise the operator as the facilitator binding for payment-channel opens.
+   * Advertise the fee payer and receiver authorizer for payment-channel opens.
    *
    * @param _ - The network identifier (unused)
    * @returns Extra metadata folded into the requirement's `extra`
    */
   getExtra(_: Network): Record<string, unknown> | undefined {
     return {
-      assetTransferMethod: UPTO_ASSET_TRANSFER_METHOD,
-      channelProgram: PAYMENT_CHANNELS_PROGRAM_ID,
-      facilitatorAddress: this.operator.address,
-      facilitatorFee: this.config?.facilitatorFee ?? 0,
+      feePayer: this.feePayer.address,
+      receiverAuthorizer: this.receiverAuthorizer.address,
+      withdrawDelay: this.config.withdrawDelay ?? DEFAULT_GRACE_PERIOD_SECONDS,
     };
   }
 
   /**
-   * The operator signer addresses.
+   * Signer addresses managed by this facilitator.
    *
    * @param _ - The network identifier (unused)
-   * @returns The operator address
+   * @returns Unique signer addresses
    */
   getSigners(_: string): string[] {
-    return [this.operator.address];
+    return [...new Set([this.feePayer.address, this.receiverAuthorizer.address])];
   }
 
   /**
@@ -128,11 +138,19 @@ export class UptoSvmScheme implements SchemeNetworkFacilitator {
       };
     }
 
-    const operatorAddr = this.operator.address;
-    if (channelConfig.operator !== operatorAddr) {
+    const feePayer = this.feePayer.address;
+    const receiverAuthorizer = this.receiverAuthorizer.address;
+    if (channelConfig.feePayer !== feePayer) {
       return { isValid: false, invalidReason: "facilitator_mismatch", payer: p.from };
     }
-    if (p.authorizedSigner !== operatorAddr) {
+    if (channelConfig.receiverAuthorizer !== receiverAuthorizer) {
+      return {
+        isValid: false,
+        invalidReason: "invalid_upto_svm_receiver_authorizer_mismatch",
+        payer: p.from,
+      };
+    }
+    if (p.authorizedSigner !== receiverAuthorizer) {
       return {
         isValid: false,
         invalidReason: "invalid_upto_svm_payload_authorized_signer",
@@ -163,6 +181,18 @@ export class UptoSvmScheme implements SchemeNetworkFacilitator {
         payer: p.from,
       };
     }
+    let openSlot: bigint;
+    let nonce: bigint;
+    try {
+      openSlot = parseU64(p.openSlot, "payload.openSlot");
+      nonce = parseU64(p.nonce, "payload.nonce");
+    } catch {
+      return {
+        isValid: false,
+        invalidReason: "invalid_upto_svm_payload_channel_seed",
+        payer: p.from,
+      };
+    }
 
     const now = Math.floor(Date.now() / 1000);
     if (now < p.validAfter) {
@@ -172,20 +202,24 @@ export class UptoSvmScheme implements SchemeNetworkFacilitator {
         payer: p.from,
       };
     }
-    if (now > p.expiresAt) {
+    if (p.expiresAt === 0 || now >= p.expiresAt) {
       return { isValid: false, invalidReason: "invalid_upto_svm_payload_expired", payer: p.from };
     }
 
     // Validate the open instruction against the pinned requirements.
     try {
       const open = await verifyOpenTransaction(p.openTransaction, {
-        authorizedSigner: operatorAddr,
-        operator: operatorAddr,
+        authorizedSigner: receiverAuthorizer,
+        feePayer,
         maxCap: maxAmount,
         mint: requirements.asset,
-        payee: operatorAddr,
-        programId: requirements.extra?.channelProgram as string | undefined,
+        openSlot,
+        payee: receiverAuthorizer,
         recipients: channelConfig.splits,
+        tokenProgram:
+          (requirements.extra?.tokenProgram as string | undefined) ??
+          getStablecoinTokenProgram(requirements.asset, requirements.network),
+        withdrawDelay: channelConfig.withdrawDelay,
       });
       if (open.channelId !== p.channelId) {
         return {
@@ -195,9 +229,17 @@ export class UptoSvmScheme implements SchemeNetworkFacilitator {
           payer: p.from,
         };
       }
+      if (open.salt !== nonce) {
+        return {
+          isValid: false,
+          invalidReason: "invalid_upto_svm_payload_nonce",
+          invalidMessage: `open salt ${open.salt} != payload.nonce ${p.nonce}`,
+          payer: p.from,
+        };
+      }
       // Bind the channel payer to `payload.from`: settlement builds the
       // distribute (refund) instruction from `p.from`, so a mismatch with the
-      // open transaction's payer would make settlement fail on-chain.
+      // open transaction's payer would make settlement fail onchain.
       if (open.payer !== p.from) {
         return {
           isValid: false,
@@ -218,9 +260,9 @@ export class UptoSvmScheme implements SchemeNetworkFacilitator {
     // Escrow the ceiling before the resource is served: broadcast the open
     // (idempotent — skip when the channel already exists).
     try {
-      const rpc = createRpcClient(requirements.network, this.config?.rpcUrl);
+      const rpc = createRpcClient(requirements.network, this.config.rpcUrl);
       if (!(await channelExists(rpc, p.channelId))) {
-        await broadcastOpen(this.operator, rpc, p.openTransaction);
+        await broadcastOpen(this.feePayer, rpc, p.openTransaction);
       }
     } catch (error) {
       return {
@@ -236,8 +278,8 @@ export class UptoSvmScheme implements SchemeNetworkFacilitator {
 
   /**
    * Settle the actual metered amount (`requirements.amount`) against the open
-   * channel: operator voucher + settle_and_seal + distribute, refunding the
-   * remainder. `actual === 0` still seals (full refund).
+   * channel: receiver-authorizer voucher + settle_and_seal + distribute,
+   * refunding the remainder. `actual === 0` still seals (full refund).
    *
    * @param payload - The payment payload
    * @param requirements - The payment requirements (amount = actual charge)
@@ -299,8 +341,6 @@ export class UptoSvmScheme implements SchemeNetworkFacilitator {
     }
 
     try {
-      const programIdStr = requirements.extra?.channelProgram as string | undefined;
-      const programId: Address | undefined = programIdStr ? address(programIdStr) : undefined;
       const tokenProgram =
         (requirements.extra?.tokenProgram as string | undefined) ??
         getStablecoinTokenProgram(requirements.asset, requirements.network);
@@ -308,15 +348,14 @@ export class UptoSvmScheme implements SchemeNetworkFacilitator {
 
       const settle = buildSettleAndSealInstructions({
         channelId: p.channelId,
-        payeeSigner: this.operator,
-        programId,
+        payeeSigner: this.receiverAuthorizer,
         voucher:
           actual > 0n
             ? {
-                authorizedSigner: this.operator.address,
+                authorizedSigner: this.receiverAuthorizer.address,
                 cumulativeAmount: actual,
                 expiresAt: BigInt(p.expiresAt),
-                signatureBase58: await signVoucher(this.operator, {
+                signatureBase58: await signVoucher(this.receiverAuthorizer, {
                   channelId: p.channelId,
                   cumulativeAmount: actual,
                   expiresAt: BigInt(p.expiresAt),
@@ -328,17 +367,16 @@ export class UptoSvmScheme implements SchemeNetworkFacilitator {
       const distribute = await buildDistributeInstruction({
         channelId: p.channelId,
         mint: requirements.asset,
-        payee: channelConfig.operator,
+        payee: channelConfig.receiverAuthorizer,
         payer: p.from,
-        rentPayer: this.operator.address,
-        programId,
+        rentPayer: this.feePayer.address,
         splits: channelConfig.splits,
         tokenProgram,
       });
 
       const instructions: ServerInstruction[] = [...settle, distribute];
-      const rpc = createRpcClient(requirements.network, this.config?.rpcUrl);
-      const signature = await submitSettle(this.operator, rpc, instructions);
+      const rpc = createRpcClient(requirements.network, this.config.rpcUrl);
+      const signature = await submitSettle(this.feePayer, rpc, instructions);
 
       return {
         success: true,

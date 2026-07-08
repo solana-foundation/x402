@@ -1,10 +1,9 @@
 /**
  * Payment-channel open: client-side transaction builder + server-side verifier.
  *
- * Ported from pay-kit `@solana/mpp` (src/client/PaymentChannels.ts and
- * src/server/session/on-chain.ts), scoped to the `upto` pull flow: the client
- * builds a payer-signed `open` transaction with the operator as fee payer and
- * authorized signer; the facilitator validates and broadcasts it.
+ * Scoped to the `upto` pull flow: the client builds a payer-signed `open`
+ * transaction with the fee payer as transaction sponsor and the receiver
+ * authorizer as channel payee/authorized signer.
  */
 
 import {
@@ -56,12 +55,14 @@ export interface ChannelSplit {
 export interface BuildOpenArgs {
   /** Payer (client) signer. Signs the open; pays the deposit. */
   payer: TransactionSigner;
-  /** Channel payee. For delegated `upto`, this is the operator/facilitator. */
+  /** Channel payee. For `upto`, this is the receiver authorizer. */
   payee: string;
   /** SPL mint. */
   mint: string;
-  /** Operator key — both the voucher signer (authorizedSigner) and fee payer. */
-  operator: string;
+  /** Voucher signer recorded in the channel. */
+  authorizedSigner: string;
+  /** Transaction fee payer and channel rent payer. */
+  feePayer: string;
   /** Escrow deposit = the authorized ceiling (base units). */
   deposit: bigint;
   /** Token program for the mint. */
@@ -76,8 +77,8 @@ export interface BuildOpenArgs {
   openSlot: bigint;
   /** Optional channel-derivation salt; random when omitted. */
   salt?: bigint | undefined;
-  /** Optional grace period (seconds). */
-  gracePeriod?: number | undefined;
+  /** Forced-close grace period (seconds). */
+  gracePeriod: number;
   /** Optional payment-channels program id override. */
   programId?: string | undefined;
   /** Optional distribution splits sealed into the channel at open. */
@@ -88,7 +89,7 @@ export interface BuildOpenArgs {
 export interface BuiltOpen {
   /** Channel PDA (base58). */
   channelId: string;
-  /** Base64 payer-signed (operator fee-payer slot left empty) open transaction. */
+  /** Base64 payer-signed open transaction; the fee-payer slot is left empty. */
   transaction: string;
   /** Escrow deposit (base units). */
   deposit: bigint;
@@ -138,8 +139,8 @@ export async function findPaymentChannelPda(args: {
 /**
  * Build the payer-signed payment-channel open transaction (pull flow).
  *
- * The transaction uses the operator as fee payer and is intentionally left
- * partially signed; the facilitator adds the operator signature before
+ * The transaction uses the fee payer as transaction sponsor and is intentionally
+ * left partially signed; the sponsor adds its signature before
  * broadcasting it.
  *
  * @param args - Open inputs
@@ -151,10 +152,11 @@ export async function buildOpenPaymentChannelTransaction(args: BuildOpenArgs): P
   const payer = args.payer;
   const payee = address(args.payee);
   const mint = address(args.mint);
-  const operator = address(args.operator);
+  const authorizedSigner = address(args.authorizedSigner);
+  const feePayer = address(args.feePayer);
   const salt = args.salt ?? randomU64();
   const openSlot = args.openSlot;
-  const gracePeriod = args.gracePeriod ?? DEFAULT_GRACE_PERIOD_SECONDS;
+  const gracePeriod = args.gracePeriod;
   const recipients = (args.recipients ?? []).map(r => ({
     bps: r.bps,
     recipient: address(r.recipient),
@@ -164,7 +166,7 @@ export async function buildOpenPaymentChannelTransaction(args: BuildOpenArgs): P
     payer: payer.address,
     payee: args.payee,
     mint: args.mint,
-    authorizedSigner: args.operator,
+    authorizedSigner: args.authorizedSigner,
     salt,
     openSlot,
     programId: args.programId,
@@ -182,19 +184,19 @@ export async function buildOpenPaymentChannelTransaction(args: BuildOpenArgs): P
   });
   const [eventAuthority] = await findEventAuthorityPda({ programAddress });
 
-  // rentPayer is the operator / fee payer: it funds the channel PDA + escrow-ATA
-  // rent at open. It is the same key set as fee payer below, so the single
-  // operator signature added by the facilitator covers both the fee-payer and
-  // rentPayer signer roles. When the operator is the payer itself, reuse the
+  // rentPayer is the fee payer: it funds the channel PDA + escrow-ATA rent at
+  // open. It is the same key set as fee payer below, so a single sponsor
+  // signature covers both the transaction fee-payer and rentPayer signer roles.
+  // When the fee payer is the payer itself, reuse the
   // payer signer instance (kit rejects two distinct signer objects for one
-  // address); otherwise a noop signer carries the operator address into the
+  // address); otherwise a noop signer carries the fee-payer address into the
   // instruction without signing here.
-  const rentPayerSigner = operator === payer.address ? payer : createNoopSigner(operator);
+  const rentPayerSigner = feePayer === payer.address ? payer : createNoopSigner(feePayer);
 
   const instruction = getOpenInstruction(
     {
       associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
-      authorizedSigner: operator,
+      authorizedSigner,
       channel: address(channelId),
       channelTokenAccount,
       eventAuthority,
@@ -213,7 +215,7 @@ export async function buildOpenPaymentChannelTransaction(args: BuildOpenArgs): P
 
   const message = pipe(
     createTransactionMessage({ version: 0 }),
-    msg => setTransactionMessageFeePayer(operator, msg),
+    msg => setTransactionMessageFeePayer(feePayer, msg),
     msg =>
       setTransactionMessageLifetimeUsingBlockhash(
         {
@@ -237,21 +239,23 @@ export async function buildOpenPaymentChannelTransaction(args: BuildOpenArgs): P
 
 /** Expected values the server validates a client-submitted open transaction against. */
 export interface VerifyOpenExpected {
-  /** Operator key set as the channel authorized signer (base58). */
+  /** Receiver authorizer key set as the channel authorized signer (base58). */
   authorizedSigner: string;
-  /**
-   * Operator key expected in the `rentPayer` slot (base58). The operator
-   * co-signs the open as both fee payer and rentPayer; binding this guards
-   * against a client smuggling a different rent-funding account.
-   */
-  operator: string;
+  /** Fee payer expected in the transaction fee-payer and rentPayer slots. */
+  feePayer: string;
   /** SPL mint expected in the open. */
   mint: string;
+  /** SPL Token or Token-2022 program expected in the open. */
+  tokenProgram: string;
   /** Authorized ceiling — the open deposit must equal it exactly (`topUp` can
    *  raise an open channel's deposit, so `>=` would leave the ceiling advisory). */
   maxCap: bigint;
-  /** Primary recipient (payTo). */
+  /** Channel payee, normally the receiver authorizer. */
   payee: string;
+  /** Forced-close grace period expected in the open args. */
+  withdrawDelay: number;
+  /** Slot expected in the open args and channel PDA seed. */
+  openSlot: bigint;
   /** Optional payment-channels program id override. */
   programId?: string | undefined;
   /** Expected distribution splits sealed into the channel. */
@@ -274,8 +278,9 @@ export interface VerifyOpenResult {
  * Decode and validate a client-submitted open transaction (base64).
  *
  * Asserts the embedded open instruction targets the payment-channels program,
- * that `payee`, `mint`, and `authorizedSigner` match expectations, that
- * `deposit ≤ maxCap`, and that the channel PDA matches the recomputed value.
+ * that `feePayer`, `payee`, `mint`, `tokenProgram`, `authorizedSigner`,
+ * `withdrawDelay`, and `openSlot` match expectations, that `deposit == maxCap`,
+ * and that the channel PDA matches the recomputed value.
  *
  * @param transactionBase64 - The client-signed open transaction
  * @param expected - Values pinned by the requirements
@@ -301,15 +306,15 @@ export async function verifyOpenTransaction(
     staticAccounts: readonly string[];
   };
 
-  // The operator co-signs (and fee-pays) this client-supplied transaction, so a
-  // malicious client could otherwise smuggle an operator-authorized instruction
-  // (e.g. `SystemProgram.transfer { from: operator }`) alongside the open and
-  // drain the operator. Two defenses, before any account binding:
+  // The fee payer co-signs this client-supplied transaction, so a malicious
+  // client could otherwise smuggle a fee-payer-authorized instruction (e.g.
+  // `SystemProgram.transfer { from: feePayer }`) alongside the open and drain
+  // the sponsor. Two defenses, before any account binding:
   //   1. Reject Address Lookup Tables — they hide instruction programs/accounts
   //      from `staticAccounts`. The in-SDK open builder never uses them.
   //   2. Allowlist instruction programs to exactly { payment-channels `open`,
   //      ComputeBudget }, with exactly one `open`. Nothing else gets the
-  //      operator's signature.
+  //      fee payer's signature.
   if (message.addressTableLookups && message.addressTableLookups.length > 0) {
     throw new Error(
       "verifyOpenTransaction: address lookup tables are not permitted in an open transaction",
@@ -331,7 +336,7 @@ export async function verifyOpenTransaction(
     }
     if (program === COMPUTE_BUDGET_PROGRAM_ADDRESS) continue;
     throw new Error(
-      `verifyOpenTransaction: disallowed instruction program ${program} — the operator co-signs, so only the channel open (+ ComputeBudget) is permitted`,
+      `verifyOpenTransaction: disallowed instruction program ${program} — the fee payer co-signs, so only the channel open (+ ComputeBudget) is permitted`,
     );
   }
   if (openCount !== 1) {
@@ -361,10 +366,17 @@ export async function verifyOpenTransaction(
   const mintAddr = accountAt(3, "mint");
   const authorizedSignerAddr = accountAt(4, "authorizedSigner");
   const channelAddr = accountAt(5, "channel");
+  const tokenProgramAddr = accountAt(8, "tokenProgram");
+  const feePayerAddr = message.staticAccounts[0];
 
-  if (rentPayerAddr !== expected.operator) {
+  if (feePayerAddr !== expected.feePayer) {
     throw new Error(
-      `verifyOpenTransaction: rentPayer ${rentPayerAddr} != expected operator ${expected.operator}`,
+      `verifyOpenTransaction: feePayer ${feePayerAddr} != expected ${expected.feePayer}`,
+    );
+  }
+  if (rentPayerAddr !== expected.feePayer) {
+    throw new Error(
+      `verifyOpenTransaction: rentPayer ${rentPayerAddr} != expected feePayer ${expected.feePayer}`,
     );
   }
   if (payeeAddr !== expected.payee) {
@@ -378,6 +390,11 @@ export async function verifyOpenTransaction(
       `verifyOpenTransaction: authorizedSigner ${authorizedSignerAddr} != expected ${expected.authorizedSigner}`,
     );
   }
+  if (tokenProgramAddr !== expected.tokenProgram) {
+    throw new Error(
+      `verifyOpenTransaction: tokenProgram ${tokenProgramAddr} != expected ${expected.tokenProgram}`,
+    );
+  }
 
   const openData = getOpenInstructionDataDecoder().decode(openIx.data);
   const { deposit, gracePeriod, openSlot, recipients, salt } = openData.openArgs;
@@ -387,6 +404,14 @@ export async function verifyOpenTransaction(
     throw new Error(
       `verifyOpenTransaction: deposit ${deposit} != maxCap ${expected.maxCap} — the deposit is the enforced ceiling and \`topUp\` can raise an open channel's deposit, so it must equal the authorized amount exactly`,
     );
+  }
+  if (gracePeriod !== expected.withdrawDelay) {
+    throw new Error(
+      `verifyOpenTransaction: gracePeriod ${gracePeriod} != expected withdrawDelay ${expected.withdrawDelay}`,
+    );
+  }
+  if (openSlot !== expected.openSlot) {
+    throw new Error(`verifyOpenTransaction: openSlot ${openSlot} != expected ${expected.openSlot}`);
   }
   const expectedRecipients = expected.recipients ?? [];
   if (recipients.length !== expectedRecipients.length) {
