@@ -13,10 +13,10 @@ import { resolveUptoSvmPaymentChannelConfig } from "../shared";
  * SVM client implementation for the `upto` payment scheme.
  *
  * Builds the channel `open` transaction whose `deposit` is the authorized ceiling,
- * with `extra.receiverAuthorizer` as both channel payee and authorized signer,
- * and `extra.feePayer` as transaction fee payer and rent payer. The client
- * signs only the open; the fee payer broadcasts it and the receiver authorizer
- * later settles the metered amount with a voucher.
+ * with `extra.receiverAuthorizer` as authorized signer and `extra.feePayer` as
+ * transaction fee payer, rent payer, and zero-share channel payee. The client
+ * signs only the open; the fee payer broadcasts it and later submits the
+ * settlement carrying the receiver authorizer's voucher for the metered amount.
  */
 export class UptoSvmScheme implements SchemeNetworkClient {
   readonly scheme = "upto";
@@ -77,7 +77,7 @@ export class UptoSvmScheme implements SchemeNetworkClient {
       gracePeriod: channelConfig.withdrawDelay,
       mint: paymentRequirements.asset,
       openSlot,
-      payee: channelConfig.receiverAuthorizer,
+      payee: channelConfig.feePayer,
       payer: this.signer,
       recipients: channelConfig.splits,
       tokenProgram,

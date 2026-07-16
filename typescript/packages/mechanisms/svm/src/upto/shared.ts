@@ -6,9 +6,9 @@ const BASIS_POINTS_DENOMINATOR = 10_000;
 
 /** Resolved payment-channel fields derived from SVM `upto` requirements. */
 export interface UptoSvmPaymentChannelConfig {
-  /** Transaction fee payer and channel rent payer. */
+  /** Transaction fee payer, channel rent payer, and zero-share channel payee. */
   feePayer: string;
-  /** Channel payee and authorized voucher signer. */
+  /** Authorized voucher signer (server hot key). */
   receiverAuthorizer: string;
   /** Forced-close grace period in seconds. */
   withdrawDelay: number;
@@ -40,10 +40,10 @@ export function resolveUptoSvmPaymentChannelConfig(
     throw new Error("withdrawDelay must be an integer greater than zero");
   }
 
-  const splits =
-    receiverAuthorizer === requirements.payTo
-      ? []
-      : [{ bps: BASIS_POINTS_DENOMINATOR, recipient: requirements.payTo }];
+  // Always explicit: the payee seat is held by the facilitator (feePayer)
+  // with a zero implicit remainder, so 100% of settled funds must be
+  // assigned to payTo through the recipients list.
+  const splits = [{ bps: BASIS_POINTS_DENOMINATOR, recipient: requirements.payTo }];
 
   return { feePayer, receiverAuthorizer, splits, withdrawDelay };
 }

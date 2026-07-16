@@ -5,9 +5,9 @@ import { UptoSvmScheme } from "./scheme";
 
 /** Configuration for registering the upto SVM facilitator scheme to an x402Facilitator. */
 export interface UptoSvmFacilitatorRegisterConfig {
-  /** Transaction fee payer and channel rent payer. */
+  /** Transaction fee payer, channel rent payer, and zero-share channel payee. */
   feePayer: UptoSvmSigner;
-  /** Channel payee and voucher signer. Defaults to `feePayer` for self-facilitation. */
+  /** Voucher signer. Defaults to `feePayer` for self-facilitation. */
   receiverAuthorizer?: UptoSvmSigner;
   /** Networks to register (single network or array). */
   networks: Network | Network[];

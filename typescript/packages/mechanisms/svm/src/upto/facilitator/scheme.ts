@@ -47,9 +47,15 @@ export interface UptoSvmFacilitatorConfig {
  * receiver-authorizer voucher for the actual metered amount (`actual ≤ max`),
  * then `settle_and_seal` + `distribute`, refunding the remainder to the payer.
  *
+ * The fee payer holds the channel `payee` seat with a zero distribution share:
+ * it signs `settle_and_seal` (lifecycle authority) and can always seal an
+ * abandoned channel with `has_voucher = 0` to recover its rent, while any
+ * nonzero settlement still requires the receiver authorizer's voucher
+ * (payment authority).
+ *
  * Unlike the exact scheme's minimal `FacilitatorSvmSigner`, this facilitator
- * needs a fee-payer signer for transactions and a receiver-authorizer signer for
- * vouchers/close authorization, so it takes Solana signers directly.
+ * needs a fee-payer signer for transactions/close authorization and a
+ * receiver-authorizer signer for vouchers, so it takes Solana signers directly.
  */
 export class UptoSvmScheme implements SchemeNetworkFacilitator {
   readonly scheme = "upto";
@@ -62,8 +68,8 @@ export class UptoSvmScheme implements SchemeNetworkFacilitator {
   /**
    * Create the upto SVM facilitator.
    *
-   * @param feePayer - Transaction fee payer and channel rent payer
-   * @param receiverAuthorizer - Channel payee and voucher signer. Defaults to `feePayer` for self-facilitation.
+   * @param feePayer - Transaction fee payer, channel rent payer, and zero-share channel payee
+   * @param receiverAuthorizer - Voucher signer. Defaults to `feePayer` for self-facilitation.
    * @param config - Optional RPC configuration
    */
   constructor(
@@ -214,7 +220,7 @@ export class UptoSvmScheme implements SchemeNetworkFacilitator {
         maxCap: maxAmount,
         mint: requirements.asset,
         openSlot,
-        payee: receiverAuthorizer,
+        payee: feePayer,
         recipients: channelConfig.splits,
         tokenProgram:
           (requirements.extra?.tokenProgram as string | undefined) ??
@@ -348,7 +354,7 @@ export class UptoSvmScheme implements SchemeNetworkFacilitator {
 
       const settle = buildSettleAndSealInstructions({
         channelId: p.channelId,
-        payeeSigner: this.receiverAuthorizer,
+        payeeSigner: this.feePayer,
         voucher:
           actual > 0n
             ? {
@@ -367,7 +373,7 @@ export class UptoSvmScheme implements SchemeNetworkFacilitator {
       const distribute = await buildDistributeInstruction({
         channelId: p.channelId,
         mint: requirements.asset,
-        payee: channelConfig.receiverAuthorizer,
+        payee: channelConfig.feePayer,
         payer: p.from,
         rentPayer: this.feePayer.address,
         splits: channelConfig.splits,

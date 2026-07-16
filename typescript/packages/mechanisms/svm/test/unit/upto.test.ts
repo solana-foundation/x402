@@ -383,7 +383,7 @@ describe("upto SVM scheme", () => {
         maxCap: 1_000_000n,
         mint: MINT,
         openSlot: OPEN_SLOT,
-        payee: receiverAuthorizer.address,
+        payee: feePayer.address,
         recipients: [{ bps: 10_000, recipient: PAY_TO }],
         tokenProgram: TOKEN_PROGRAM_ADDRESS,
         withdrawDelay: WITHDRAW_DELAY,
@@ -445,8 +445,9 @@ describe("upto SVM scheme", () => {
         gracePeriod: WITHDRAW_DELAY,
         mint: MINT,
         openSlot: OPEN_SLOT,
-        payee: receiverAuthorizer.address,
+        payee: feePayer.address,
         payer,
+        recipients: [{ bps: 10_000, recipient: receiverAuthorizer.address }],
         tokenProgram: TOKEN_PROGRAM_ADDRESS,
       });
       basePayload = {
@@ -582,14 +583,14 @@ describe("upto SVM scheme", () => {
       expect(result.invalidReason).toBe("invalid_upto_svm_payload_deposit_not_ceiling");
     });
 
-    it("rejects delegated requirements when the open omits the payTo split", async () => {
+    it("rejects requirements whose payTo mismatches the sealed split", async () => {
       const result = await facilitator.verify(
         wrap(basePayload, requirements()),
         requirements({ payTo: PAY_TO }),
       );
       expect(result.isValid).toBe(false);
       expect(result.invalidReason).toBe("invalid_upto_svm_payload_open_transaction");
-      expect(result.invalidMessage).toMatch(/distribution recipients/);
+      expect(result.invalidMessage).toMatch(/distribution recipient/);
     });
 
     it("rejects a payload channelId that does not match the open transaction", async () => {
@@ -647,7 +648,7 @@ describe("upto SVM scheme", () => {
         gracePeriod: WITHDRAW_DELAY,
         mint: MINT,
         openSlot: OPEN_SLOT,
-        payee: receiverAuthorizer.address,
+        payee: feePayer.address,
         payer,
         recipients: [{ bps: 10_000, recipient: PAY_TO }],
         tokenProgram: TOKEN_PROGRAM_ADDRESS,

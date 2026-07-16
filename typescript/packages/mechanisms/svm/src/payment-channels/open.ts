@@ -2,8 +2,8 @@
  * Payment-channel open: client-side transaction builder + server-side verifier.
  *
  * Scoped to the `upto` pull flow: the client builds a payer-signed `open`
- * transaction with the fee payer as transaction sponsor and the receiver
- * authorizer as channel payee/authorized signer.
+ * transaction with the fee payer as transaction sponsor, rent payer, and
+ * zero-share channel payee, and the receiver authorizer as authorized signer.
  */
 
 import {
@@ -55,7 +55,7 @@ export interface ChannelSplit {
 export interface BuildOpenArgs {
   /** Payer (client) signer. Signs the open; pays the deposit. */
   payer: TransactionSigner;
-  /** Channel payee. For `upto`, this is the receiver authorizer. */
+  /** Channel payee. For `upto`, this is the fee payer (zero-share seat). */
   payee: string;
   /** SPL mint. */
   mint: string;
@@ -250,7 +250,7 @@ export interface VerifyOpenExpected {
   /** Authorized ceiling — the open deposit must equal it exactly (`topUp` can
    *  raise an open channel's deposit, so `>=` would leave the ceiling advisory). */
   maxCap: bigint;
-  /** Channel payee, normally the receiver authorizer. */
+  /** Channel payee. For `upto`, this is the fee payer (zero-share seat). */
   payee: string;
   /** Forced-close grace period expected in the open args. */
   withdrawDelay: number;
