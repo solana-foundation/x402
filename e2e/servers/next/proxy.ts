@@ -9,9 +9,13 @@ import { ExactAptosScheme } from "@x402/aptos/exact/server";
 import { ExactHederaScheme } from "@x402/hedera/exact/server";
 import { KEETA_TESTNET_CAIP2 } from "@x402/keeta";
 import { ExactKeetaScheme } from "@x402/keeta/exact/server";
+import { ExactNearScheme } from "@x402/near/exact/server";
+import type { XrplAssetTransferMethod } from "@x402/xrpl";
+import { ExactXrplScheme } from "@x402/xrpl/exact/server";
 import { ExactStellarScheme } from "@x402/stellar/exact/server";
 import { ExactTvmScheme } from "@x402/tvm/exact/server";
 import { ExactAvmScheme } from "@x402/avm/exact/server";
+import { ExactConcordiumScheme } from "@x402/concordium/exact/server";
 import { bazaarResourceServerExtension, declareDiscoveryExtension } from "@x402/extensions/bazaar";
 import {
   declareEip2612GasSponsoringExtension,
@@ -30,7 +34,7 @@ export const EVM_NETWORK = (process.env.EVM_NETWORK || "eip155:84532") as `${str
 export const SVM_NETWORK = (process.env.SVM_NETWORK ||
   "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1") as `${string}:${string}`;
 export const AVM_NETWORK = (process.env.AVM_NETWORK ||
-  "algorand:SGO1GKSzyE7IEPItTxCByw9x8FmnrCDexi9/cOUJOiI=") as `${string}:${string}`;
+  "algorand:SGO1GKSzyE7IEPItTxCByw9x8FmnrCDe") as `${string}:${string}`;
 export const APTOS_NETWORK = (process.env.APTOS_NETWORK || "aptos:2") as `${string}:${string}`;
 export const HEDERA_NETWORK = (process.env.HEDERA_NETWORK ||
   "hedera:testnet") as `${string}:${string}`;
@@ -40,8 +44,56 @@ export const KEETA_NETWORK = (process.env.KEETA_NETWORK || KEETA_TESTNET_CAIP2) 
 export const STELLAR_NETWORK = (process.env.STELLAR_NETWORK ||
   "stellar:testnet") as `${string}:${string}`;
 export const TVM_NETWORK = (process.env.TVM_NETWORK || "tvm:-3") as `${string}:${string}`;
+export const NEAR_PAYEE_ADDRESS = process.env.NEAR_PAYEE_ADDRESS as string | undefined;
+export const NEAR_NETWORK = (process.env.NEAR_NETWORK || "near:testnet") as `${string}:${string}`;
+export const NEAR_ASSET = process.env.NEAR_ASSET as string | undefined;
+export const NEAR_AMOUNT = process.env.NEAR_AMOUNT as string | undefined;
+export const XRPL_PAYEE_ADDRESS = process.env.XRPL_PAYEE_ADDRESS as string | undefined;
+export const XRPL_NETWORK = (process.env.XRPL_NETWORK || "xrpl:1") as `${string}:${string}`;
+export const XRPL_ASSET = process.env.XRPL_ASSET as string | undefined;
+export const XRPL_AMOUNT = process.env.XRPL_AMOUNT as string | undefined;
+export const XRPL_ISSUER = process.env.XRPL_ISSUER as string | undefined;
+export const CCD_NETWORK = (process.env.CCD_NETWORK || "ccd:4221332d34e1694168c2a0c0b3fd0f27") as `${string}:${string}`;
+export const CCD_PAYEE_ADDRESS = process.env.CCD_PAYEE_ADDRESS as string | undefined;
+export const CCD_WEATHER_PRICE_MICRO_CCD = "1000";
 const EVM_PERMIT2_ASSET = process.env.EVM_PERMIT2_ASSET as `0x${string}`;
 const facilitatorUrl = process.env.FACILITATOR_URL;
+
+export const createXrplPaymentConfig = (
+  payTo: string,
+  assetTransferMethod: XrplAssetTransferMethod,
+) => ({
+  accepts: {
+    payTo,
+    scheme: "exact" as const,
+    price: {
+      amount: XRPL_AMOUNT || "1000",
+      asset: XRPL_ASSET || "XRP",
+      extra: {
+        assetTransferMethod,
+        ...(XRPL_ASSET && XRPL_ASSET !== "XRP" && XRPL_ISSUER ? { issuer: XRPL_ISSUER } : {}),
+      },
+    },
+    network: XRPL_NETWORK,
+  },
+  extensions: {
+    ...declareDiscoveryExtension({
+      output: {
+        example: {
+          message: "Protected XRPL endpoint accessed successfully",
+          timestamp: "2024-01-01T00:00:00Z",
+        },
+        schema: {
+          properties: {
+            message: { type: "string" },
+            timestamp: { type: "string" },
+          },
+          required: ["message", "timestamp"],
+        },
+      },
+    }),
+  },
+});
 
 if (!facilitatorUrl) {
   console.error("❌ FACILITATOR_URL environment variable is required");
@@ -61,6 +113,9 @@ export const server = new x402ResourceServer(facilitatorClients);
 // Register server schemes
 if (AVM_PAYEE_ADDRESS) {
   server.register("algorand:*", new ExactAvmScheme());
+}
+if (CCD_PAYEE_ADDRESS) {
+  server.register("ccd:*", new ExactConcordiumScheme());
 }
 server.register("eip155:*", new ExactEvmScheme());
 server.register("eip155:*", new UptoEvmScheme());
@@ -94,6 +149,12 @@ if (STELLAR_PAYEE_ADDRESS) {
 }
 if (TVM_PAYEE_ADDRESS) {
   server.register("tvm:*", new ExactTvmScheme());
+}
+if (NEAR_PAYEE_ADDRESS) {
+  server.register("near:*", new ExactNearScheme());
+}
+if (XRPL_PAYEE_ADDRESS) {
+  server.register("xrpl:*", new ExactXrplScheme());
 }
 
 // Register Bazaar discovery extension
@@ -235,6 +296,38 @@ export const proxy = paymentProxy(
           },
         }
       : {}),
+    ...(CCD_PAYEE_ADDRESS
+      ? {
+          "/api/exact/ccd": {
+            accepts: {
+              payTo: CCD_PAYEE_ADDRESS,
+              scheme: "exact",
+              price: {
+                amount: CCD_WEATHER_PRICE_MICRO_CCD,
+                asset: "CCD",
+              },
+              network: CCD_NETWORK,
+            },
+            extensions: {
+              ...declareDiscoveryExtension({
+                output: {
+                  example: {
+                    message: "Protected endpoint accessed successfully",
+                    timestamp: "2024-01-01T00:00:00Z",
+                  },
+                  schema: {
+                    properties: {
+                      message: { type: "string" },
+                      timestamp: { type: "string" },
+                    },
+                    required: ["message", "timestamp"],
+                  },
+                },
+              }),
+            },
+          },
+        }
+      : {}),
     ...(APTOS_PAYEE_ADDRESS
       ? {
           "/api/exact/aptos": {
@@ -324,6 +417,47 @@ export const proxy = paymentProxy(
           },
         },
       }
+      : {}),
+    ...(NEAR_PAYEE_ADDRESS
+      ? {
+          "/api/exact/near": {
+            accepts: {
+              payTo: NEAR_PAYEE_ADDRESS,
+              scheme: "exact" as const,
+              price: {
+                amount: NEAR_AMOUNT || "1000000000000000000000",
+                asset: NEAR_ASSET || "wrap.testnet",
+              },
+              network: NEAR_NETWORK,
+            },
+            extensions: {
+              ...declareDiscoveryExtension({
+                output: {
+                  example: {
+                    message: "Protected NEAR endpoint accessed successfully",
+                    timestamp: "2024-01-01T00:00:00Z",
+                  },
+                  schema: {
+                    properties: {
+                      message: { type: "string" },
+                      timestamp: { type: "string" },
+                    },
+                    required: ["message", "timestamp"],
+                  },
+                },
+              }),
+            },
+          },
+        }
+      : {}),
+    ...(XRPL_PAYEE_ADDRESS
+      ? {
+          "/api/exact/xrpl/sequence": createXrplPaymentConfig(XRPL_PAYEE_ADDRESS, "sequence"),
+          "/api/exact/xrpl/ticketSequence": createXrplPaymentConfig(
+            XRPL_PAYEE_ADDRESS,
+            "ticketSequence",
+          ),
+        }
       : {}),
     ...(STELLAR_PAYEE_ADDRESS
       ? {
@@ -526,6 +660,10 @@ export const config = {
     "/api/exact/aptos",
     "/api/exact/hedera",
     "/api/exact/keeta",
+    "/api/exact/near",
+    "/api/exact/xrpl/sequence",
+    "/api/exact/xrpl/ticketSequence",
+    "/api/exact/ccd",
     "/api/exact/stellar",
     "/api/exact/tvm",
     "/api/exact/evm/permit2/proxy",

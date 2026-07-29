@@ -109,7 +109,10 @@ export interface SettleFailureContext extends SettleContext {
   error: Error;
 }
 
-export type VerifiedPaymentCancellationReason = "handler_threw" | "handler_failed";
+export type VerifiedPaymentCancellationReason =
+  | "handler_threw"
+  | "handler_failed"
+  | "after_verify_aborted";
 
 export interface VerifiedPaymentCanceledContext extends SettleContext {
   reason: VerifiedPaymentCancellationReason;
@@ -135,7 +138,11 @@ export type BeforeVerifyHook = (
 
 export type AfterVerifyHook = (
   context: VerifyResultContext,
-) => Promise<void | { skipHandler: true; response?: SkipHandlerDirective }>;
+) => Promise<
+  | void
+  | { skipHandler: true; response?: SkipHandlerDirective }
+  | { abort: true; reason: string; message?: string }
+>;
 
 export type OnVerifyFailureHook = (
   context: VerifyFailureContext,
@@ -621,6 +628,8 @@ export class x402ResourceServer {
             "Failed to initialize: no supported payment kinds loaded from any facilitator.",
           );
     }
+
+    this.validateFacilitatorCapabilities();
   }
 
   /**
@@ -1003,7 +1012,12 @@ export class x402ResourceServer {
         try {
           const result = await hook(failureContext);
           if (result && "recovered" in result && result.recovered) {
-            return result.result;
+            return this.runAfterVerifyHooks(
+              result.result,
+              context,
+              extensionKeysInUse,
+              matchedScheme,
+            );
           }
         } catch (error) {
           this.warnResourceServerHookFailure("onVerifyFailure", label, error);
@@ -1339,6 +1353,42 @@ export class x402ResourceServer {
   }
 
   /**
+   * Validates that each registered scheme's configuration is compatible with the
+   * facilitator capabilities advertised for the scheme/network combinations it
+   * supports. Only schemes the facilitator actually supports are validated.
+   *
+   * @throws Error listing every capability problem when one or more schemes report one.
+   */
+  private validateFacilitatorCapabilities(): void {
+    const configErrors: string[] = [];
+
+    for (const [network, schemeMap] of this.registeredServerSchemes) {
+      for (const [scheme, server] of schemeMap) {
+        if (!server.validateFacilitatorSupport) continue;
+
+        for (const x402Version of this.supportedResponsesMap.keys()) {
+          const supportedKind = this.getSupportedKind(x402Version, network as Network, scheme);
+          if (!supportedKind) continue;
+
+          const extensions = this.getFacilitatorExtensions(x402Version, network as Network, scheme);
+          const problem = server.validateFacilitatorSupport(
+            network as Network,
+            supportedKind,
+            extensions,
+          );
+          if (problem) configErrors.push(`${scheme} on ${network}: ${problem}`);
+        }
+      }
+    }
+
+    if (configErrors.length > 0) {
+      throw new Error(
+        `x402 facilitator capability errors:\n${configErrors.map(e => `  - ${e}`).join("\n")}`,
+      );
+    }
+  }
+
+  /**
    * Logs a warning when a manual or extension adapter lifecycle hook throws.
    *
    * @param phase - Lifecycle phase name (e.g. `beforeVerify`)
@@ -1392,6 +1442,20 @@ export class x402ResourceServer {
     )) {
       try {
         const directive = await hook(resultContext);
+        if (directive && "abort" in directive && directive.abort) {
+          await this.dispatchVerifiedPaymentCanceled(
+            context.paymentPayload,
+            context.requirements,
+            context.declaredExtensions,
+            { reason: "after_verify_aborted" },
+            context.transportContext,
+          );
+          return {
+            isValid: false,
+            invalidReason: directive.reason,
+            invalidMessage: directive.message,
+          };
+        }
         if (directive && "skipHandler" in directive && directive.skipHandler) {
           skipHandler = directive.response ?? {};
         }
@@ -1470,9 +1534,9 @@ export class x402ResourceServer {
    * @param fallbackTransportContext - Optional transport-specific context
    */
   private async dispatchVerifiedPaymentCanceled(
-    paymentPayload: PaymentPayload,
-    requirements: PaymentRequirements,
-    declaredExtensions: Record<string, unknown>,
+    paymentPayload: DeepReadonly<PaymentPayload>,
+    requirements: DeepReadonly<PaymentRequirements>,
+    declaredExtensions: DeepReadonly<Record<string, unknown>>,
     options: VerifiedPaymentCancelOptions,
     fallbackTransportContext?: unknown,
   ): Promise<void> {

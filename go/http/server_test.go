@@ -190,6 +190,97 @@ func TestProcessHTTPRequestPaymentRequired(t *testing.T) {
 	}
 }
 
+func TestProcessHTTPRequestMalformedPaymentSignature(t *testing.T) {
+	ctx := context.Background()
+
+	routes := RoutesConfig{
+		"GET /api": {
+			Accepts: PaymentOptions{
+				{
+					Scheme:  "exact",
+					PayTo:   "0xtest",
+					Price:   "$1.00",
+					Network: "eip155:1",
+				},
+			},
+		},
+	}
+
+	mockServer := &mockSchemeServer{scheme: "exact"}
+	mockClient := &mockFacilitatorClient{
+		supported: func(ctx context.Context) (x402.SupportedResponse, error) {
+			return x402.SupportedResponse{
+				Kinds: []x402.SupportedKind{
+					{X402Version: 2, Scheme: "exact", Network: "eip155:1"},
+				},
+				Extensions: []string{},
+				Signers:    make(map[string][]string),
+			}, nil
+		},
+	}
+
+	server := Newx402HTTPResourceServer(
+		routes,
+		x402.WithFacilitatorClient(mockClient),
+		x402.WithSchemeServer("eip155:1", mockServer),
+	)
+	_ = server.Initialize(ctx)
+
+	tests := []struct {
+		name   string
+		header string
+	}{
+		{
+			name:   "non-base64 header",
+			header: "garbage-value",
+		},
+		{
+			name:   "base64 invalid JSON",
+			header: base64.StdEncoding.EncodeToString([]byte("not-json")),
+		},
+		{
+			name:   "unsupported x402 version",
+			header: base64.StdEncoding.EncodeToString(mustMarshal(t, map[string]interface{}{"x402Version": 1})),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			adapter := &mockHTTPAdapter{
+				method: "GET",
+				path:   "/api",
+				url:    "http://example.com/api",
+				headers: map[string]string{
+					"PAYMENT-SIGNATURE": tt.header,
+				},
+			}
+
+			result := server.ProcessHTTPRequest(ctx, HTTPRequestContext{
+				Adapter: adapter,
+				Path:    "/api",
+				Method:  "GET",
+			}, nil)
+
+			if result.Type != ResultPaymentError {
+				t.Fatalf("expected ResultPaymentError, got %s", result.Type)
+			}
+			if result.Response == nil {
+				t.Fatal("expected response instructions")
+			}
+			if result.Response.Status != 400 {
+				t.Fatalf("expected status 400, got %d", result.Response.Status)
+			}
+			body, ok := result.Response.Body.(map[string]string)
+			if !ok {
+				t.Fatalf("expected string map body, got %T", result.Response.Body)
+			}
+			if body["error"] != "invalid_payload" {
+				t.Fatalf("expected invalid_payload error, got %q", body["error"])
+			}
+		})
+	}
+}
+
 func TestProcessHTTPRequestServiceMetadataOnResource(t *testing.T) {
 	ctx := context.Background()
 
@@ -1571,4 +1662,87 @@ func TestOnProtectedRequest_UnmatchedRoute_HookNotCalled(t *testing.T) {
 	if hookCalled {
 		t.Error("Hook should not be called for unmatched routes")
 	}
+}
+
+func TestRegisterExtension_ProtectedRequestHookScopedToDeclaredRoutes(t *testing.T) {
+	routes := RoutesConfig{
+		"GET /with-extension": {
+			Extensions: map[string]interface{}{"test-extension": map[string]interface{}{}},
+		},
+		"GET /without-extension": {},
+	}
+
+	extensionCalls := 0
+	server := Newx402HTTPResourceServer(routes).
+		RegisterExtension(testProtectedRequestExtension{
+			key: "test-extension",
+			hook: func(context.Context, HTTPRequestContext, RouteConfig) (*ProtectedRequestHookResult, error) {
+				extensionCalls++
+				return &ProtectedRequestHookResult{GrantAccess: true}, nil
+			},
+		})
+
+	result := server.ProcessHTTPRequest(context.Background(), HTTPRequestContext{
+		Adapter: &mockHTTPAdapter{method: "GET", path: "/without-extension", url: "http://example.com/without-extension"},
+		Path:    "/without-extension",
+		Method:  "GET",
+	}, nil)
+	if result.Type != ResultNoPaymentRequired {
+		t.Fatalf("without extension result = %s, want %s", result.Type, ResultNoPaymentRequired)
+	}
+	if extensionCalls != 0 {
+		t.Fatalf("extension hook calls = %d, want 0 for route without extension declaration", extensionCalls)
+	}
+
+	result = server.ProcessHTTPRequest(context.Background(), HTTPRequestContext{
+		Adapter: &mockHTTPAdapter{method: "GET", path: "/with-extension", url: "http://example.com/with-extension"},
+		Path:    "/with-extension",
+		Method:  "GET",
+	}, nil)
+	if result.Type != ResultNoPaymentRequired {
+		t.Fatalf("with extension result = %s, want %s", result.Type, ResultNoPaymentRequired)
+	}
+	if extensionCalls != 1 {
+		t.Fatalf("extension hook calls = %d, want 1 for route with extension declaration", extensionCalls)
+	}
+}
+
+func TestOnProtectedRequest_ManualHookRunsWithoutExtensionDeclaration(t *testing.T) {
+	routes := RoutesConfig{
+		"GET /api": {},
+	}
+
+	hookCalled := false
+	server := Newx402HTTPResourceServer(routes).
+		OnProtectedRequest(func(context.Context, HTTPRequestContext, RouteConfig) (*ProtectedRequestHookResult, error) {
+			hookCalled = true
+			return &ProtectedRequestHookResult{GrantAccess: true}, nil
+		})
+
+	result := server.ProcessHTTPRequest(context.Background(), HTTPRequestContext{
+		Adapter: &mockHTTPAdapter{method: "GET", path: "/api", url: "http://example.com/api"},
+		Path:    "/api",
+		Method:  "GET",
+	}, nil)
+	if result.Type != ResultNoPaymentRequired {
+		t.Fatalf("result = %s, want %s", result.Type, ResultNoPaymentRequired)
+	}
+	if !hookCalled {
+		t.Fatal("manual hook was not called")
+	}
+}
+
+type testProtectedRequestExtension struct {
+	key  string
+	hook ProtectedRequestHook
+}
+
+func (e testProtectedRequestExtension) Key() string { return e.key }
+
+func (e testProtectedRequestExtension) EnrichDeclaration(declaration interface{}, _ interface{}) interface{} {
+	return declaration
+}
+
+func (e testProtectedRequestExtension) ProtectedRequestHook() ProtectedRequestHook {
+	return e.hook
 }

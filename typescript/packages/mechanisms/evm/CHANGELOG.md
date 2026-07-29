@@ -1,5 +1,53 @@
 # @x402/evm Changelog
 
+## 2.20.0
+
+### Minor Changes
+
+- Updated dependencies [4453a92](https://github.com/x402-foundation/x402/commit/4453a92)
+  - @x402/core@2.20.0
+- [e5c5051](https://github.com/x402-foundation/x402/commit/e5c5051): Fixed `batch-settlement` throwing `No default asset configured for network …` on EVM networks outside `DEFAULT_STABLECOINS` when the caller supplies an explicit `amount` + `asset`. Asset metadata now flows through `parsePrice`/the caller instead of being re-derived from the registry in `enhancePaymentRequirements`, `createChannelManager` accepts an optional explicit token, and `defaultMoneyConversion` sets `assetTransferMethod` for permit2 tokens (matching the `exact` scheme). ([#2924](https://github.com/x402-foundation/x402/pull/2924)) - Thanks [@fretchen](https://github.com/fretchen)!
+
+## 2.19.0
+
+### Minor Changes
+
+- Updated dependencies [c72cfee](https://github.com/x402-foundation/x402/commit/c72cfee)
+  - @x402/core@2.19.0
+
+### Patch Changes
+
+- [c72cfee](https://github.com/x402-foundation/x402/commit/c72cfee): Fix an unauthenticated path-traversal and pre-verification channel-mutation issue in the batch-settlement server scheme. The untrusted `channelId` from an incoming payload previously reached the file-storage path builder (only lowercased) and reserved/wrote channel state before the voucher signature was verified, so a crafted `channelId` could escape `{root}/server/` and mutate or create arbitrary channel files. Channel ids are now validated to canonical `bytes32` form before any read, lock, write, or delete across file, in-memory, and Redis storage (server and client), and file paths are asserted to stay within the storage root. Verification is now two-phase: `handleBeforeVerify` is read-only and binds the claimed `channelId` to its `channelConfig` and network before touching storage, while the reservation, cumulative re-check, and persist happen in a single atomic `updateChannel` in `handleAfterVerify`. Invalid signatures, failed facilitator results, malformed ids, and transport errors now perform zero storage mutation. Storage failures and missing reservation context fail verification closed, and later after-verify aborts clear matching committed reservations. Corrective payment-required enrichment soft-fails when the claimed id fails binding instead of throwing from storage. Valid channel ids round-trip unchanged, so on-disk filenames and record bytes are identical; in-memory and Redis keys use the same lowercased canonical form. ([#2863](https://github.com/x402-foundation/x402/pull/2863)) - Thanks [@phdargen](https://github.com/phdargen)!
+
+## 2.18.0
+
+### Minor Changes
+
+- Updated dependencies [a3ad102](https://github.com/x402-foundation/x402/commit/a3ad102)
+  - @x402/core@2.18.0
+
+### Patch Changes
+
+- [d9bd02d](https://github.com/x402-foundation/x402/commit/d9bd02d): Add Igra mainnet (eip155:38833) default stablecoin USDC via Permit2 ([#2800](https://github.com/x402-foundation/x402/pull/2800)) - Thanks [@emdin](https://github.com/emdin)!
+- [0486033](https://github.com/x402-foundation/x402/commit/0486033): Align the exact EVM authorization-value-mismatch error code across SDKs. The `@x402/evm` facilitator now emits the spec-documented `invalid_exact_evm_payload_authorization_value_mismatch` reason when an authorization value does not match the required amount, matching the Go facilitator (the previous `invalid_exact_evm_authorization_value` string was not in the spec error registry). The legacy `x402` `ErrorReasons` enum now accepts this reason so responses from the Python/Go facilitators no longer fail TypeScript schema validation. ([#2744](https://github.com/x402-foundation/x402/pull/2744)) - Thanks [@DrVelvetFog](https://github.com/DrVelvetFog)!
+
+## 2.17.0
+
+### Minor Changes
+
+- [266b19d](https://github.com/x402-foundation/x402/commit/266b19d): Declares `receiverAuthorizer` in facilitator supported as optional. If a facilitator opts in to provide `receiverAuthorizer`, servers may delegate to it. Otherwise, they must provide their own. ([#2700](https://github.com/x402-foundation/x402/pull/2700)) - Thanks [@phdargen](https://github.com/phdargen)!
+- Made the batch-settlement facilitator `authorizerSigner` optional. A facilitator that omits it no longer advertises a `receiverAuthorizer` in `/supported` and requires servers to supply their own claim/refund authorizer signatures, returning `invalid_batch_settlement_evm_authorizer_not_configured` when one is missing. The batch-settlement server scheme now also implements `validateFacilitatorSupport`, so a server configured without a `receiverAuthorizerSigner` (intending to delegate) fails fast during `initialize()` when the facilitator does not advertise a usable `receiverAuthorizer`, instead of only failing lazily on the first request.
+- [4cba262](https://github.com/x402-foundation/x402/commit/4cba262): Expanded wallet compatibility so payments verify and settle consistently across plain EOAs, deployed smart accounts (ERC-4337 / ERC-7579), counterfactual ERC-6492 wallets, and ERC-7702-delegated EOAs. Pre-verification now mirrors on-chain signature checking, so a payment that passes `verify` is the same one that succeeds at `settle`. Added counterfactual ERC-6492 support to the `exact` and `batch-settlement` flows — the wallet is deployed and its signature validated together during `verify` — gated by a new `eip6492AllowedFactories` allowlist you set on the facilitator scheme config. Also added a wallet-compatibility guide documenting which wallet and scheme combinations are supported. ([#2658](https://github.com/x402-foundation/x402/pull/2658)) - Thanks [@CarsonRoscoe](https://github.com/CarsonRoscoe) and [@cursoragent](https://github.com/cursoragent)!
+- Updated dependencies [266b19d](https://github.com/x402-foundation/x402/commit/266b19d)
+  - @x402/core@2.17.0
+
+## 2.16.0
+
+### Minor Changes
+
+- Updated dependencies [59ac597](https://github.com/x402-foundation/x402/commit/59ac597)
+  - @x402/core@2.16.0
+
 ## 2.15.0
 
 ### Minor Changes

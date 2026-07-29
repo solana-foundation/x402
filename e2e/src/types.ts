@@ -1,23 +1,26 @@
 import type { NetworkSet } from './networks/networks';
 
-export type ProtocolFamily = 'evm' | 'svm' | 'avm' | 'aptos' | 'hedera' | 'keeta' | 'stellar' | 'tvm';
+export type ProtocolFamily = 'evm' | 'svm' | 'avm' | 'aptos' | 'hedera' | 'keeta' | 'near' | 'stellar' | 'ccd' | 'tvm' | 'xrpl';
 export type Transport = 'http' | 'mcp';
 export type PaymentScheme = 'exact' | 'upto' | 'batch-settlement';
-export type AssetTransferMethod = 'eip3009' | 'permit2';
+export type AssetTransferMethod = 'eip3009' | 'permit2' | 'sequence' | 'ticketSequence';
 
 /**
- * Resolved asset transfer for an EVM endpoint.
+ * Resolved asset transfer method for an endpoint.
  */
 export function endpointAssetTransferMethod(endpoint: TestEndpoint): AssetTransferMethod | undefined {
   const family = endpoint.protocolFamily ?? 'evm';
-  if (family !== 'evm') {
-    return undefined;
-  }
   if (endpoint.assetTransferMethod != null) {
     return endpoint.assetTransferMethod;
   }
-  const scheme = endpoint.scheme ?? 'exact';
-  return scheme === 'upto' ? 'permit2' : 'eip3009';
+  if (family === 'evm') {
+    const scheme = endpoint.scheme ?? 'exact';
+    return scheme === 'upto' ? 'permit2' : 'eip3009';
+  }
+  if (family === 'xrpl') {
+    return 'sequence';
+  }
+  return undefined;
 }
 
 /**
@@ -78,6 +81,8 @@ export interface ClientConfig {
   svmPrivateKey: string;
   avmPrivateKey: string;
   aptosPrivateKey: string;
+  ccdPrivateKey: string;
+  ccdAddress: string;
   hederaAccountId: string;
   hederaPrivateKey: string;
   keetaClientMnemonic: string;
@@ -89,11 +94,20 @@ export interface ClientConfig {
   evmRpcUrl: string;
   svmNetwork: string;
   svmRpcUrl: string;
+  ccdNetwork: string;
+  ccdGrpcUrl: string;
   hederaNetwork: string;
   hederaNodeUrl: string;
   keetaNetwork: string;
   tvmNetwork: string;
   tvmRpcUrl: string;
+  nearAccountId: string;
+  nearPrivateKey: string;
+  nearNetwork: string;
+  nearRpcUrl: string;
+  xrplSeed: string;
+  xrplNetwork: string;
+  xrplWsUrl: string;
   batchSettlement?: BatchSettlementClientConfig;
 }
 
@@ -103,12 +117,20 @@ export interface ServerConfig {
   svmPayTo: string;
   avmPayTo: string;
   aptosPayTo: string;
+  ccdPayTo: string;
   hederaPayTo: string;
   hederaAsset?: string;
   hederaAmount?: string;
   keetaPayTo: string;
   stellarPayTo: string;
   tvmPayTo: string;
+  nearPayTo: string;
+  nearAsset?: string;
+  nearAmount?: string;
+  xrplPayTo: string;
+  xrplAsset?: string;
+  xrplAmount?: string;
+  xrplIssuer?: string;
   networks: NetworkSet;
   facilitatorUrl?: string;
   mockFacilitatorUrl?: string;

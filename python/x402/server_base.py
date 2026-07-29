@@ -7,8 +7,10 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Awaitable, Callable, Generator
+from dataclasses import asdict, dataclass, is_dataclass
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 
+from pydantic import BaseModel
 from typing_extensions import Self
 
 from .hook_adapters import (
@@ -28,6 +30,7 @@ from .hook_policy import (
 )
 from .interfaces import SchemeNetworkServer, SchemePaymentRequiredContext
 from .schemas import (
+    X402_VERSION,
     AbortResult,
     Network,
     PaymentCancellationDispatcher,
@@ -66,6 +69,70 @@ logger = logging.getLogger("x402")
 
 if TYPE_CHECKING:
     pass
+
+# Invalid reason returned when a client's echoed extension info drops or changes a
+# server-advertised (non-dynamic) field.
+ERR_EXTENSION_ECHO_MISMATCH = "extension_echo_mismatch"
+
+
+@dataclass(frozen=True)
+class ExtensionValidationResult:
+    """Outcome of validating client extension echoes against server declarations."""
+
+    valid: bool
+    invalid_reason: str | None = None
+    extension_key: str | None = None
+
+
+def _normalize_extension_value(value: Any) -> Any:
+    """Reduce a declaration/echo to plain dict/list/scalar values for comparison.
+
+    Server declarations may be typed (pydantic models or dataclasses) while client
+    echoes are JSON-decoded plain values; normalizing both makes them comparable.
+    """
+    if isinstance(value, BaseModel):
+        return _normalize_extension_value(value.model_dump(by_alias=True))
+    if is_dataclass(value) and not isinstance(value, type):
+        return _normalize_extension_value(asdict(value))
+    if isinstance(value, dict):
+        return {key: _normalize_extension_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_normalize_extension_value(item) for item in value]
+    return value
+
+
+def _get_extension_info(value: Any) -> Any:
+    """Return the nested ``info`` envelope when present, otherwise ``value``."""
+    if isinstance(value, dict) and "info" in value:
+        return value["info"]
+    return value
+
+
+def _omit_fields(value: Any, fields: list[str] | None) -> Any:
+    """Return a copy of ``value`` without the named dynamic fields."""
+    if not fields or not isinstance(value, dict):
+        return value
+    return {key: item for key, item in value.items() if key not in fields}
+
+
+def _object_contains_subset(expected: Any, actual: Any) -> bool:
+    """Return whether ``actual`` contains every field/value from ``expected``.
+
+    Object values may add fields; arrays and primitives must match exactly.
+    """
+    if not isinstance(expected, dict):
+        return expected == actual
+    if not isinstance(actual, dict):
+        return False
+    for key, value in expected.items():
+        if key not in actual:
+            if value is None:
+                continue
+            return False
+        if not _object_contains_subset(value, actual[key]):
+            return False
+    return True
+
 
 # ============================================================================
 # FacilitatorClient Protocols (Async and Sync)
@@ -130,7 +197,7 @@ BeforeVerifyHook = Callable[
 ]
 AfterVerifyHook = Callable[
     [VerifyResultContext],
-    Awaitable[SkipHandlerResult | None] | SkipHandlerResult | None,
+    Awaitable[AbortResult | SkipHandlerResult | None] | AbortResult | SkipHandlerResult | None,
 ]
 OnVerifyFailureHook = Callable[
     [VerifyFailureContext],
@@ -153,7 +220,7 @@ OnVerifiedPaymentCanceledHook = Callable[
 
 # Sync-only hook types (for sync class)
 SyncBeforeVerifyHook = Callable[[VerifyContext], AbortResult | SkipVerifyResult | None]
-SyncAfterVerifyHook = Callable[[VerifyResultContext], SkipHandlerResult | None]
+SyncAfterVerifyHook = Callable[[VerifyResultContext], AbortResult | SkipHandlerResult | None]
 SyncOnVerifyFailureHook = Callable[[VerifyFailureContext], RecoveredVerifyResult | None]
 
 SyncBeforeSettleHook = Callable[[SettleContext], AbortResult | SkipSettleResult | None]
@@ -162,8 +229,8 @@ SyncOnSettleFailureHook = Callable[[SettleFailureContext], RecoveredSettleResult
 SyncOnVerifiedPaymentCanceledHook = Callable[[VerifiedPaymentCanceledContext], None]
 
 # Hook command type for generator-based implementation
-HookPhase = Literal["before", "after", "failure"]
-HookCommand = tuple[HookPhase, Any, Any]  # (phase, hook, context)
+HookPhase = Literal["before", "after", "failure", "call_facilitator", "dispatch_cancel"]
+HookCommand = tuple[HookPhase, Any, Any]  # (phase, hook|client|options, context)
 
 # Type alias for facilitator clients (either async or sync)
 _AnyFacilitatorClient = FacilitatorClient | FacilitatorClientSync
@@ -347,7 +414,48 @@ class x402ResourceServerBase:
                 if scheme not in self._supported_responses[network]:
                     self._supported_responses[network][scheme] = supported
 
+        self._validate_facilitator_capabilities()
         self._initialized = True
+
+    def _validate_facilitator_capabilities(self) -> None:
+        """Fail fast when a registered scheme's config is incompatible with the
+        facilitator capabilities advertised for the scheme/network it supports.
+
+        Only schemes the facilitator actually supports are validated, and only
+        schemes exposing a `validate_facilitator_support` hook participate.
+
+        Raises:
+            ValueError: Listing every capability problem when one or more are reported.
+        """
+        problems: list[str] = []
+
+        for network, scheme_map in self._schemes.items():
+            for scheme, server in scheme_map.items():
+                validate = getattr(server, "validate_facilitator_support", None)
+                if validate is None:
+                    continue
+
+                supported_kind = self.get_supported_kind(X402_VERSION, network, scheme)
+                if supported_kind is None:
+                    continue
+
+                extensions = self._facilitator_extensions(network, scheme)
+                problem = validate(network, supported_kind, extensions)
+                if problem:
+                    problems.append(f"{scheme} on {network}: {problem}")
+
+        if problems:
+            details = "\n".join(f"  - {p}" for p in problems)
+            raise ValueError(f"x402 facilitator capability errors:\n{details}")
+
+    def _facilitator_extensions(self, network: Network, scheme: str) -> list[str]:
+        """Return the extensions a facilitator advertises for a scheme/network."""
+        supported = self._supported_responses.get(network, {}).get(scheme)
+        if supported is None:
+            prefix = network.split(":")[0]
+            wildcard = f"{prefix}:*"
+            supported = self._supported_responses.get(wildcard, {}).get(scheme)
+        return list(supported.extensions) if supported else []
 
     # ========================================================================
     # Build Requirements
@@ -768,6 +876,54 @@ class x402ResourceServerBase:
     # Find Matching Requirements
     # ========================================================================
 
+    def validate_extensions(
+        self,
+        payment_required: PaymentRequired,
+        payment_payload: PaymentPayload | PaymentPayloadV1,
+    ) -> ExtensionValidationResult:
+        """Validate optional client extension echoes against server declarations.
+
+        Skips v1, and passes when either extension map is empty. For each key the
+        server declared, the echoed ``info`` must contain every advertised field
+        (clients may add their own). Fields listed by a registered extension's
+        ``dynamic_info_fields`` are regenerated per response and dropped before
+        comparison; every other advertised field stays strict.
+        """
+        if getattr(payment_payload, "x402_version", None) != 2:
+            return ExtensionValidationResult(valid=True)
+
+        server_extensions = payment_required.extensions
+        if not server_extensions:
+            return ExtensionValidationResult(valid=True)
+
+        client_extensions = getattr(payment_payload, "extensions", None)
+        if not client_extensions:
+            return ExtensionValidationResult(valid=True)
+
+        for key, echoed_value in client_extensions.items():
+            if key not in server_extensions:
+                continue
+
+            advertised_info = _get_extension_info(
+                _normalize_extension_value(server_extensions[key])
+            )
+            echoed_info = _get_extension_info(_normalize_extension_value(echoed_value))
+
+            extension = self._extensions.get(key)
+            dynamic_fields = getattr(extension, "dynamic_info_fields", None)
+
+            if not _object_contains_subset(
+                _omit_fields(advertised_info, dynamic_fields),
+                _omit_fields(echoed_info, dynamic_fields),
+            ):
+                return ExtensionValidationResult(
+                    valid=False,
+                    invalid_reason=ERR_EXTENSION_ECHO_MISMATCH,
+                    extension_key=key,
+                )
+
+        return ExtensionValidationResult(valid=True)
+
     def find_matching_requirements(
         self,
         available: list[PaymentRequirements],
@@ -1077,7 +1233,18 @@ class x402ResourceServerBase:
             ):
                 result = yield ("failure", hook, failure_context)
                 if isinstance(result, RecoveredVerifyResult):
-                    return ResourceVerifyResponse(verify=result.result)
+                    verify_response = yield from self._run_after_verify_hooks(
+                        payload,
+                        requirements,
+                        payload_bytes,
+                        requirements_bytes,
+                        declared_extensions,
+                        transport_context,
+                        result.result,
+                        matched_scheme,
+                        extension_keys,
+                    )
+                    return verify_response
 
             raise
 
@@ -1093,7 +1260,11 @@ class x402ResourceServerBase:
         matched_scheme: dict[str, str] | None = None,
         extension_keys: list[str] | None = None,
     ) -> Generator[HookCommand, Any, ResourceVerifyResponse]:
-        """Run after-verify hooks and attach any skip-handler directive."""
+        """Run after-verify hooks and attach any skip-handler directive.
+
+        On AbortResult: stop remaining hooks, dispatch after_verify_aborted
+        cancellation, and return an invalid verify response.
+        """
         skip_handler: SkipHandlerDirective | None = None
         declared = declared_extensions or {}
         result_context = VerifyResultContext(
@@ -1117,6 +1288,19 @@ class x402ResourceServerBase:
             scheme,
         ):
             hook_result = yield ("after", hook, result_context)
+            if isinstance(hook_result, AbortResult):
+                yield (
+                    "dispatch_cancel",
+                    VerifiedPaymentCancelOptions(reason="after_verify_aborted"),
+                    (payload, requirements, declared_extensions, transport_context),
+                )
+                return ResourceVerifyResponse(
+                    verify=VerifyResponse(
+                        is_valid=False,
+                        invalid_reason=hook_result.reason,
+                        invalid_message=hook_result.message,
+                    )
+                )
             if isinstance(hook_result, SkipHandlerResult):
                 skip_handler = hook_result.response or SkipHandlerDirective()
 

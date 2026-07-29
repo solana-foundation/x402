@@ -49,6 +49,7 @@ import {
   createHederaClient,
   createHederaPreflightTransfer,
   createHederaSignAndSubmitTransaction,
+  createHederaVerifyPayerSignature,
   toFacilitatorHederaSigner,
 } from "@x402/hedera";
 import { ExactHederaScheme } from "@x402/hedera/exact/facilitator";
@@ -64,6 +65,13 @@ import { toFacilitatorKeetaSigner, KEETA_TESTNET_CAIP2, FacilitatorKeetaSigner }
 import { ExactKeetaScheme } from "@x402/keeta/exact/facilitator";
 import { ExactStellarScheme } from "@x402/stellar/exact/facilitator";
 import {
+  CONCORDIUM_TESTNET_CAIP2,
+  getConcordiumGrpcUrl,
+  parseGrpcUrl,
+  toConcordiumFacilitatorSigner,
+} from "@x402/concordium";
+import { ExactConcordiumScheme } from "@x402/concordium/exact/facilitator";
+import {
   HighloadV3Config,
   toFacilitatorTvmSigner,
   TVM_PROVIDER_TONAPI,
@@ -71,6 +79,9 @@ import {
   type FacilitatorHighloadV3Signer,
 } from "@x402/tvm";
 import { ExactTvmScheme } from "@x402/tvm/exact/facilitator";
+import { createFacilitatorNearSigner, type FacilitatorNearSignerConfig } from "@x402/near";
+import { ExactNearScheme as ExactNearFacilitatorScheme } from "@x402/near/exact/facilitator";
+import { ExactXrplScheme as ExactXrplFacilitatorScheme } from "@x402/xrpl/exact/facilitator";
 import * as KeetaNet from "@keetanetwork/keetanet-client";
 import crypto from "crypto";
 import dotenv from "dotenv";
@@ -99,11 +110,18 @@ const SVM_NETWORK =
 const APTOS_NETWORK = process.env.APTOS_NETWORK || "aptos:2";
 const AVM_NETWORK =
   process.env.AVM_NETWORK ||
-  "algorand:SGO1GKSzyE7IEPItTxCByw9x8FmnrCDexi9/cOUJOiI=";
+  "algorand:SGO1GKSzyE7IEPItTxCByw9x8FmnrCDe";
 const HEDERA_NETWORK = process.env.HEDERA_NETWORK || "hedera:testnet";
 const KEETA_NETWORK = process.env.KEETA_NETWORK || KEETA_TESTNET_CAIP2;
 const STELLAR_NETWORK = process.env.STELLAR_NETWORK || "stellar:testnet";
 const TVM_NETWORK = process.env.TVM_NETWORK || "tvm:-3";
+const NEAR_NETWORK = process.env.NEAR_NETWORK || "near:testnet";
+const NEAR_RPC_URL = process.env.NEAR_RPC_URL;
+const XRPL_NETWORK = process.env.XRPL_NETWORK || "xrpl:1";
+const XRPL_WS_URL = process.env.XRPL_WS_URL;
+const CCD_NETWORK = process.env.CCD_NETWORK || CONCORDIUM_TESTNET_CAIP2;
+const CCD_GRPC_URL =
+  process.env.CCD_GRPC_URL || getConcordiumGrpcUrl(CCD_NETWORK as Network);
 const EVM_RPC_URL = process.env.EVM_RPC_URL;
 const SVM_RPC_URL = process.env.SVM_RPC_URL;
 const AVM_RPC_URL = process.env.AVM_RPC_URL;
@@ -131,6 +149,8 @@ console.log(`🌐 Hedera Network: ${HEDERA_NETWORK}`);
 console.log(`🌐 Keeta Network: ${KEETA_NETWORK}`);
 console.log(`🌐 Stellar Network: ${STELLAR_NETWORK}`);
 console.log(`🌐 TVM Network: ${TVM_NETWORK}`);
+console.log(`🌐 CCD Network: ${CCD_NETWORK}`);
+console.log(`🌐 CCD gRPC URL: ${CCD_GRPC_URL}`);
 if (EVM_RPC_URL) console.log(`🌐 EVM RPC URL: ${EVM_RPC_URL}`);
 if (SVM_RPC_URL) console.log(`🌐 SVM RPC URL: ${SVM_RPC_URL}`);
 if (AVM_RPC_URL) console.log(`🌐 AVM RPC URL: ${AVM_RPC_URL}`);
@@ -219,7 +239,8 @@ if (process.env.HEDERA_ACCOUNT_ID && process.env.HEDERA_PRIVATE_KEY) {
       buildHederaClient,
       hederaKey,
     ),
-    preflightTransfer: createHederaPreflightTransfer(buildHederaClient),
+    verifyPayerSignature: createHederaVerifyPayerSignature(),
+    preflightTransfer: createHederaPreflightTransfer(),
   });
   console.info(`Hedera Facilitator account: ${hederaAccountId}`);
 }
@@ -260,6 +281,33 @@ if (process.env.TVM_PRIVATE_KEY) {
   });
   tvmSigner = toFacilitatorTvmSigner({ [TVM_NETWORK]: tvmConfig });
   console.info(`TVM Facilitator account: ${tvmSigner.getAddressesForNetwork(TVM_NETWORK)[0]}`);
+}
+
+// Initialize the NEAR facilitator (relayer) signer from account + key (optional)
+let nearSigner: ReturnType<typeof createFacilitatorNearSigner> | undefined;
+if (process.env.NEAR_RELAYER_ACCOUNT_ID && process.env.NEAR_RELAYER_PRIVATE_KEY) {
+  nearSigner = createFacilitatorNearSigner({
+    relayers: [
+      {
+        accountId: process.env.NEAR_RELAYER_ACCOUNT_ID,
+        secretKey: process.env
+          .NEAR_RELAYER_PRIVATE_KEY as FacilitatorNearSignerConfig["relayers"][number]["secretKey"],
+      },
+    ],
+    rpcUrls: NEAR_RPC_URL ? { [NEAR_NETWORK]: NEAR_RPC_URL } : undefined,
+  });
+  console.info(`NEAR Facilitator relayer: ${process.env.NEAR_RELAYER_ACCOUNT_ID}`);
+}
+
+let concordiumSigner: ReturnType<typeof toConcordiumFacilitatorSigner> | undefined;
+if (process.env.CCD_FACILITATOR_PRIVATE_KEY && process.env.CCD_FACILITATOR_ADDRESS) {
+  const [host, port] = parseGrpcUrl(CCD_GRPC_URL);
+  concordiumSigner = toConcordiumFacilitatorSigner(
+    process.env.CCD_FACILITATOR_ADDRESS,
+    process.env.CCD_FACILITATOR_PRIVATE_KEY,
+    { host, port, useTls: true },
+  );
+  console.info(`CCD Facilitator account: ${process.env.CCD_FACILITATOR_ADDRESS} on ${CCD_NETWORK} (private key)`);
 }
 
 // Create a Viem client with both wallet and public capabilities
@@ -502,6 +550,24 @@ if (stellarSigner) {
 }
 if (tvmSigner) {
   facilitator.register(TVM_NETWORK as Network, new ExactTvmScheme(tvmSigner));
+}
+if (nearSigner) {
+  facilitator.register(NEAR_NETWORK as Network, new ExactNearFacilitatorScheme(nearSigner));
+}
+if (process.env.XRPL_NETWORK) {
+  facilitator.register(
+    XRPL_NETWORK as Network,
+    new ExactXrplFacilitatorScheme(
+      XRPL_WS_URL ? { wsUrlByNetwork: { [XRPL_NETWORK as `xrpl:${number}`]: XRPL_WS_URL } } : {},
+    ),
+  );
+  console.info(`XRPL facilitator enabled on ${XRPL_NETWORK} (payer-signed; no facilitator signer)`);
+}
+if (concordiumSigner) {
+  facilitator.register(
+    CCD_NETWORK as Network,
+    new ExactConcordiumScheme({ signer: concordiumSigner }),
+  );
 }
 
 
@@ -825,6 +891,9 @@ app.get("/health", (req, res) => {
     hederaNetwork: hederaSigner ? HEDERA_NETWORK : "(not configured)",
     keetaNetwork: process.env.KEETA_FACILITATOR_MNEMONIC ? KEETA_NETWORK : "(not configured)",
     stellarNetwork: stellarSigner ? STELLAR_NETWORK : "(not configured)",
+    nearNetwork: nearSigner ? NEAR_NETWORK : "(not configured)",
+    xrplNetwork: process.env.XRPL_NETWORK ? XRPL_NETWORK : "(not configured)",
+    ccdNetwork: concordiumSigner ? CCD_NETWORK : "(not configured)",
     facilitator: "typescript",
     version: "2.0.0",
     extensions: [BAZAAR.key],
@@ -860,12 +929,17 @@ let server = app.listen(parseInt(PORT), () => {
 ║  Aptos Network: ${APTOS_NETWORK}                       ║
 ║  Hedera Network: ${HEDERA_NETWORK}                     ║
 ║  Keeta Network: ${KEETA_NETWORK}                       ║
+║  NEAR Network: ${NEAR_NETWORK}                         ║
+║  XRPL Network: ${XRPL_NETWORK}                         ║
+║  CCD Network:  ${CCD_NETWORK}                          ║
 ║  EVM Address:  ${evmAccount.address}                   ║
 ║  AVM Address:  ${avmSigner ? avmSigner.getAddresses()[0] : "(not configured)"}
 ║  Aptos Address: ${aptosAccount ? aptosAccount.accountAddress.toStringLong().slice(0, 20) + "..." : "(not configured)"}
 ║  Hedera Address: ${process.env.HEDERA_ACCOUNT_ID || "(not configured)"} ║
 ║  Keeta Address: ${keetaSigner?.getAddresses()[0] || "(not configured)"} ║
 ║  Stellar Address: ${stellarSigner ? stellarSigner.address : "(not configured)"} ║
+║  NEAR Address: ${process.env.NEAR_RELAYER_ACCOUNT_ID || "(not configured)"} ║
+║  CCD Address:  ${concordiumSigner ? concordiumSigner.getAddress() : "(not configured)"} ║
 ║  Extensions:   bazaar                                  ║
 ║                                                        ║
 ║  Endpoints:                                            ║

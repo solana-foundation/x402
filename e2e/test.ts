@@ -18,6 +18,7 @@ import { GenericServerProxy } from './src/servers/generic-server';
 import { Semaphore, ResourceLock } from './src/concurrency';
 import { FacilitatorManager } from './src/facilitators/facilitator-manager';
 import { waitForHealth } from './src/health';
+import { probeMcpReady } from './src/mcpHealth';
 import { createPortAllocator } from './src/ports';
 
 /**
@@ -30,6 +31,41 @@ function generateChannelSalt(): `0x${string}` {
   const bytes = new Uint8Array(32);
   crypto.getRandomValues(bytes);
   return toHex(bytes);
+}
+
+// ── Transient on-chain failure resilience ───────────────────────────────────
+// EVM Permit2 / gas-sponsoring / coldstart flows depend on testnet RPC state
+// (Permit2 allowance + account nonce) being visible across load-balanced nodes.
+// When that state hasn't propagated yet, the resource server's local pre-check
+// rejects the payment with a transient 402 before it ever reaches the
+// facilitator. These failures are non-deterministic (a different subset fails
+// each run) and clear on a short retry once state settles. eip3009 and non-EVM
+// flows don't exhibit this, so retries are scoped to EVM Permit2 scenarios.
+const EVM_PAYMENT_MAX_ATTEMPTS = 3;
+const EVM_PAYMENT_RETRY_DELAY_MS = 4000;
+
+/**
+ * Heuristic for whether a failed EVM payment is a transient on-chain/RPC issue
+ * worth retrying (vs a deterministic structural failure that would just repeat).
+ */
+function isTransientPaymentFailure(error?: string): boolean {
+  if (!error) return false;
+  const e = error.toLowerCase();
+  return (
+    e.includes('402') ||
+    e.includes('payment required') ||
+    e.includes('payment failed') ||
+    e.includes('nonce') ||
+    e.includes('replacement transaction') ||
+    e.includes('underpriced') ||
+    e.includes('insufficient allowance') ||
+    e.includes('timeout') ||
+    e.includes('timed out') ||
+    e.includes('econnreset') ||
+    e.includes('econnrefused') ||
+    e.includes('fetch failed') ||
+    e.includes('socket hang up')
+  );
 }
 
 /**
@@ -404,14 +440,30 @@ const parsedArgs = parseArgs();
 
 async function startServer(
   server: any,
-  serverConfig: ServerConfig
+  serverConfig: ServerConfig,
+  options?: { transport?: string },
 ): Promise<boolean> {
   verboseLog(`  🚀 Starting server on port ${serverConfig.port}...`);
   await server.start(serverConfig);
 
-  return waitForHealth(
+  const healthy = await waitForHealth(
     () => server.health(),
     { initialDelayMs: 250, label: 'Server' },
+  );
+
+  if (!healthy) {
+    return false;
+  }
+
+  if (options?.transport !== 'mcp') {
+    return true;
+  }
+
+  // Probe the real protocol (SSE connect + initialize handshake) before handing off to the first real test
+  // request, to avoid racing a freshly booted server's session warm-up.
+  return waitForHealth(
+    async () => ({ success: await probeMcpReady(server.getUrl()) }),
+    { intervalMs: 500, maxAttempts: 10, label: 'MCP session' },
   );
 }
 
@@ -446,7 +498,7 @@ function maskPrivateKeys<T>(value: T): T {
     const masked: Record<string, unknown> = {};
     for (const [key, entry] of Object.entries(value)) {
       masked[key] =
-        /privateKey/i.test(key) && typeof entry === 'string' && entry.length > 0
+        /(privateKey|seed)$/i.test(key) && typeof entry === 'string' && entry.length > 0
           ? maskSecret(entry)
           : maskPrivateKeys(entry);
     }
@@ -608,6 +660,51 @@ function envFlagDefaultTrue(value: string | undefined): boolean {
   return !['0', 'false', 'no', 'off'].includes(value.toLowerCase());
 }
 
+function waitForChildProcess(child: ChildProcess, timeoutMs: number): Promise<boolean> {
+  if (child.exitCode !== null || child.signalCode !== null) {
+    return Promise.resolve(true);
+  }
+
+  return new Promise(resolve => {
+    const onClose = () => {
+      clearTimeout(timeout);
+      resolve(true);
+    };
+    const timeout = setTimeout(() => {
+      child.removeListener('close', onClose);
+      resolve(false);
+    }, timeoutMs);
+
+    child.once('close', onClose);
+  });
+}
+
+async function stopMockFacilitator(child: ChildProcess, url: string): Promise<void> {
+  try {
+    const response = await fetch(`${url}/close`, {
+      method: 'POST',
+      signal: AbortSignal.timeout(2_000),
+    });
+    await response.text();
+  } catch (error) {
+    verboseLog(`Mock facilitator graceful shutdown failed: ${String(error)}`);
+  }
+
+  if (await waitForChildProcess(child, 3_000)) {
+    return;
+  }
+
+  child.kill('SIGTERM');
+  if (await waitForChildProcess(child, 3_000)) {
+    return;
+  }
+
+  child.kill('SIGKILL');
+  await waitForChildProcess(child, 2_000);
+  child.stdout?.destroy();
+  child.stderr?.destroy();
+}
+
 async function runTest() {
   // Show help if requested
   if (parsedArgs.showHelp) {
@@ -628,28 +725,40 @@ async function runTest() {
   const serverSvmAddress = process.env.SERVER_SVM_ADDRESS;
   const serverAvmAddress = process.env.SERVER_AVM_ADDRESS;
   const serverAptosAddress = process.env.SERVER_APTOS_ADDRESS;
+  const serverCcdAddress = process.env.SERVER_CCD_ADDRESS;
   const serverHederaAddress = process.env.SERVER_HEDERA_ADDRESS;
   const serverKeetaAddress = process.env.SERVER_KEETA_ADDRESS;
   const serverStellarAddress = process.env.SERVER_STELLAR_ADDRESS;
   const serverTvmAddress = process.env.SERVER_TVM_ADDRESS;
+  const serverNearAddress = process.env.SERVER_NEAR_ADDRESS;
+  const serverXrplAddress = process.env.SERVER_XRPL_ADDRESS;
   const clientEvmPrivateKey = process.env.CLIENT_EVM_PRIVATE_KEY;
   const clientSvmPrivateKey = process.env.CLIENT_SVM_PRIVATE_KEY;
   const clientAvmPrivateKey = process.env.CLIENT_AVM_PRIVATE_KEY;
   const clientAptosPrivateKey = process.env.CLIENT_APTOS_PRIVATE_KEY;
+  const clientCcdPrivateKey = process.env.CLIENT_CCD_PRIVATE_KEY;
+  const clientCcdAddress = process.env.CLIENT_CCD_ADDRESS;
   const clientHederaAccountId = process.env.CLIENT_HEDERA_ACCOUNT_ID;
   const clientHederaPrivateKey = process.env.CLIENT_HEDERA_PRIVATE_KEY;
   const clientKeetaMnemonic = process.env.CLIENT_KEETA_MNEMONIC;
   const clientStellarPrivateKey = process.env.CLIENT_STELLAR_PRIVATE_KEY;
   const clientTvmPrivateKey = process.env.CLIENT_TVM_PRIVATE_KEY;
+  const clientNearAccountId = process.env.CLIENT_NEAR_ACCOUNT_ID;
+  const clientNearPrivateKey = process.env.CLIENT_NEAR_PRIVATE_KEY;
+  const clientXrplSeed = process.env.CLIENT_XRPL_SEED;
   const facilitatorEvmPrivateKey = process.env.FACILITATOR_EVM_PRIVATE_KEY;
   const facilitatorSvmPrivateKey = process.env.FACILITATOR_SVM_PRIVATE_KEY;
   const facilitatorAvmPrivateKey = process.env.FACILITATOR_AVM_PRIVATE_KEY;
   const facilitatorAptosPrivateKey = process.env.FACILITATOR_APTOS_PRIVATE_KEY;
+  const facilitatorCcdPrivateKey = process.env.FACILITATOR_CCD_PRIVATE_KEY;
+  const facilitatorCcdAddress = process.env.FACILITATOR_CCD_ADDRESS;
   const facilitatorHederaAccountId = process.env.FACILITATOR_HEDERA_ACCOUNT_ID;
   const facilitatorHederaPrivateKey = process.env.FACILITATOR_HEDERA_PRIVATE_KEY;
   const facilitatorKeetaMnemonic = process.env.FACILITATOR_KEETA_MNEMONIC;
   const facilitatorStellarPrivateKey = process.env.FACILITATOR_STELLAR_PRIVATE_KEY;
   const facilitatorTvmPrivateKey = process.env.FACILITATOR_TVM_PRIVATE_KEY;
+  const facilitatorNearAccountId = process.env.FACILITATOR_NEAR_ACCOUNT_ID;
+  const facilitatorNearPrivateKey = process.env.FACILITATOR_NEAR_PRIVATE_KEY;
   const batchSettlementRecovery = envFlagDefaultTrue(process.env.BATCH_SETTLEMENT_RECOVERY);
 
   // Discover all servers, clients, and facilitators (always include legacy)
@@ -730,10 +839,13 @@ async function runTest() {
   log(`   EVM Permit2 asset: ${evmPermit2Asset || '(missing)'} (${permit2AssetSource})`);
   log(`   SVM: ${networks.svm.name} (${networks.svm.caip2})`);
   log(`   APTOS: ${networks.aptos.name} (${networks.aptos.caip2})`);
+  log(`   CCD: ${networks.ccd.name} (${networks.ccd.caip2})`);
   log(`   HEDERA: ${networks.hedera.name} (${networks.hedera.caip2})`);
   log(`   KEETA: ${networks.keeta.name} (${networks.keeta.caip2})`);
   log(`   STELLAR: ${networks.stellar.name} (${networks.stellar.caip2})`);
   log(`   TVM: ${networks.tvm.name} (${networks.tvm.caip2})`);
+  log(`   NEAR: ${networks.near.name} (${networks.near.caip2})`);
+  log(`   XRPL: ${networks.xrpl.name} (${networks.xrpl.caip2})`);
 
   if (networkMode === 'mainnet') {
     log('\n⚠️  WARNING: Running on MAINNET - real funds will be used!');
@@ -770,6 +882,13 @@ async function runTest() {
       ['CLIENT_AVM_PRIVATE_KEY', clientAvmPrivateKey],
       ['FACILITATOR_AVM_PRIVATE_KEY', facilitatorAvmPrivateKey],
     ],
+    ccd: [
+      ['SERVER_CCD_ADDRESS', serverCcdAddress],
+      ['CLIENT_CCD_PRIVATE_KEY', clientCcdPrivateKey],
+      ['CLIENT_CCD_ADDRESS', clientCcdAddress],
+      ['FACILITATOR_CCD_PRIVATE_KEY', facilitatorCcdPrivateKey],
+      ['FACILITATOR_CCD_ADDRESS', facilitatorCcdAddress],
+    ],
     hedera: [
       ['SERVER_HEDERA_ADDRESS', serverHederaAddress],
       ['CLIENT_HEDERA_ACCOUNT_ID', clientHederaAccountId],
@@ -787,11 +906,22 @@ async function runTest() {
       ['CLIENT_TVM_PRIVATE_KEY', clientTvmPrivateKey],
       ['FACILITATOR_TVM_PRIVATE_KEY', facilitatorTvmPrivateKey],
     ],
+    near: [
+      ['SERVER_NEAR_ADDRESS', serverNearAddress],
+      ['CLIENT_NEAR_ACCOUNT_ID', clientNearAccountId],
+      ['CLIENT_NEAR_PRIVATE_KEY', clientNearPrivateKey],
+      ['FACILITATOR_NEAR_ACCOUNT_ID', facilitatorNearAccountId],
+      ['FACILITATOR_NEAR_PRIVATE_KEY', facilitatorNearPrivateKey],
+    ],
+    xrpl: [
+      ['SERVER_XRPL_ADDRESS', serverXrplAddress],
+      ['CLIENT_XRPL_SEED', clientXrplSeed],
+    ],
   };
 
   // Apply coverage-based minimization if --min flag is set
   if (parsedArgs.minimize) {
-    filteredScenarios = minimizeScenarios(filteredScenarios);
+    filteredScenarios = minimizeScenarios(filteredScenarios, parsedArgs.seed);
 
     if (filteredScenarios.length === 0) {
       log('❌ All scenarios are already covered');
@@ -809,6 +939,21 @@ async function runTest() {
       if (!value) {
         missingRequiredEnv.add(name);
       }
+    }
+  }
+
+  // CCD: require private-key+address for client and facilitator.
+  if (selectedProtocolFamilies.has('ccd')) {
+    const clientHasKey = !!(clientCcdPrivateKey && clientCcdAddress);
+    const facilitatorHasKey = !!(facilitatorCcdPrivateKey && facilitatorCcdAddress);
+
+    if (clientHasKey) {
+      missingRequiredEnv.delete('CLIENT_CCD_PRIVATE_KEY');
+      missingRequiredEnv.delete('CLIENT_CCD_ADDRESS');
+    }
+    if (facilitatorHasKey) {
+      missingRequiredEnv.delete('FACILITATOR_CCD_PRIVATE_KEY');
+      missingRequiredEnv.delete('FACILITATOR_CCD_ADDRESS');
     }
   }
 
@@ -982,6 +1127,21 @@ async function runTest() {
     'TVM_PROVIDER',
     'TONAPI_API_KEY',
     'TONAPI_BASE_URL',
+    'NEAR_NETWORK',
+    'NEAR_RPC_URL',
+    'NEAR_ACCOUNT_ID',
+    'NEAR_PRIVATE_KEY',
+    'NEAR_RELAYER_ACCOUNT_ID',
+    'NEAR_RELAYER_PRIVATE_KEY',
+    'NEAR_PAYEE_ADDRESS',
+    'NEAR_ASSET',
+    'NEAR_AMOUNT',
+    'XRPL_NETWORK',
+    'XRPL_WS_URL',
+    'XRPL_SEED',
+    'XRPL_PAYEE_ADDRESS',
+    'XRPL_ASSET',
+    'XRPL_AMOUNT',
   ]);
 
   for (const [facilitatorName, facilitator] of uniqueFacilitators) {
@@ -1070,14 +1230,27 @@ async function runTest() {
     comboMap.get(key)!.push(scenario);
   }
 
-  // Convert map to array of combos, assigning a unique port to each
+  // Convert map to array of combos, assigning a unique port to each.
+  // Within each combo, sort scenarios so permit2Direct tests run before
+  // coldstart tests. The coldstart flow drains the shared client wallet's
+  // ETH; if it ran first, a subsequent permit2Direct test would have no
+  // gas for its Permit2 approve transaction.
+  const schemeOptionsPriority = (scenario: TestScenario): number => {
+    if (scenario.endpoint.schemeOptions?.permit2Direct === true) return 0;
+    // No special schemeOptions (plain warmup, eip3009, etc.) — middle
+    if (!scenario.endpoint.schemeOptions?.coldstart) return 1;
+    // coldstart drains ETH — always last
+    return 2;
+  };
+
   let comboIndex = 0;
   for (const [, scenarios] of comboMap) {
-    const firstScenario = scenarios[0];
+    const sorted = [...scenarios].sort((a, b) => schemeOptionsPriority(a) - schemeOptionsPriority(b));
+    const firstScenario = sorted[0];
     serverFacilitatorCombos.push({
       serverName: firstScenario.server.name,
       facilitatorName: firstScenario.facilitator?.name,
-      scenarios,
+      scenarios: sorted,
       comboIndex,
       port: allocatePort(),
     });
@@ -1116,7 +1289,7 @@ async function runTest() {
   const mockFacilitatorPort = allocatePort();
   log(`\n🎭 Starting mock facilitator on port ${mockFacilitatorPort}...`);
   const mockFacilitatorProcess: ChildProcess = spawn(
-    'npx', ['tsx', 'index.ts'],
+    process.execPath, ['--import', 'tsx', 'index.ts'],
     {
       cwd: join(process.cwd(), 'mock-facilitator'),
       env: {
@@ -1125,9 +1298,12 @@ async function runTest() {
         EVM_NETWORK: networks.evm.caip2,
         SVM_NETWORK: networks.svm.caip2,
         APTOS_NETWORK: networks.aptos.caip2,
+        CCD_NETWORK: networks.ccd.caip2,
         KEETA_NETWORK: networks.keeta.caip2,
         STELLAR_NETWORK: networks.stellar.caip2,
         TVM_NETWORK: networks.tvm.caip2,
+        NEAR_NETWORK: networks.near.caip2,
+        XRPL_NETWORK: networks.xrpl.caip2,
       },
       stdio: 'pipe',
     },
@@ -1153,7 +1329,7 @@ async function runTest() {
   );
   if (!mockHealthy) {
     log('❌ Failed to start mock facilitator');
-    mockFacilitatorProcess.kill();
+    await stopMockFacilitator(mockFacilitatorProcess, mockFacilitatorUrl);
     process.exit(1);
   }
   log(`  ✅ Mock facilitator ready at ${mockFacilitatorUrl}`);
@@ -1189,6 +1365,8 @@ async function runTest() {
       svmPrivateKey: clientSvmPrivateKey!,
       avmPrivateKey: clientAvmPrivateKey || '',
       aptosPrivateKey: clientAptosPrivateKey || '',
+      ccdPrivateKey: clientCcdPrivateKey || '',
+      ccdAddress: clientCcdAddress || '',
       hederaAccountId: clientHederaAccountId || '',
       hederaPrivateKey: clientHederaPrivateKey || '',
       keetaClientMnemonic: clientKeetaMnemonic || '',
@@ -1200,11 +1378,20 @@ async function runTest() {
       evmRpcUrl: networks.evm.rpcUrl,
       svmNetwork: networks.svm.caip2,
       svmRpcUrl: networks.svm.rpcUrl,
+      ccdNetwork: networks.ccd.caip2,
+      ccdGrpcUrl: networks.ccd.rpcUrl,
       hederaNetwork: networks.hedera.caip2,
       hederaNodeUrl: networks.hedera.rpcUrl,
       keetaNetwork: networks.keeta.caip2,
       tvmNetwork: networks.tvm.caip2,
       tvmRpcUrl: networks.tvm.rpcUrl,
+      nearAccountId: clientNearAccountId || '',
+      nearPrivateKey: clientNearPrivateKey || '',
+      nearNetwork: networks.near.caip2,
+      nearRpcUrl: networks.near.rpcUrl,
+      xrplSeed: clientXrplSeed || '',
+      xrplNetwork: networks.xrpl.caip2,
+      xrplWsUrl: networks.xrpl.rpcUrl,
     };
 
     try {
@@ -1432,10 +1619,13 @@ async function runTest() {
     const facilitatorConfig = facilitatorName ? uniqueFacilitators.get(facilitatorName)?.config : undefined;
     const facilitatorSupportsAvm = facilitatorConfig?.protocolFamilies?.includes('avm') ?? false;
     const facilitatorSupportsAptos = facilitatorConfig?.protocolFamilies?.includes('aptos') ?? false;
+    const facilitatorSupportsCcd = facilitatorConfig?.protocolFamilies?.includes('ccd') ?? false;
     const facilitatorSupportsHedera = facilitatorConfig?.protocolFamilies?.includes('hedera') ?? false;
     const facilitatorSupportsKeeta = facilitatorConfig?.protocolFamilies?.includes('keeta') ?? false;
     const facilitatorSupportsStellar = facilitatorConfig?.protocolFamilies?.includes('stellar') ?? false;
     const facilitatorSupportsTvm = facilitatorConfig?.protocolFamilies?.includes('tvm') ?? false;
+    const facilitatorSupportsNear = facilitatorConfig?.protocolFamilies?.includes('near') ?? false;
+    const facilitatorSupportsXrpl = facilitatorConfig?.protocolFamilies?.includes('xrpl') ?? false;
 
     const serverConfig: ServerConfig = {
       port,
@@ -1443,6 +1633,7 @@ async function runTest() {
       svmPayTo: serverSvmAddress!,
       avmPayTo: facilitatorSupportsAvm ? (serverAvmAddress || '') : '',
       aptosPayTo: facilitatorSupportsAptos ? (serverAptosAddress || '') : '',
+      ccdPayTo: facilitatorSupportsCcd ? (serverCcdAddress || '') : '',
       hederaPayTo:
         facilitatorSupportsHedera &&
           facilitatorHederaAccountId &&
@@ -1454,6 +1645,13 @@ async function runTest() {
       keetaPayTo: facilitatorSupportsKeeta ? (serverKeetaAddress || '') : '',
       stellarPayTo: facilitatorSupportsStellar ? (serverStellarAddress || '') : '',
       tvmPayTo: facilitatorSupportsTvm ? (serverTvmAddress || '') : '',
+      nearPayTo: facilitatorSupportsNear ? (serverNearAddress || '') : '',
+      nearAsset: process.env.SERVER_NEAR_ASSET,
+      nearAmount: process.env.SERVER_NEAR_AMOUNT,
+      xrplPayTo: facilitatorSupportsXrpl ? (serverXrplAddress || '') : '',
+      xrplAsset: process.env.SERVER_XRPL_ASSET,
+      xrplAmount: process.env.SERVER_XRPL_AMOUNT,
+      xrplIssuer: process.env.SERVER_XRPL_ISSUER,
       networks,
       facilitatorUrl,
       mockFacilitatorUrl,
@@ -1469,7 +1667,7 @@ async function runTest() {
         : {}),
     };
 
-    const started = await startServer(serverProxy, serverConfig);
+    const started = await startServer(serverProxy, serverConfig, { transport: server.config.transport });
     if (!started) {
       cLog.log(`❌ Failed to start server ${serverName}`);
       return scenarios.map(scenario => ({
@@ -1551,7 +1749,25 @@ async function runTest() {
             }
           }
 
-          const result = await runSingleTest(scenario, port, tn, cLog);
+          // Bounded retry for EVM Permit2 flows: transient 402s here are
+          // almost always stale on-chain state (allowance/nonce not yet
+          // propagated across load-balanced RPC nodes). Retry with a delay so
+          // state can settle; eip3009 and non-EVM flows run once (maxAttempts=1).
+          const isPermit2 = endpointAssetTransferMethod(scenario.endpoint) === 'permit2';
+          const maxAttempts = isEvm && isPermit2 ? EVM_PAYMENT_MAX_ATTEMPTS : 1;
+          let result = await runSingleTest(scenario, port, tn, cLog);
+          for (
+            let attempt = 1;
+            attempt < maxAttempts && !result.passed && isTransientPaymentFailure(result.error);
+            attempt++
+          ) {
+            cLog.log(
+              `  🔁 Test #${tn} transient failure (attempt ${attempt}/${maxAttempts}): ${result.error}. ` +
+              `Retrying in ${EVM_PAYMENT_RETRY_DELAY_MS}ms to let on-chain state settle...`
+            );
+            await new Promise(resolve => setTimeout(resolve, EVM_PAYMENT_RETRY_DELAY_MS));
+            result = await runSingleTest(scenario, port, tn, cLog);
+          }
 
           if (isEvm && resourceLock) {
             await new Promise(resolve => setTimeout(resolve, 1000));
@@ -1680,8 +1896,10 @@ async function runTest() {
     facilitatorStopPromises.push(manager.stop());
   }
   log('  🛑 Stopping mock facilitator');
-  mockFacilitatorProcess.kill();
-  await Promise.all(facilitatorStopPromises);
+  await Promise.all([
+    stopMockFacilitator(mockFacilitatorProcess, mockFacilitatorUrl),
+    ...facilitatorStopPromises,
+  ]);
 
   // Calculate totals
   const passed = testResults.filter(r => r.passed).length;
@@ -1844,12 +2062,13 @@ async function runTest() {
   }
 
   // Close logger
-  closeLogger();
-
-  if (failed > 0 || discoveryFailed) {
-    process.exit(1);
-  }
+  await closeLogger();
+  process.exit(failed > 0 || discoveryFailed ? 1 : 0);
 }
 
 // Run the test
-runTest().catch(error => errorLog(error));
+runTest().catch(async error => {
+  errorLog(String(error));
+  await closeLogger();
+  process.exit(1);
+});

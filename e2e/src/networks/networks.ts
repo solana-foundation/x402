@@ -6,7 +6,7 @@
  */
 
 export type NetworkMode = 'testnet' | 'mainnet';
-export type ProtocolFamily = 'evm' | 'svm' | 'avm' | 'aptos' | 'hedera' | 'keeta' | 'stellar' | 'tvm';
+export type ProtocolFamily = 'evm' | 'svm' | 'avm' | 'aptos' | 'hedera' | 'keeta' | 'near' | 'stellar' | 'ccd' | 'tvm' | 'xrpl';
 
 export type NetworkConfig = {
   name: string;
@@ -23,7 +23,10 @@ export type NetworkSet = {
   hedera: NetworkConfig;
   keeta: NetworkConfig;
   stellar: NetworkConfig;
+  ccd: NetworkConfig;
   tvm: NetworkConfig;
+  near: NetworkConfig;
+  xrpl: NetworkConfig;
 };
 
 /**
@@ -44,8 +47,13 @@ const NETWORK_SETS: Record<NetworkMode, NetworkSet> = {
     },
     avm: {
       name: 'Algorand Testnet',
-      caip2: 'algorand:SGO1GKSzyE7IEPItTxCByw9x8FmnrCDexi9/cOUJOiI=',
+      caip2: 'algorand:SGO1GKSzyE7IEPItTxCByw9x8FmnrCDe',
       rpcUrl: process.env.AVM_TESTNET_RPC_URL || 'https://testnet-api.4160.nodely.dev',
+    },
+    ccd: {
+      name: 'Concordium Testnet',
+      caip2: 'ccd:4221332d34e1694168c2a0c0b3fd0f27',
+      rpcUrl: process.env.CONCORDIUM_TESTNET_GRPC_URL || 'grpc.testnet.concordium.com:20000',
     },
     aptos: {
       name: 'Aptos Testnet',
@@ -73,6 +81,16 @@ const NETWORK_SETS: Record<NetworkMode, NetworkSet> = {
       caip2: 'tvm:-3',
       rpcUrl: process.env.TONCENTER_TESTNET_BASE_URL || 'https://testnet.toncenter.com',
     },
+    near: {
+      name: 'NEAR Testnet',
+      caip2: 'near:testnet',
+      rpcUrl: process.env.NEAR_TESTNET_RPC_URL || 'https://rpc.testnet.fastnear.com',
+    },
+    xrpl: {
+      name: 'XRPL Testnet',
+      caip2: 'xrpl:1',
+      rpcUrl: process.env.XRPL_TESTNET_WS_URL || 'wss://s.altnet.rippletest.net:51233',
+    },
   },
   mainnet: {
     evm: {
@@ -88,8 +106,13 @@ const NETWORK_SETS: Record<NetworkMode, NetworkSet> = {
     },
     avm: {
       name: 'Algorand Mainnet',
-      caip2: 'algorand:wGHE2Pwdvd7S12BL5FaOP20EGYesN73ktiC1qzkkit8=',
+      caip2: 'algorand:wGHE2Pwdvd7S12BL5FaOP20EGYesN73k',
       rpcUrl: process.env.AVM_RPC_URL || 'https://mainnet-api.4160.nodely.dev',
+    },
+    ccd: {
+      name: 'Concordium Mainnet',
+      caip2: 'ccd:9dd9ca4d19e9393877d2c44b70f89acb',
+      rpcUrl: process.env.CONCORDIUM_MAINNET_GRPC_URL || 'grpc.mainnet.concordium.software:20000',
     },
     aptos: {
       name: 'Aptos',
@@ -116,6 +139,16 @@ const NETWORK_SETS: Record<NetworkMode, NetworkSet> = {
       name: 'TON Mainnet',
       caip2: 'tvm:-239',
       rpcUrl: process.env.TONCENTER_MAINNET_BASE_URL || 'https://toncenter.com',
+    },
+    near: {
+      name: 'NEAR',
+      caip2: 'near:mainnet',
+      rpcUrl: process.env.NEAR_RPC_URL || 'https://rpc.mainnet.fastnear.com',
+    },
+    xrpl: {
+      name: 'XRPL',
+      caip2: 'xrpl:0',
+      rpcUrl: process.env.XRPL_MAINNET_WS_URL || 'wss://s1.ripple.com:51233',
     },
   },
 };
@@ -151,7 +184,7 @@ export function resolveEvmPermit2Asset(networks: NetworkSet): string {
  * Get network config for a protocol family in a given mode
  *
  * @param mode - 'testnet' or 'mainnet'
- * @param protocolFamily - 'evm', 'svm', 'avm', 'aptos', 'hedera', 'stellar', or 'tvm'
+ * @param protocolFamily - 'evm', 'svm', 'avm', 'aptos', 'hedera', 'near', 'stellar', 'ccd', 'tvm', or 'xrpl'
  * @returns NetworkConfig for the specified protocol
  */
 export function getNetworkForProtocol(
@@ -169,6 +202,6 @@ export function getNetworkForProtocol(
  */
 export function getNetworkModeDescription(mode: NetworkMode): string {
   const set = NETWORK_SETS[mode];
-  const networks = [set.evm.name, set.svm.name, set.avm.name, set.aptos.name, set.hedera.name, set.keeta.name, set.stellar.name, set.tvm.name];
+  const networks = [set.evm.name, set.svm.name, set.avm.name, set.aptos.name, set.hedera.name, set.keeta.name, set.near.name, set.stellar.name, set.ccd.name, set.tvm.name, set.xrpl.name];
   return networks.join(' + ');
 }

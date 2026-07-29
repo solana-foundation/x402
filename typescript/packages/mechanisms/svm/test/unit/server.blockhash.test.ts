@@ -1,4 +1,8 @@
-import { describe, it, expect, vi } from "vitest";
+import { beforeEach, describe, it, expect, vi } from "vitest";
+
+const { getLatestBlockhashSend } = vi.hoisted(() => ({
+  getLatestBlockhashSend: vi.fn(),
+}));
 
 // Stub the RPC so enhancePaymentRequirements resolves a deterministic blockhash
 // without a network round-trip. Only createRpcClient is overridden; the rest of
@@ -9,21 +13,28 @@ vi.mock("../../src/utils", async () => {
     ...actual,
     createRpcClient: () => ({
       getLatestBlockhash: () => ({
-        send: async () => ({
-          value: {
-            blockhash: "EZ3rST5dvHmbanh75jc4PuLfV96vp9fEYBVeNk4FfM1k",
-            lastValidBlockHeight: 12345n,
-          },
-        }),
+        send: getLatestBlockhashSend,
       }),
     }),
   };
 });
 
 import { ExactSvmScheme } from "../../src/exact/server/scheme";
+import { UptoSvmScheme } from "../../src/upto/server/scheme";
 import { SOLANA_DEVNET_CAIP2 } from "../../src/constants";
 
 describe("ExactSvmScheme — recent blockhash in the 402 challenge", () => {
+  beforeEach(() => {
+    getLatestBlockhashSend.mockReset();
+    getLatestBlockhashSend.mockResolvedValue({
+      context: { slot: 98765n },
+      value: {
+        blockhash: "EZ3rST5dvHmbanh75jc4PuLfV96vp9fEYBVeNk4FfM1k",
+        lastValidBlockHeight: 12345n,
+      },
+    });
+  });
+
   const base = {
     scheme: "exact",
     network: SOLANA_DEVNET_CAIP2,
@@ -55,5 +66,65 @@ describe("ExactSvmScheme — recent blockhash in the 402 challenge", () => {
     expect(req.extra?.recentBlockhash).toBeUndefined();
     expect(req.extra?.lastValidBlockHeight).toBeUndefined();
     expect(req.extra?.feePayer).toBe("FeePay3r1111111111111111111111111111111111");
+  });
+
+  it("omits the blockhash when the configured RPC fails", async () => {
+    getLatestBlockhashSend.mockRejectedValueOnce(new Error("RPC unavailable"));
+    const scheme = new ExactSvmScheme({ rpcUrl: "https://rpc.example" });
+
+    const req = await scheme.enhancePaymentRequirements(base as never, supportedKind as never, []);
+
+    expect(req.extra?.recentBlockhash).toBeUndefined();
+    expect(req.extra?.lastValidBlockHeight).toBeUndefined();
+    expect(req.extra?.feePayer).toBe("FeePay3r1111111111111111111111111111111111");
+  });
+});
+
+describe("UptoSvmScheme — recent blockhash + slot in the 402 challenge", () => {
+  beforeEach(() => {
+    getLatestBlockhashSend.mockReset();
+    getLatestBlockhashSend.mockResolvedValue({
+      context: { slot: 98765n },
+      value: {
+        blockhash: "EZ3rST5dvHmbanh75jc4PuLfV96vp9fEYBVeNk4FfM1k",
+        lastValidBlockHeight: 12345n,
+      },
+    });
+  });
+
+  const base = {
+    scheme: "upto",
+    network: SOLANA_DEVNET_CAIP2,
+    amount: "100000",
+    asset: "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",
+    payTo: "GsbwXfJraMomNxBcjK7xK2xQx5MQgQUF2k3wEX2Q9z3w",
+    maxTimeoutSeconds: 300,
+    extra: {},
+  };
+  const supportedKind = {
+    x402Version: 2,
+    scheme: "upto",
+    network: SOLANA_DEVNET_CAIP2,
+    extra: { facilitatorAddress: "Op3rator111111111111111111111111111111111" },
+  };
+
+  it("embeds recentBlockhash + recentSlot (from the same response) when an rpcUrl is configured", async () => {
+    const scheme = new UptoSvmScheme({ rpcUrl: "https://rpc.example" });
+    const req = await scheme.enhancePaymentRequirements(base as never, supportedKind as never, []);
+    expect(req.extra?.recentBlockhash).toBe("EZ3rST5dvHmbanh75jc4PuLfV96vp9fEYBVeNk4FfM1k");
+    expect(req.extra?.lastValidBlockHeight).toBe("12345");
+    // The slot the blockhash was produced at — the channel-PDA `open_slot` anchor.
+    expect(req.extra?.recentSlot).toBe("98765");
+    // The facilitator binding is still threaded through alongside.
+    expect(req.extra?.facilitatorAddress).toBe("Op3rator111111111111111111111111111111111");
+  });
+
+  it("omits the blockhash and slot when no rpcUrl is configured", async () => {
+    const scheme = new UptoSvmScheme();
+    const req = await scheme.enhancePaymentRequirements(base as never, supportedKind as never, []);
+    expect(req.extra?.recentBlockhash).toBeUndefined();
+    expect(req.extra?.lastValidBlockHeight).toBeUndefined();
+    expect(req.extra?.recentSlot).toBeUndefined();
+    expect(req.extra?.facilitatorAddress).toBe("Op3rator111111111111111111111111111111111");
   });
 });

@@ -3,6 +3,7 @@ package x402
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/big"
 	"regexp"
@@ -241,7 +242,62 @@ func (s *x402ResourceServer) Initialize(ctx context.Context) error {
 		s.supportedCache.Set(fmt.Sprintf("facilitator_%p", client), supported)
 	}
 
-	return nil
+	return s.validateFacilitatorCapabilities(ctx)
+}
+
+// validateFacilitatorCapabilities fails fast when a registered scheme's config is
+// incompatible with the facilitator capabilities advertised for the scheme/network
+// it supports. Only schemes the facilitator actually supports are validated, and
+// only schemes implementing FacilitatorSupportValidator participate.
+func (s *x402ResourceServer) validateFacilitatorCapabilities(_ context.Context) error {
+	var problems []error
+
+	for network, schemeMap := range s.schemes {
+		for scheme, server := range schemeMap {
+			validator, ok := server.(FacilitatorSupportValidator)
+			if !ok {
+				continue
+			}
+
+			supportedKind, extensions, found := s.findSupportedKind(network, scheme)
+			if !found {
+				continue
+			}
+
+			if err := validator.ValidateFacilitatorSupport(network, supportedKind, extensions); err != nil {
+				problems = append(problems, fmt.Errorf("%s on %s: %w", scheme, network, err))
+			}
+		}
+	}
+
+	if len(problems) == 0 {
+		return nil
+	}
+	return fmt.Errorf("x402 facilitator capability errors: %w", errors.Join(problems...))
+}
+
+// findSupportedKind scans the cached facilitator responses for the V2 kind matching
+// the scheme/network and returns it alongside the facilitator's advertised extensions.
+// The bool reports whether the facilitator supports the scheme/network at all.
+func (s *x402ResourceServer) findSupportedKind(network Network, scheme string) (types.SupportedKind, []string, bool) {
+	s.supportedCache.mu.RLock()
+	defer s.supportedCache.mu.RUnlock()
+
+	for _, cachedResponse := range s.supportedCache.data {
+		for _, kind := range cachedResponse.Kinds {
+			if kind.X402Version != 2 || kind.Scheme != scheme || string(kind.Network) != string(network) {
+				continue
+			}
+			supportedKind := types.SupportedKind{
+				X402Version: kind.X402Version,
+				Scheme:      kind.Scheme,
+				Network:     string(kind.Network),
+				Extra:       kind.Extra,
+			}
+			return supportedKind, cachedResponse.Extensions, true
+		}
+	}
+	return types.SupportedKind{}, nil, false
 }
 
 // HasRegisteredScheme checks if a scheme is registered for a given network
@@ -900,20 +956,9 @@ func (s *x402ResourceServer) VerifyPaymentWithExtensions(
 	}
 
 	// Short-circuit: a BeforeVerify hook produced a local verify result. Still run
-	// AfterVerify hooks so cooperative-refund SkipHandler signaling works.
+	// AfterVerify hooks so cooperative-refund SkipHandler signaling and abort work.
 	if skipVerifyResult != nil {
-		resultCtx := VerifyResultContext{VerifyContext: hookCtx, Result: skipVerifyResult}
-		for _, lh := range afterVerifyHooks {
-			directive, _ := lh.Hook(resultCtx)
-			if directive != nil && directive.SkipHandler {
-				resp := directive.Response
-				if resp == nil {
-					resp = &SkipHandlerDirective{}
-				}
-				skipVerifyResult.SkipHandler = resp
-			}
-		}
-		return skipVerifyResult, nil
+		return s.runAfterVerifyHooks(payload, requirements, declaredExtensions, hookCtx, afterVerifyHooks, skipVerifyResult)
 	}
 
 	if facilitator == nil {
@@ -929,7 +974,7 @@ func (s *x402ResourceServer) VerifyPaymentWithExtensions(
 		for _, lh := range verifyFailureHooks {
 			result, _ := lh.Hook(failureCtx)
 			if result != nil && result.Recovered {
-				return result.Result, nil
+				return s.runAfterVerifyHooks(payload, requirements, declaredExtensions, hookCtx, afterVerifyHooks, result.Result)
 			}
 		}
 		return verifyResult, verifyErr
@@ -953,19 +998,51 @@ func (s *x402ResourceServer) VerifyPaymentWithExtensions(
 		for _, lh := range verifyFailureHooks {
 			result, _ := lh.Hook(failureCtx)
 			if result != nil && result.Recovered {
-				return result.Result, nil
+				return s.runAfterVerifyHooks(payload, requirements, declaredExtensions, hookCtx, afterVerifyHooks, result.Result)
 			}
 		}
 		return verifyResult, ve
 	}
 
-	// Execute afterVerify hooks. The last hook to return a SkipHandler directive
-	// wins; this lets schemes signal that a self-contained operation (e.g.
-	// cooperative refund) should bypass the resource handler and settle inline.
+	return s.runAfterVerifyHooks(payload, requirements, declaredExtensions, hookCtx, afterVerifyHooks, verifyResult)
+}
+
+// runAfterVerifyHooks runs after-verify hooks against a verify result.
+// On Abort, remaining hooks stop, after_verify_aborted cancellation fires, and
+// verification fails closed. Otherwise the last SkipHandler directive wins.
+func (s *x402ResourceServer) runAfterVerifyHooks(
+	payload types.PaymentPayload,
+	requirements types.PaymentRequirements,
+	declaredExtensions map[string]interface{},
+	hookCtx VerifyContext,
+	afterVerifyHooks []labeledHook[AfterVerifyHook],
+	verifyResult *VerifyResponse,
+) (*VerifyResponse, error) {
+	if verifyResult == nil {
+		return nil, NewVerifyError(ErrCodeInvalidPayment, "", "missing verify result")
+	}
+
 	resultCtx := VerifyResultContext{VerifyContext: hookCtx, Result: verifyResult}
 	for _, lh := range afterVerifyHooks {
 		directive, _ := lh.Hook(resultCtx) // Log errors but don't fail
-		if directive != nil && directive.SkipHandler {
+		if directive == nil {
+			continue
+		}
+		if directive.Abort {
+			dispatcher := s.CreatePaymentCancellationDispatcherWithExtensions(
+				hookCtx.Ctx, payload, requirements, declaredExtensions,
+			)
+			dispatcher.Cancel(VerifiedPaymentCancelOptions{
+				Reason: CancellationReasonAfterVerifyAborted,
+			})
+			return &VerifyResponse{
+					IsValid:        false,
+					InvalidReason:  directive.Reason,
+					InvalidMessage: directive.Message,
+				},
+				NewVerifyError(directive.Reason, "", directive.Message)
+		}
+		if directive.SkipHandler {
 			resp := directive.Response
 			if resp == nil {
 				resp = &SkipHandlerDirective{}

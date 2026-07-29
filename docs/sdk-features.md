@@ -34,6 +34,9 @@ This page tracks which features are implemented in each SDK (TypeScript, Go, Pyt
 | aptos | ✅ | ❌ | ❌ |
 | hedera | ✅ | ❌ | ❌ |
 | keeta | ✅ | ❌ | ❌ |
+| near | ✅ | ❌ | ❌ |
+| ccd (Concordium) | ✅ | ❌ | ❌ |
+| xrpl | ✅ | ❌ | ❌ |
 
 ## Mechanisms
 
@@ -48,6 +51,10 @@ This page tracks which features are implemented in each SDK (TypeScript, Go, Pyt
 | exact | hedera | - | ✅ | ❌ | ❌ |
 | exact | tvm | - | ✅ | ❌ | ✅ |
 | exact | keeta | - | ✅ | ❌ | ❌ |
+| exact | near | - | ✅ | ❌ | ❌ |
+| exact | ccd (Concordium) | sponsored V1 | ✅ | ❌ | ❌ |
+| exact | xrpl | `sequence` | ✅ | ❌ | ❌ |
+| exact | xrpl | `ticketSequence` | ✅ | ❌ | ❌ |
 | upto | evm | `permit2` | ✅ | ✅ | ✅ |
 | batch-settlement | evm | `eip3009` | ✅ | ✅ | ✅ |
 | batch-settlement | evm | `permit2` | ✅ | ✅ | ✅ |
@@ -59,8 +66,8 @@ This page tracks which features are implemented in each SDK (TypeScript, Go, Pyt
 | bazaar (server) | ✅ | ✅ | ✅ |
 | bazaar (facilitator client - list) | ✅ | ✅ | ✅ |
 | bazaar (facilitator client - search) | ✅ | ✅ | ✅ |
-| builder-code | ✅ | ✅ | ❌ |
-| sign-in-with-x | ✅ | ❌ | ✅ |
+| builder-code | ✅ | ✅ | ✅ |
+| sign-in-with-x | ✅ | ✅ | ✅ |
 | payment-identifier | ✅ | ✅ | ✅ |
 | offer-receipt | ✅ | ❌ | ❌ |
 | eip2612-gas-sponsoring | ✅ | ✅ | ✅ |
