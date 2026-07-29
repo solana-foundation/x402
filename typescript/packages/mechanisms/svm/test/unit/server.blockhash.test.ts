@@ -1,4 +1,8 @@
-import { describe, it, expect, vi } from "vitest";
+import { beforeEach, describe, it, expect, vi } from "vitest";
+
+const { getLatestBlockhashSend } = vi.hoisted(() => ({
+  getLatestBlockhashSend: vi.fn(),
+}));
 
 // Stub the RPC so enhancePaymentRequirements resolves a deterministic blockhash
 // without a network round-trip. Only createRpcClient is overridden; the rest of
@@ -9,13 +13,7 @@ vi.mock("../../src/utils", async () => {
     ...actual,
     createRpcClient: () => ({
       getLatestBlockhash: () => ({
-        send: async () => ({
-          context: { slot: 98765n },
-          value: {
-            blockhash: "EZ3rST5dvHmbanh75jc4PuLfV96vp9fEYBVeNk4FfM1k",
-            lastValidBlockHeight: 12345n,
-          },
-        }),
+        send: getLatestBlockhashSend,
       }),
     }),
   };
@@ -26,6 +24,17 @@ import { UptoSvmScheme } from "../../src/upto/server/scheme";
 import { SOLANA_DEVNET_CAIP2 } from "../../src/constants";
 
 describe("ExactSvmScheme — recent blockhash in the 402 challenge", () => {
+  beforeEach(() => {
+    getLatestBlockhashSend.mockReset();
+    getLatestBlockhashSend.mockResolvedValue({
+      context: { slot: 98765n },
+      value: {
+        blockhash: "EZ3rST5dvHmbanh75jc4PuLfV96vp9fEYBVeNk4FfM1k",
+        lastValidBlockHeight: 12345n,
+      },
+    });
+  });
+
   const base = {
     scheme: "exact",
     network: SOLANA_DEVNET_CAIP2,
@@ -58,9 +67,31 @@ describe("ExactSvmScheme — recent blockhash in the 402 challenge", () => {
     expect(req.extra?.lastValidBlockHeight).toBeUndefined();
     expect(req.extra?.feePayer).toBe("FeePay3r1111111111111111111111111111111111");
   });
+
+  it("omits the blockhash when the configured RPC fails", async () => {
+    getLatestBlockhashSend.mockRejectedValueOnce(new Error("RPC unavailable"));
+    const scheme = new ExactSvmScheme({ rpcUrl: "https://rpc.example" });
+
+    const req = await scheme.enhancePaymentRequirements(base as never, supportedKind as never, []);
+
+    expect(req.extra?.recentBlockhash).toBeUndefined();
+    expect(req.extra?.lastValidBlockHeight).toBeUndefined();
+    expect(req.extra?.feePayer).toBe("FeePay3r1111111111111111111111111111111111");
+  });
 });
 
 describe("UptoSvmScheme — recent blockhash + slot in the 402 challenge", () => {
+  beforeEach(() => {
+    getLatestBlockhashSend.mockReset();
+    getLatestBlockhashSend.mockResolvedValue({
+      context: { slot: 98765n },
+      value: {
+        blockhash: "EZ3rST5dvHmbanh75jc4PuLfV96vp9fEYBVeNk4FfM1k",
+        lastValidBlockHeight: 12345n,
+      },
+    });
+  });
+
   const base = {
     scheme: "upto",
     network: SOLANA_DEVNET_CAIP2,

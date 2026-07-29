@@ -42,8 +42,20 @@ There are pre-configured [examples available in the x402 repo](https://github.co
     # For Keeta support, also add:
     npm install @x402/keeta
 
+    # For Hedera support, also add:
+    npm install @x402/hedera
+
+    # For Concordium support, also add:
+    npm install @x402/concordium
+
     # For TON (TVM) support, also add:
     npm install @x402/tvm
+
+    # For NEAR support, also add:
+    npm install @x402/near
+
+    # For XRPL support, also add:
+    npm install @x402/xrpl
     ```
   </Tab>
   <Tab title="Go">
@@ -191,6 +203,34 @@ const account = KeetaNet.lib.Account.fromSeed(
 const keetaSigner = toClientKeetaSigner(account);
 ```
 
+#### Hedera
+
+Use `@x402/hedera` to instantiate a signer:
+
+```typescript
+import { createClientHederaSigner } from "@x402/hedera";
+import { PrivateKey } from "@hiero-ledger/sdk";
+
+const hederaSigner = createClientHederaSigner(
+  process.env.HEDERA_ACCOUNT_ID!,
+  PrivateKey.fromStringECDSA(process.env.HEDERA_PRIVATE_KEY!),
+  { network: "hedera:testnet" },
+);
+```
+
+#### Concordium
+
+Use `@x402/concordium` with the Concordium web SDK to instantiate a signer:
+
+```typescript
+import { buildBasicAccountSigner, AccountAddress } from "@concordium/web-sdk";
+
+const concordiumSigner = {
+  accountAddress: AccountAddress.fromBase58(process.env.CCD_ADDRESS!),
+  signer: buildBasicAccountSigner(process.env.CCD_PRIVATE_KEY!),
+};
+```
+
 #### TON (TVM)
 
 Use `@x402/tvm` to instantiate a signer:
@@ -204,6 +244,30 @@ const tvmSigner = toClientTvmSigner(keyPair, {
   network: "tvm:-3",
   apiKey: process.env.TONCENTER_API_KEY,
 });
+```
+
+#### NEAR
+
+Use `@x402/near` to instantiate a signer:
+
+```typescript
+import { createClientNearSigner } from "@x402/near";
+
+const nearSigner = createClientNearSigner({
+  accountId: "alice.testnet",
+  secretKey: process.env.NEAR_SECRET_KEY!, // ed25519:... full-access key
+});
+```
+
+#### XRPL
+
+Use `@x402/xrpl` to instantiate a signer:
+
+```typescript
+import { Wallet } from "xrpl";
+import { createXrplWalletSigner } from "@x402/xrpl";
+
+const xrplSigner = createXrplWalletSigner(Wallet.fromSeed(process.env.XRPL_SEED!));
 ```
 
 ### 3. Make Paid Requests Automatically
@@ -490,6 +554,27 @@ You can register multiple payment schemes to handle different networks:
     );
     client.register("keeta:*", new ExactKeetaScheme(toClientKeetaSigner(keetaAccount)));
 
+    // For Hedera support, also add:
+    import { ExactHederaScheme } from "@x402/hedera/exact/client";
+    import { createClientHederaSigner, PrivateKey } from "@x402/hedera";
+
+    const hederaSigner = createClientHederaSigner(
+      process.env.HEDERA_ACCOUNT_ID!,
+      PrivateKey.fromStringECDSA(process.env.HEDERA_PRIVATE_KEY!),
+      { network: "hedera:testnet" },
+    );
+    client.register("hedera:*", new ExactHederaScheme(hederaSigner));
+
+    // For Concordium support, also add:
+    import { ExactConcordiumScheme } from "@x402/concordium/exact/client";
+    import { buildBasicAccountSigner, AccountAddress } from "@concordium/web-sdk";
+
+    const concordiumSigner = {
+      accountAddress: AccountAddress.fromBase58(process.env.CCD_ADDRESS!),
+      signer: buildBasicAccountSigner(process.env.CCD_PRIVATE_KEY!),
+    };
+    client.register("ccd:*", new ExactConcordiumScheme(concordiumSigner));
+
     // For TON (TVM) support, also add:
     import { ExactTvmScheme } from "@x402/tvm/exact/client";
     import { toClientTvmSigner } from "@x402/tvm";
@@ -505,6 +590,23 @@ You can register multiple payment schemes to handle different networks:
         }),
       ),
     );
+
+    // For NEAR support, also add:
+    import { ExactNearScheme, createClientNearSigner } from "@x402/near";
+
+    const nearSigner = createClientNearSigner({
+      accountId: "alice.testnet",
+      secretKey: process.env.NEAR_SECRET_KEY!, // ed25519:... full-access key
+    });
+    client.register("near:*", new ExactNearScheme(nearSigner));
+
+    // For XRPL support, also add:
+    import { Wallet } from "xrpl";
+    import { createXrplWalletSigner } from "@x402/xrpl";
+    import { ExactXrplScheme } from "@x402/xrpl/exact/client";
+
+    const xrplSigner = createXrplWalletSigner(Wallet.fromSeed(process.env.XRPL_SEED!));
+    client.register("xrpl:*", new ExactXrplScheme(xrplSigner));
     ```
   </Tab>
   <Tab title="Go">
@@ -637,7 +739,7 @@ try {
 
 ### Summary
 
-* Install x402 client packages (`@x402/fetch` or `@x402/axios`) and mechanism packages (`@x402/evm`, `@x402/svm`, `@x402/tvm`, `@x402/aptos`, `@x402/keeta`)
+* Install x402 client packages (`@x402/fetch` or `@x402/axios`) and mechanism packages (`@x402/evm`, `@x402/svm`, `@x402/tvm`, `@x402/aptos`, `@x402/keeta`, `@x402/near`, `@x402/xrpl`)
 * Create a wallet signer
 * Create an `x402Client` and register payment schemes (`exact` for fixed-price, `upto` for usage-based billing, `batch-settlement` for batched EVM micropayments when the server advertises it)
 * Use the provided wrapper/interceptor to make paid API requests
@@ -658,4 +760,4 @@ try {
 * [@x402/evm on npm](https://www.npmjs.com/package/@x402/evm)
 * [x402 Go module](https://github.com/x402-foundation/x402/tree/main/go)
 
-For questions or support, join our [Discord](https://discord.gg/cdp).
+For questions or support, join our [Slack](http://slack.x402.org/).

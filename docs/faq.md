@@ -70,6 +70,8 @@ Yes. x402 handles the _payment execution_. You can still meter usage, aggregate 
 
 \* Gas paid onchain; many facilitators offer **zero** facilitator fees (see [Facilitators](/dev-tools/facilitators) for details).
 
+For the complete list of protocol-supported networks and tokens, see [Networks & Token Support](/core-concepts/network-and-token-support).
+
 _Support for additional chains and assets is on the roadmap and community‑driven._
 
 #### Does x402 support fiat off‑ramps or credit‑card deposits?
@@ -129,6 +131,10 @@ Yes. Programmatic wallets (e.g., **CDP Wallet API**, **viem**, **ethers‑v6** H
 * If you are still using `https://x402.org/facilitator`, switch to a production facilitator. The default x402.org facilitator is for testnet development and does not support Base mainnet (`eip155:8453`), which can surface as a route-configuration error after changing only the network.
 * Confirm your wallet has _mainnet_ USDC.
 * Gas fees are higher on mainnet; fund the wallet with a small amount of ETH for gas.
+
+#### My service settles payments but doesn't appear in a facilitator's catalog — why?
+
+Catalog indexing is a **facilitator implementation detail**, not something the x402 OSS repo controls. Contact the facilitator or catalog operator you're using first. For common self-checks (echoed `bazaar` extension, SDK helpers, async indexing) and [reference server examples](https://github.com/x402-foundation/x402/tree/main/examples), see [Bazaar — Troubleshooting catalog visibility](/extensions/bazaar#troubleshooting-catalog-visibility).
 
 ### Still have questions?
 

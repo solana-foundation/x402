@@ -1,3 +1,35 @@
+## v2.20.0 - 2026-07-27
+### Added
+- Support server-provided recent blockhashes for Go SVM exact payment challenges ([#2731](https://github.com/x402-foundation/x402/pull/2731)) - Thanks [@wnjoon](https://github.com/wnjoon)!
+### Changed
+- 'Cap builder-code service codes (`s`) to five onchain entries at settlement. Facilitators now truncate excess valid codes, the server schema advertises `maxItems: 5`, and `MAX_SERVICE_CODES` is exported.' ([#2912](https://github.com/x402-foundation/x402/pull/2912)) - Thanks [@phdargen](https://github.com/phdargen)!
+### Fixed
+- Return a spec-compatible invalid_payload error for malformed PAYMENT-SIGNATURE headers in the Go HTTP server ([#2907](https://github.com/x402-foundation/x402/pull/2907)) - Thanks [@wnjoon](https://github.com/wnjoon)!
+- Preserved one-shot request bodies across payment retries. ([#2914](https://github.com/x402-foundation/x402/pull/2914)) - Thanks [@wnjoon](https://github.com/wnjoon)!
+- Propagated client storage errors during batch settlement and refunds. ([#2917](https://github.com/x402-foundation/x402/pull/2917)) - Thanks [@wnjoon](https://github.com/wnjoon)!
+- Rejected small-order Ed25519 public keys in SIWx Solana signature verification. ([#2933](https://github.com/x402-foundation/x402/pull/2933)) - Thanks [@phdargen](https://github.com/phdargen)!
+
+## v2.19.0 - 2026-07-17
+### Changed
+- SIWX validation and verification results now use IsValid, InvalidReason, InvalidMessage, and Payer instead of Valid, Error, and Address. Each failure includes a machine-readable invalid_siwx_* code aligned with the TypeScript SDK. ([#2889](https://github.com/x402-foundation/x402/pull/2889)) - Thanks [@phdargen](https://github.com/phdargen)!
+- Require a configured `Origin` for SIWX server integration. Challenge issuance and proof validation now bind to this operator-defined public origin instead of deriving trust from request headers or per-route declaration fields. Pass `Origin` to `CreateResourceServerExtension()`; remove `Domain` and `ResourceURI` from `DeclareOptions`. ([#2859](https://github.com/x402-foundation/x402/pull/2859)) - Thanks [@phdargen](https://github.com/phdargen)!
+### Fixed
+- Fix unauthenticated path-traversal and pre-verification channel mutation in the batch-settlement server scheme, and widen AfterVerifyHook so hooks can abort with after_verify_aborted cancellation. Channel ids are validated to canonical bytes32 form before storage access; file paths stay within the storage root; reservation is deferred until after successful verify; recovered onVerifyFailure results now run after-verify hooks. ([#2863](https://github.com/x402-foundation/x402/pull/2863)) - Thanks [@phdargen](https://github.com/phdargen)!
+- Fix batch-settlement SettleDeposit double-counting channel balance after a confirmed deposit by anchoring the optimistic balance to a pre-submit ReadChannelState and adding depositAmount once. ([#2881](https://github.com/x402-foundation/x402/pull/2881)) - Thanks [@phdargen](https://github.com/phdargen)!
+- Fix batch-settlement VerifyDeposit returning projected balance+deposit in verify extra before the deposit is mined, aligning with TS/Python so AfterVerifyHook does not cache unconfirmed escrow. ([#2883](https://github.com/x402-foundation/x402/pull/2883)) - Thanks [@phdargen](https://github.com/phdargen)!
+
+## v2.18.0 - 2026-07-10
+### Added
+- Add Igra mainnet (eip155:38833) default stablecoin USDC via Permit2 ([#2800](https://github.com/x402-foundation/x402/pull/2800)) - Thanks [@emdin](https://github.com/emdin)!
+### Fixed
+- MCP payment matching now selects the advertised `accepts` entry matching the payment payload instead of always using the first entry, so cross-SDK MCP flows advertising multiple requirements no longer fail when the payer selects a non-first option. ([#2774](https://github.com/x402-foundation/x402/pull/2774)) - Thanks [@phdargen](https://github.com/phdargen)!
+
+## v2.17.0 - 2026-06-26
+### Added
+- Expanded wallet compatibility so payments verify and settle consistently across plain EOAs, deployed smart accounts (ERC-4337 / ERC-7579), counterfactual ERC-6492 wallets, and ERC-7702-delegated EOAs. Pre-verification now mirrors on-chain signature checking, so a payment that passes verify is the same one that succeeds at settle. Added counterfactual ERC-6492 support to the exact and batch-settlement flows — the wallet is deployed and its signature validated together during verify — gated by a new EIP6492AllowedFactories allowlist you set on the facilitator scheme config. Also added a wallet-compatibility guide documenting which wallet and scheme combinations are supported. ([#2658](https://github.com/x402-foundation/x402/pull/2658)) - Thanks [@CarsonRoscoe](https://github.com/CarsonRoscoe) and [@cursoragent](https://github.com/cursoragent)!
+### Changed
+- Made the batch-settlement facilitator `authorizerSigner` optional: when omitted, no `receiverAuthorizer` is advertised in `/supported` and claim/refund settlement returns `ErrAuthorizerNotConfigured` if the payload carries no authorizer signature. Added a `FacilitatorSupportValidator` hook so the resource server fails fast at `Initialize()` when a scheme delegates the receiver-authorizer role but the facilitator advertises none. ([#2706](https://github.com/x402-foundation/x402/pull/2706)) - Thanks [@phdargen](https://github.com/phdargen)!
+
 ## v2.16.0 - 2026-06-19
 ### Added
 - Add Go sign-in-with-x server and client support, including SIWX storage, auth hooks, EVM EIP-191 signing and verification, HTTP auth retry, TS-compatible profile, weather, and joke examples, and interoperability fixes for SIWE empty statements, net/http 402 JSON responses, and TS server payment payload extension echo validation ([#2485](https://github.com/x402-foundation/x402/pull/2485)) - Thanks [@wnjoon](https://github.com/wnjoon)!

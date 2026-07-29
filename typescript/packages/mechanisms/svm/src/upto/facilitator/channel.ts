@@ -6,6 +6,7 @@
  * readable. All RPC access is threaded in by the caller.
  */
 
+import { createHash } from "node:crypto";
 import {
   address,
   appendTransactionMessageInstructions,
@@ -13,6 +14,7 @@ import {
   createSignableMessage,
   createTransactionMessage,
   getBase58Decoder,
+  getBase58Encoder,
   getBase64Codec,
   getBase64EncodedWireTransaction,
   getTransactionDecoder,
@@ -25,9 +27,14 @@ import {
   type TransactionSigner,
 } from "@solana/kit";
 
+import { fetchChannel, type Channel } from "../../payment-channels/generated/accounts/channel";
 import { type ServerInstruction } from "../../payment-channels/onchain";
+import type { ChannelSplit } from "../../payment-channels/open";
 import { encodeVoucherMessageBytes } from "../../payment-channels/voucher";
 import { createRpcClient } from "../../utils";
+
+const CHANNEL_ACCOUNT_DISCRIMINATOR = 0;
+const CHANNEL_STATUS_OPEN = 0;
 
 /** Signer capable of signing Solana transactions and raw Ed25519 messages. */
 export type UptoSvmSigner = TransactionSigner & MessagePartialSigner;
@@ -66,6 +73,100 @@ export async function signVoucher(
 export async function channelExists(rpc: ChannelRpc, channelId: string): Promise<boolean> {
   const info = await rpc.getAccountInfo(address(channelId), { encoding: "base64" }).send();
   return info.value !== null;
+}
+
+/** Challenge-bound terms that must match the confirmed channel account. */
+export interface ExpectedOpenChannel {
+  authorizedSigner: string;
+  deposit: bigint;
+  gracePeriod: number;
+  mint: string;
+  payee: string;
+  payer: string;
+  rentPayer: string;
+  splits: readonly ChannelSplit[];
+}
+
+/** Onchain channel facts retained from verification through settlement. */
+export interface VerifiedOpenChannel {
+  channelId: string;
+  deposit: bigint;
+  mint: string;
+  payee: string;
+  payer: string;
+  rentPayer: string;
+  splits: readonly ChannelSplit[];
+}
+
+/**
+ * Fetch and bind the confirmed channel account before the resource is served.
+ *
+ * @param rpc - RPC client used to read the channel
+ * @param channelId - Channel PDA
+ * @param expected - Challenge-bound channel terms
+ * @returns Verified channel facts for settlement
+ */
+export async function fetchAndVerifyOpenChannel(
+  rpc: ChannelRpc,
+  channelId: string,
+  expected: ExpectedOpenChannel,
+): Promise<VerifiedOpenChannel> {
+  const account = await fetchChannel(rpc, address(channelId));
+  return verifyOpenChannelAccount(channelId, account.data, expected);
+}
+
+/**
+ * Bind a decoded channel account to the terms verified in the submitted open.
+ *
+ * @param channelId - Channel PDA
+ * @param channel - Decoded onchain channel
+ * @param expected - Challenge-bound channel terms
+ * @returns Verified channel facts for settlement
+ */
+export function verifyOpenChannelAccount(
+  channelId: string,
+  channel: Channel,
+  expected: ExpectedOpenChannel,
+): VerifiedOpenChannel {
+  if (channel.discriminator !== CHANNEL_ACCOUNT_DISCRIMINATOR) {
+    throw new Error(`channel ${channelId} has an invalid account discriminator`);
+  }
+  if (channel.status !== CHANNEL_STATUS_OPEN) {
+    throw new Error(`channel ${channelId} is not open`);
+  }
+
+  assertChannelAddress("mint", channel.mint, expected.mint);
+  assertChannelAddress("payee", channel.payee, expected.payee);
+  assertChannelAddress("authorized signer", channel.authorizedSigner, expected.authorizedSigner);
+  assertChannelAddress("rent payer", channel.rentPayer, expected.rentPayer);
+  assertChannelAddress("payer", channel.payer, expected.payer);
+
+  if (channel.gracePeriod !== expected.gracePeriod) {
+    throw new Error(
+      `channel grace period ${channel.gracePeriod} != expected ${expected.gracePeriod}`,
+    );
+  }
+  if (channel.deposit !== expected.deposit) {
+    throw new Error(`channel deposit ${channel.deposit} != expected ${expected.deposit}`);
+  }
+
+  const expectedDistributionHash = getChannelDistributionHash(expected.splits);
+  if (
+    channel.distributionHash.length !== expectedDistributionHash.length ||
+    channel.distributionHash.some((value, index) => value !== expectedDistributionHash[index])
+  ) {
+    throw new Error("channel distribution does not match the expected recipient split");
+  }
+
+  return {
+    channelId,
+    deposit: channel.deposit,
+    mint: channel.mint,
+    payee: channel.payee,
+    payer: channel.payer,
+    rentPayer: channel.rentPayer,
+    splits: expected.splits,
+  };
 }
 
 /**
@@ -165,4 +266,39 @@ export async function confirmSignature(
     }
     await new Promise(resolve => setTimeout(resolve, 1_000));
   }
+}
+
+/**
+ * Assert one decoded channel address matches its challenge-bound value.
+ *
+ * @param label - Field name used in the error
+ * @param actual - Decoded onchain address
+ * @param expected - Challenge-bound address
+ */
+function assertChannelAddress(label: string, actual: string, expected: string): void {
+  if (actual !== expected) {
+    throw new Error(`channel ${label} ${actual} != expected ${expected}`);
+  }
+}
+
+/**
+ * Compute the distribution commitment stored by the payment-channels program.
+ *
+ * @param splits - Ordered recipient splits
+ * @returns SHA-256 of the program's canonical distribution preimage
+ */
+export function getChannelDistributionHash(splits: readonly ChannelSplit[]): Uint8Array {
+  const hasher = createHash("sha256");
+  const count = new Uint8Array(4);
+  new DataView(count.buffer).setUint32(0, splits.length, true);
+  hasher.update(count);
+
+  for (const split of splits) {
+    hasher.update(Uint8Array.from(getBase58Encoder().encode(split.recipient)));
+    const bps = new Uint8Array(2);
+    new DataView(bps.buffer).setUint16(0, split.bps, true);
+    hasher.update(bps);
+  }
+
+  return hasher.digest();
 }

@@ -316,6 +316,61 @@ describe("x402ResourceServer", () => {
     });
   });
 
+  describe("initialize - validateFacilitatorSupport", () => {
+    class ValidatingScheme extends MockSchemeNetworkServer {
+      public validateCalls = 0;
+      private problem: string | undefined;
+
+      constructor(scheme: string, problem: string | undefined) {
+        super(scheme);
+        this.problem = problem;
+      }
+
+      validateFacilitatorSupport(): string | void {
+        this.validateCalls++;
+        return this.problem;
+      }
+    }
+
+    /**
+     * Builds a facilitator advertising the `exact` scheme on Base.
+     *
+     * @returns Mock facilitator client supporting `exact` on `eip155:8453`.
+     */
+    function buildExactFacilitator(): MockFacilitatorClient {
+      return new MockFacilitatorClient(
+        buildSupportedResponse({
+          kinds: [{ x402Version: 2, scheme: "exact", network: "eip155:8453" as Network }],
+        }),
+      );
+    }
+
+    it("rejects when a registered scheme reports a capability problem", async () => {
+      const server = new x402ResourceServer(buildExactFacilitator());
+      server.register("eip155:8453" as Network, new ValidatingScheme("exact", "needs a signer"));
+
+      await expect(server.initialize()).rejects.toThrow(/exact on eip155:8453: needs a signer/);
+    });
+
+    it("resolves when the hook returns void", async () => {
+      const server = new x402ResourceServer(buildExactFacilitator());
+      const scheme = new ValidatingScheme("exact", undefined);
+      server.register("eip155:8453" as Network, scheme);
+
+      await expect(server.initialize()).resolves.not.toThrow();
+      expect(scheme.validateCalls).toBe(1);
+    });
+
+    it("skips the hook when the facilitator does not support the scheme/network", async () => {
+      const server = new x402ResourceServer(buildExactFacilitator());
+      const scheme = new ValidatingScheme("unsupported", "should not be reported");
+      server.register("eip155:8453" as Network, scheme);
+
+      await expect(server.initialize()).resolves.not.toThrow();
+      expect(scheme.validateCalls).toBe(0);
+    });
+  });
+
   describe("buildPaymentRequirements", () => {
     it("should build requirements from ResourceConfig", async () => {
       const mockClient = new MockFacilitatorClient(
@@ -738,6 +793,78 @@ describe("x402ResourceServer", () => {
 
         expect(afterVerifyCalled).toBe(false);
       });
+
+      it("returns a failed verify response and stops later hooks when an afterVerify hook aborts", async () => {
+        const laterHook = vi.fn();
+        const cancellationHook = vi.fn();
+
+        server
+          .onAfterVerify(async () => ({
+            abort: true,
+            reason: "reservation_lost",
+            message: "channel busy",
+          }))
+          .onAfterVerify(laterHook)
+          .onVerifiedPaymentCanceled(cancellationHook);
+
+        const result = await server.verifyPayment(
+          buildPaymentPayload(),
+          buildPaymentRequirements(),
+        );
+
+        expect(result.isValid).toBe(false);
+        expect(result.invalidReason).toBe("reservation_lost");
+        expect(result.invalidMessage).toBe("channel busy");
+        expect(result.skipHandler).toBeUndefined();
+        expect(laterHook).not.toHaveBeenCalled();
+        expect(cancellationHook).toHaveBeenCalledTimes(1);
+        expect(cancellationHook).toHaveBeenCalledWith(
+          expect.objectContaining({ reason: "after_verify_aborted" }),
+        );
+      });
+
+      it("keeps an afterVerify abort when cancellation cleanup throws", async () => {
+        const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+        server
+          .onAfterVerify(async () => ({
+            abort: true,
+            reason: "reservation_lost",
+          }))
+          .onVerifiedPaymentCanceled(async () => {
+            throw new Error("cleanup failed");
+          });
+
+        const result = await server.verifyPayment(
+          buildPaymentPayload(),
+          buildPaymentRequirements(),
+        );
+
+        expect(result).toMatchObject({
+          isValid: false,
+          invalidReason: "reservation_lost",
+        });
+        expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("onVerifiedPaymentCanceled"));
+
+        warnSpy.mockRestore();
+      });
+
+      it("still attaches a skipHandler directive from an afterVerify hook", async () => {
+        server.onAfterVerify(async () => ({
+          skipHandler: true,
+          response: { contentType: "application/json", body: { ok: true } },
+        }));
+
+        const result = await server.verifyPayment(
+          buildPaymentPayload(),
+          buildPaymentRequirements(),
+        );
+
+        expect(result.isValid).toBe(true);
+        expect(result.skipHandler).toEqual({
+          contentType: "application/json",
+          body: { ok: true },
+        });
+      });
     });
 
     describe("onVerifyFailure", () => {
@@ -778,6 +905,56 @@ describe("x402ResourceServer", () => {
 
         expect(result.isValid).toBe(true);
         expect(result.payer).toBe("0xRecovered");
+      });
+
+      it("runs afterVerify hooks when onVerifyFailure recovers", async () => {
+        const afterVerify = vi.fn();
+        mockClient.setVerifyResponse(new Error("Temporary failure"));
+
+        server
+          .onVerifyFailure(async () => ({
+            recovered: true,
+            result: { isValid: true, payer: "0xRecovered" },
+          }))
+          .onAfterVerify(afterVerify);
+
+        const result = await server.verifyPayment(
+          buildPaymentPayload(),
+          buildPaymentRequirements(),
+        );
+
+        expect(result.isValid).toBe(true);
+        expect(result.payer).toBe("0xRecovered");
+        expect(afterVerify).toHaveBeenCalledTimes(1);
+        expect(afterVerify).toHaveBeenCalledWith(
+          expect.objectContaining({
+            result: expect.objectContaining({ isValid: true, payer: "0xRecovered" }),
+          }),
+        );
+      });
+
+      it("fails closed when an afterVerify hook aborts a recovered verify", async () => {
+        mockClient.setVerifyResponse(new Error("Temporary failure"));
+
+        server
+          .onVerifyFailure(async () => ({
+            recovered: true,
+            result: { isValid: true, payer: "0xRecovered" },
+          }))
+          .onAfterVerify(async () => ({
+            abort: true,
+            reason: "reservation_lost",
+            message: "channel busy",
+          }));
+
+        const result = await server.verifyPayment(
+          buildPaymentPayload(),
+          buildPaymentRequirements(),
+        );
+
+        expect(result.isValid).toBe(false);
+        expect(result.invalidReason).toBe("reservation_lost");
+        expect(result.invalidMessage).toBe("channel busy");
       });
 
       it("should try all hooks until one recovers", async () => {

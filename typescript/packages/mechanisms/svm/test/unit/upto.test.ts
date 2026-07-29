@@ -1,4 +1,4 @@
-import { generateKeyPairSigner, getBase58Encoder } from "@solana/kit";
+import { address, generateKeyPairSigner, getBase58Decoder, getBase58Encoder } from "@solana/kit";
 import type { PaymentPayload, PaymentRequirements } from "@x402/core/types";
 import { beforeAll, describe, expect, it } from "vitest";
 
@@ -17,6 +17,10 @@ import {
 import { encodeVoucherMessageBytes, VOUCHER_MAGIC } from "../../src/payment-channels/voucher";
 import { UptoSvmScheme as UptoClientScheme } from "../../src/upto/client/scheme";
 import { UptoSvmScheme as UptoServerScheme } from "../../src/upto/server/scheme";
+import {
+  getChannelDistributionHash,
+  verifyOpenChannelAccount,
+} from "../../src/upto/facilitator/channel";
 import {
   ERR_SETTLEMENT_EXCEEDS_AMOUNT,
   UptoSvmScheme as UptoFacilitatorScheme,
@@ -350,6 +354,120 @@ describe("upto SVM scheme", () => {
         }),
       ).rejects.toThrow(/payee/);
     });
+
+    it("binds openSlot to the challenged recentSlot freshness window", async () => {
+      const payer = await generateKeyPairSigner();
+      const feePayer = await generateKeyPairSigner();
+      const receiverAuthorizer = await generateKeyPairSigner();
+      const open = await buildOpenPaymentChannelTransaction({
+        authorizedSigner: receiverAuthorizer.address,
+        blockhash: { blockhash: DUMMY_BLOCKHASH, lastValidBlockHeight: 0n },
+        deposit: 1_000_000n,
+        feePayer: feePayer.address,
+        gracePeriod: WITHDRAW_DELAY,
+        mint: MINT,
+        openSlot: OPEN_SLOT,
+        payee: receiverAuthorizer.address,
+        payer,
+        tokenProgram: TOKEN_PROGRAM_ADDRESS,
+      });
+      const expected = {
+        authorizedSigner: receiverAuthorizer.address,
+        feePayer: feePayer.address,
+        maxCap: 1_000_000n,
+        mint: MINT,
+        openSlot: OPEN_SLOT,
+        payee: receiverAuthorizer.address,
+        tokenProgram: TOKEN_PROGRAM_ADDRESS,
+        withdrawDelay: WITHDRAW_DELAY,
+      };
+
+      await expect(
+        verifyOpenTransaction(open.transaction, {
+          ...expected,
+          recentSlot: OPEN_SLOT - 1n,
+        }),
+      ).rejects.toThrow(/ahead of challenged recentSlot/);
+      await expect(
+        verifyOpenTransaction(open.transaction, {
+          ...expected,
+          recentSlot: OPEN_SLOT + 1_501n,
+        }),
+      ).rejects.toThrow(/freshness window/);
+    });
+
+    it("binds the confirmed onchain channel state to the verified open", async () => {
+      const payer = await generateKeyPairSigner();
+      const feePayer = await generateKeyPairSigner();
+      const receiverAuthorizer = await generateKeyPairSigner();
+      const splits = [{ bps: 10_000, recipient: PAY_TO }];
+      const expected = {
+        authorizedSigner: receiverAuthorizer.address,
+        deposit: 1_000_000n,
+        gracePeriod: WITHDRAW_DELAY,
+        mint: MINT,
+        payee: feePayer.address,
+        payer: payer.address,
+        rentPayer: feePayer.address,
+        splits,
+      };
+      const channel = {
+        discriminator: 0,
+        version: 1,
+        bump: 255,
+        status: 0,
+        salt: 42n,
+        deposit: expected.deposit,
+        settlement: { settled: 0n, payoutWatermark: 0n },
+        closureStartedAt: 0n,
+        payerWithdrawnAt: 0n,
+        gracePeriod: expected.gracePeriod,
+        distributionHash: Array.from(getChannelDistributionHash(splits)),
+        payer: payer.address,
+        payee: feePayer.address,
+        authorizedSigner: receiverAuthorizer.address,
+        mint: address(MINT),
+        rentPayer: feePayer.address,
+        openSlot: OPEN_SLOT,
+      };
+
+      expect(verifyOpenChannelAccount(PAY_TO, channel, expected)).toMatchObject({
+        deposit: expected.deposit,
+        mint: expected.mint,
+        payer: expected.payer,
+      });
+      expect(() => verifyOpenChannelAccount(PAY_TO, { ...channel, status: 1 }, expected)).toThrow(
+        /not open/,
+      );
+      expect(() =>
+        verifyOpenChannelAccount(PAY_TO, { ...channel, deposit: 999_999n }, expected),
+      ).toThrow(/channel deposit/);
+      expect(() =>
+        verifyOpenChannelAccount(
+          PAY_TO,
+          { ...channel, distributionHash: new Array(32).fill(0) },
+          expected,
+        ),
+      ).toThrow(/distribution/);
+    });
+
+    it("matches the payment-channel program distribution hash golden", () => {
+      const recipientOne = getBase58Decoder().decode(new Uint8Array(32).fill(1));
+      const recipientTwo = getBase58Decoder().decode(new Uint8Array(32).fill(2));
+
+      expect(
+        Array.from(
+          getChannelDistributionHash([
+            { bps: 7_500, recipient: recipientOne },
+            { bps: 2_500, recipient: recipientTwo },
+          ]),
+        ),
+      ).toEqual([
+        0x54, 0xc8, 0x97, 0x55, 0x87, 0x75, 0x0e, 0x88, 0x21, 0xe9, 0x3f, 0x5d, 0x4a, 0xf6, 0x07,
+        0xd2, 0x0d, 0x55, 0xa5, 0x8b, 0xa1, 0xb9, 0xa4, 0xb4, 0x9f, 0x72, 0xa5, 0x42, 0xed, 0x87,
+        0x4a, 0x3f,
+      ]);
+    });
   });
 
   describe("client.createPaymentPayload", () => {
@@ -473,6 +591,7 @@ describe("upto SVM scheme", () => {
       maxTimeoutSeconds: 300,
       extra: {
         feePayer: feePayerAddress,
+        recentSlot: OPEN_SLOT.toString(),
         receiverAuthorizer: receiverAuthorizerAddress,
         tokenProgram: TOKEN_PROGRAM_ADDRESS,
         withdrawDelay: WITHDRAW_DELAY,
@@ -509,6 +628,7 @@ describe("upto SVM scheme", () => {
       const req = requirements({
         extra: {
           feePayer: "OtherFeePayer111111111111111111111111",
+          recentSlot: OPEN_SLOT.toString(),
           receiverAuthorizer: receiverAuthorizerAddress,
           tokenProgram: TOKEN_PROGRAM_ADDRESS,
           withdrawDelay: WITHDRAW_DELAY,
@@ -523,6 +643,7 @@ describe("upto SVM scheme", () => {
       const req = requirements({
         extra: {
           feePayer: feePayerAddress,
+          recentSlot: OPEN_SLOT.toString(),
           receiverAuthorizer: "OtherReceiver111111111111111111111111",
           tokenProgram: TOKEN_PROGRAM_ADDRESS,
           withdrawDelay: WITHDRAW_DELAY,
@@ -537,6 +658,7 @@ describe("upto SVM scheme", () => {
       const req = requirements({
         extra: {
           feePayer: feePayerAddress,
+          recentSlot: OPEN_SLOT.toString(),
           tokenProgram: TOKEN_PROGRAM_ADDRESS,
           withdrawDelay: WITHDRAW_DELAY,
         },
@@ -550,6 +672,7 @@ describe("upto SVM scheme", () => {
       const req = requirements({
         extra: {
           feePayer: feePayerAddress,
+          recentSlot: OPEN_SLOT.toString(),
           receiverAuthorizer: receiverAuthorizerAddress,
           tokenProgram: TOKEN_PROGRAM_ADDRESS,
           withdrawDelay: 12.5,
@@ -674,6 +797,7 @@ describe("upto SVM scheme", () => {
         maxTimeoutSeconds: 300,
         extra: {
           feePayer: feePayer.address,
+          recentSlot: OPEN_SLOT.toString(),
           receiverAuthorizer: receiverAuthorizer.address,
           tokenProgram: TOKEN_PROGRAM_ADDRESS,
           withdrawDelay: WITHDRAW_DELAY,

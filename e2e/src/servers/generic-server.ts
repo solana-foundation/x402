@@ -110,6 +110,10 @@ export class GenericServerProxy extends BaseProxy implements ServerProxy {
         APTOS_RPC_URL: config.networks.aptos.rpcUrl,
         APTOS_PAYEE_ADDRESS: config.aptosPayTo,
 
+        // Concordium network config
+        CCD_NETWORK: config.networks.ccd.caip2,
+        CCD_PAYEE_ADDRESS: config.ccdPayTo,
+
         // Hedera network config. HEDERA_ASSET / HEDERA_AMOUNT are only
         // forwarded when set by the caller; the resource servers apply their
         // own HBAR defaults (0.0.0 / 100000 tinybars) when absent, so passing
@@ -132,6 +136,21 @@ export class GenericServerProxy extends BaseProxy implements ServerProxy {
         // TVM network config
         TVM_NETWORK: config.networks.tvm.caip2,
         TVM_PAYEE_ADDRESS: config.tvmPayTo,
+
+        // NEAR network config
+        NEAR_NETWORK: config.networks.near.caip2,
+        NEAR_RPC_URL: config.networks.near.rpcUrl,
+        NEAR_PAYEE_ADDRESS: config.nearPayTo,
+        ...(config.nearAsset !== undefined ? { NEAR_ASSET: config.nearAsset } : {}),
+        ...(config.nearAmount !== undefined ? { NEAR_AMOUNT: config.nearAmount } : {}),
+
+        // XRPL network config
+        XRPL_NETWORK: config.networks.xrpl.caip2,
+        XRPL_WS_URL: config.networks.xrpl.rpcUrl,
+        XRPL_PAYEE_ADDRESS: config.xrplPayTo,
+        ...(config.xrplAsset !== undefined ? { XRPL_ASSET: config.xrplAsset } : {}),
+        ...(config.xrplAmount !== undefined ? { XRPL_AMOUNT: config.xrplAmount } : {}),
+        ...(config.xrplIssuer !== undefined ? { XRPL_ISSUER: config.xrplIssuer } : {}),
 
         // Facilitator
         FACILITATOR_URL: config.facilitatorUrl || '',

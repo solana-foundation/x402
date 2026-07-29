@@ -2,6 +2,54 @@
 
 <!-- towncrier release notes start -->
 
+## [2.17.0] - 2026-07-27
+
+### Fixed
+
+- Cap builder-code service codes to 5 entries. ([#2912](https://github.com/x402-foundation/x402/pull/2912)) - Thanks [@phdargen](https://github.com/phdargen)!
+- Preserve streaming request bodies when retrying an HTTPX request with payment headers. ([#2899](https://github.com/x402-foundation/x402/pull/2899)) - Thanks [@realmehmetali](https://github.com/realmehmetali)!
+
+### Added
+
+- Add SVM server blockhash hints and client fallback behavior. ([#2937](https://github.com/x402-foundation/x402/pull/2937)) - Thanks [@phdargen](https://github.com/phdargen)!
+
+
+## [2.16.0] - 2026-07-17
+
+### Fixed
+
+- Defer batch-settlement channel reservation until after successful verify, validate canonical channel ids with path confinement, and allow after-verify hooks to abort with `after_verify_aborted` cleanup. ([#2863](https://github.com/x402-foundation/x402/pull/2863)) - Thanks [@phdargen](https://github.com/phdargen)!
+- Fixed auto-wrapping of custom signers extending eth_account's BaseAccount (not just LocalAccount) for x402 payment signing ([#2884](https://github.com/x402-foundation/x402/pull/2884)) - Thanks [@0xkurious](https://github.com/0xkurious)!
+- Require a configured `origin` for SIWX server integration. Challenge issuance and proof validation now bind to this operator-defined public origin instead of deriving trust from request headers or per-route declaration fields. Pass `origin` to `create_siwx_resource_server_extension()` or `create_siwx_request_hook()`; remove `domain` and `resource_uri` from `declare_siwx_extension()`. ([#2859](https://github.com/x402-foundation/x402/pull/2859)) - Thanks [@phdargen](https://github.com/phdargen)!
+- The Flask WSGI middleware now logs the exception and surfaces a settle failure (`402` with a `PAYMENT-RESPONSE` header, `success=false`) when the settlement path raises an unexpected error, instead of a silent empty-body `402`. The client-facing reason is kept generic; the raw exception detail is logged only. Mirrors the FastAPI fix in #2622. ([#2721](https://github.com/x402-foundation/x402/pull/2721)) - Thanks [@kakedashi3](https://github.com/kakedashi3)!
+
+### Removals
+
+- SIWX validation and verification results now use `is_valid`, `invalid_reason`, `invalid_message`, and `payer` instead of `valid`, `error`, and `address`. Each failure includes a machine-readable `invalid_siwx_*` code aligned with the TypeScript SDK. ([#2889](https://github.com/x402-foundation/x402/pull/2889)) - Thanks [@phdargen](https://github.com/phdargen)!
+
+
+## [2.15.0] - 2026-07-10
+
+### Fixed
+
+- Fixed Flask middleware skipping settlement on 3xx responses, allowing paid content behind redirects to be delivered without onchain payment. ([#2826](https://github.com/x402-foundation/x402/pull/2826)) - Thanks [@phdargen](https://github.com/phdargen)!
+- Fixed `flask_payment_middleware_from_config`, which raised `TypeError` at construction because it built the async `x402ResourceServer` for the sync Flask middleware; it now uses `x402ResourceServerSync`. ([#2810](https://github.com/x402-foundation/x402/pull/2810)) - Thanks [@kakedashi3](https://github.com/kakedashi3)!
+- Fixed cross-SDK MCP interop: the FastMCP payment wrapper now verifies and settles against the advertised `accepts` entry that matches the payment payload instead of always using the first entry, and omits `None` optional fields from serialized `PaymentRequired` results so stricter clients accept them. ([#2774](https://github.com/x402-foundation/x402/pull/2774)) - Thanks [@phdargen](https://github.com/phdargen)!
+
+### Added
+
+- Add Igra mainnet (eip155:38833) default stablecoin USDC via Permit2 ([#2800](https://github.com/x402-foundation/x402/pull/2800)) - Thanks [@emdin](https://github.com/emdin)!
+- Added the `builder-code` extension for onchain payment attribution. Also added the enabling core capabilities: client re-merge preserving server-declared extension fields, server-side extension echo validation (with opt-in dynamic `info` fields), and EVM `data_suffix` plumbing threaded through settlement. Marked the `sign-in-with-x` extension's `nonce`, `issuedAt`, and `expirationTime` as dynamic `info` fields so regenerated challenges pass echo validation. ([#2795](https://github.com/x402-foundation/x402/pull/2795)) - Thanks [@phdargen](https://github.com/phdargen)!
+
+
+## [2.14.0] - 2026-06-26
+
+### Added
+
+- Expanded wallet compatibility so payments verify and settle consistently across plain EOAs, deployed smart accounts (ERC-4337 / ERC-7579), counterfactual ERC-6492 wallets, and ERC-7702-delegated EOAs. Pre-verification now mirrors on-chain signature checking, so a payment that passes `verify` is the same one that succeeds at `settle`. Added counterfactual ERC-6492 support to the `exact` and `batch-settlement` flows — the wallet is deployed and its signature validated together during `verify` — gated by a new `eip6492_allowed_factories` allowlist you set on the facilitator scheme config. Also added a wallet-compatibility guide documenting which wallet and scheme combinations are supported. ([#2658](https://github.com/x402-foundation/x402/pull/2658)) - Thanks [@CarsonRoscoe](https://github.com/CarsonRoscoe) and [@cursoragent](https://github.com/cursoragent)!
+- Made the batch-settlement facilitator's receiver-authorizer signer optional: when omitted, the facilitator no longer advertises a `receiverAuthorizer` in `/supported`, and claim/refund execution returns `invalid_batch_settlement_evm_authorizer_not_configured` instead of auto-signing when a payload omits its authorizer signature. Added a fail-fast startup check on the resource server: a batch-settlement server with no `receiver_authorizer_signer` configured now raises during `initialize()` when the facilitator advertises no usable `receiverAuthorizer`. ([#2706](https://github.com/x402-foundation/x402/pull/2706)) - Thanks [@phdargen](https://github.com/phdargen)!
+
+
 ## [2.13.1] - 2026-06-19
 
 ### Fixed

@@ -1,67 +1,66 @@
-# x402 Demo Site
+# x402 Facilitator
 
-This is a [Next.js](https://nextjs.org) project that demonstrates the x402 payment protocol in action and showcases ecosystem builders. The demo site includes a modern UI and a facilitator backend that handles payment verification and settlement.
+A standalone [Next.js](https://nextjs.org) service that runs the x402 testnet facilitator. It exposes the facilitator API used to verify and settle x402 payments across EVM, SVM, AVM, Aptos, Stellar, Hedera, Keeta, and XRPL.
 
-## Overview
+## Endpoints
 
-x402 is an open protocol for internet-native payments built around the HTTP 402 status code. This demo site showcases how to implement x402 in a real-world application, demonstrating:
+All routes live under `app/facilitator/`:
 
-- Payment-gated content access
-- Real-time payment verification
-- Payment settlement
-- Integration with EVM, SVM, and AVM blockchains
-
-## Features
-
-- **Payment Middleware**: Protect routes with a simple middleware configuration
-- **Facilitator Backend**: Handle payment verification and settlement
-- **Live Demo**: Try out the payment flow with a protected route
+- `GET /facilitator/supported` — list the supported payment kinds (schemes/networks) the facilitator has registered.
+- `POST /facilitator/verify` — verify an x402 payment. Body: `{ paymentPayload, paymentRequirements }`.
+- `POST /facilitator/settle` — settle a verified x402 payment. Body: `{ paymentPayload, paymentRequirements }`.
 
 ## Getting Started
 
 ### Prerequisites
 
 - Node.js 20+
-- A wallet with testnet USDC (for testing)
+- pnpm
 
 ### Installation
 
-1. Install dependencies:
+From the `typescript/` workspace root:
 
-  ```bash
-  pnpm install
-  ```
+```bash
+pnpm install
+```
 
-2. Configure your environment variables in `.env`:
+### Configuration
 
-  ```bash
-  FACILITATOR_URL=your_facilitator_url
-  RESOURCE_EVM_ADDRESS=your_evm_wallet_address
-  RESOURCE_SVM_ADDRESS=your_solana_wallet_address
-  RESOURCE_AVM_ADDRESS=your_algorand_wallet_address
-  FACILITATOR_EVM_PRIVATE_KEY=your_evm_private_key
-  FACILITATOR_SVM_PRIVATE_KEY=your_solana_private_key
-  FACILITATOR_AVM_PRIVATE_KEY=your_algorand_private_key
-  ```
+Configure environment variables in `.env`. EVM and SVM keys are required; other networks are registered only when their variables are present (XRPL, which needs no key, is enabled by an explicit `FACILITATOR_XRPL_ENABLED=true` flag).
 
-  Optionally enable Hedera (registers `hedera:testnet` only when both are set):
+```bash
+# Required
+FACILITATOR_EVM_PRIVATE_KEY=your_evm_private_key
+FACILITATOR_SVM_PRIVATE_KEY=your_solana_private_key
 
-  ```bash
-  # FACILITATOR_HEDERA_PRIVATE_KEY must be an ECDSA (secp256k1) key
-  FACILITATOR_HEDERA_ACCOUNT_ID=0.0.xxxx
-  FACILITATOR_HEDERA_PRIVATE_KEY=your_hedera_ecdsa_private_key
-  ```
+# Optional networks
+FACILITATOR_AVM_PRIVATE_KEY=your_algorand_private_key
+FACILITATOR_APTOS_PRIVATE_KEY=your_aptos_private_key
 
-  Optionally enable Keeta:
+# Optional: Stellar (comma-separated signer keys; optional fee-bump signer)
+FACILITATOR_STELLAR_PRIVATE_KEY=key1,key2
+FACILITATOR_STELLAR_FEEBUMP_PRIVATE_KEY=your_stellar_feebump_key
 
-  ```bash
-  FACILITATOR_KEETA_MNEMONIC=...
-  # Optionally, specify an amount of signers to create for the facilitator
-  # to process multiple settlement requests concurrently.
-  # The accounts will be derived from the mnemonic set above and must be
-  # funded manually.
-  # FACILITATOR_KEETA_SIGNER_AMOUNT=2
-  ```
+# Optional: Hedera (FACILITATOR_HEDERA_PRIVATE_KEY must be an ECDSA (secp256k1) key)
+FACILITATOR_HEDERA_ACCOUNT_ID=0.0.xxxx
+FACILITATOR_HEDERA_PRIVATE_KEY=your_hedera_ecdsa_private_key
+
+# Optional: Keeta
+FACILITATOR_KEETA_MNEMONIC=...
+# Number of signers to derive from the mnemonic for concurrent settlement (each must be funded).
+# FACILITATOR_KEETA_SIGNER_AMOUNT=2
+
+# Optional: XRPL (registers xrpl:1 testnet). No key or funds are needed: the
+# payer signs the transaction and pays its fee, and the facilitator only
+# verifies and submits the signed blob.
+# FACILITATOR_XRPL_ENABLED=true
+# Optional override for the default public testnet WebSocket endpoint.
+# FACILITATOR_XRPL_TESTNET_WS_URL=wss://s.altnet.rippletest.net:51233
+
+# Optional: builder attribution
+FACILITATOR_BUILDER_CODE=your_builder_code
+```
 
 ### Running the Development Server
 
@@ -69,52 +68,19 @@ x402 is an open protocol for internet-native payments built around the HTTP 402 
 pnpm dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+The facilitator API is served at [http://localhost:3000/facilitator](http://localhost:3000/facilitator).
 
 ## Project Structure
 
-- `/app` - Next.js application code
-  - `/facilitator` - Payment facilitator API routes
-  - `/protected` - Example protected route
-- `/middleware.ts` - x402 payment middleware configuration
-- `/ecosystem` - Directory of ecosystem builders 
-
-## How It Works
-
-1. When a user tries to access a protected route, the middleware checks for a valid payment
-2. If no payment is found, the server responds with HTTP 402
-3. The client can then make a payment and retry the request
-4. The facilitator backend verifies the payment and allows access
-
-## Project discovery
-
-Ecosystem page submissions are closed. To list or discover x402 services, use these community-maintained directories:
-
-- [x402scan.com](https://x402scan.com)
-- [Agentic.Market](https://agentic.market)
-- [Pay.sh](https://pay.sh)
-- [app.ampersend.ai/discover](https://app.ampersend.ai/discover)
-
-Curated developer tools (third-party SDKs, extensions, and facilitators) are listed in the [Developer Tools docs](https://docs.x402.org/dev-tools/overview).
+- `app/facilitator/index.ts` — facilitator setup and network/scheme registration
+- `app/facilitator/verify/`, `settle/`, `supported/` — route handlers
 
 ## Learn More
 
-To learn more about the technologies used in this project:
-
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API
-- [x402 Protocol Documentation](https://github.com/x402-foundation/x402) - learn about the x402 payment protocol
-- [EVM Documentation](https://ethereum.org/en/developers/docs/) - learn about Ethereum Virtual Machine
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+- [x402 Protocol Documentation](https://github.com/x402-foundation/x402) — learn about the x402 payment protocol
+- [Next.js Documentation](https://nextjs.org/docs) — learn about Next.js features and API
 
 ## Contributing
 
 We welcome contributions! Please see our [Contributing Guidelines](https://github.com/x402-foundation/x402/blob/main/CONTRIBUTING.md) for details.
 
-## License
-
-This project is licensed under the MIT License - see the [LICENSE](https://github.com/x402-foundation/x402/blob/main/LICENSE) file for details.

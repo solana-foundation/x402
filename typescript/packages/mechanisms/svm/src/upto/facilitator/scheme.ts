@@ -23,9 +23,11 @@ import { resolveUptoSvmPaymentChannelConfig } from "../shared";
 import {
   broadcastOpen,
   channelExists,
+  fetchAndVerifyOpenChannel,
   signVoucher,
   submitSettle,
   type UptoSvmSigner,
+  type VerifiedOpenChannel,
 } from "./channel";
 
 /** Scheme-specific error returned when the settlement amount exceeds the ceiling. */
@@ -37,6 +39,13 @@ export interface UptoSvmFacilitatorConfig {
   rpcUrl?: string;
   /** Forced-close grace period advertised as `extra.withdrawDelay`. */
   withdrawDelay?: number;
+}
+
+interface VerifiedSettlementChannel extends VerifiedOpenChannel {
+  expiresAt: bigint;
+  maxAmount: bigint;
+  network: Network;
+  tokenProgram: string;
 }
 
 /**
@@ -64,6 +73,9 @@ export class UptoSvmScheme implements SchemeNetworkFacilitator {
   private readonly feePayer: UptoSvmSigner;
   private readonly receiverAuthorizer: UptoSvmSigner;
   private readonly config: UptoSvmFacilitatorConfig;
+  private readonly inFlightChannels = new Set<string>();
+  private readonly verifiedChannels = new Map<string, VerifiedSettlementChannel>();
+  private readonly reservationTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
   /**
    * Create the upto SVM facilitator.
@@ -188,9 +200,14 @@ export class UptoSvmScheme implements SchemeNetworkFacilitator {
       };
     }
     let openSlot: bigint;
+    let recentSlot: bigint;
     let nonce: bigint;
     try {
       openSlot = parseU64(p.openSlot, "payload.openSlot");
+      recentSlot = parseU64(
+        requirements.extra?.recentSlot as bigint | number | string,
+        "requirements.extra.recentSlot",
+      );
       nonce = parseU64(p.nonce, "payload.nonce");
     } catch {
       return {
@@ -221,6 +238,7 @@ export class UptoSvmScheme implements SchemeNetworkFacilitator {
         mint: requirements.asset,
         openSlot,
         payee: feePayer,
+        recentSlot,
         recipients: channelConfig.splits,
         tokenProgram:
           (requirements.extra?.tokenProgram as string | undefined) ??
@@ -263,14 +281,47 @@ export class UptoSvmScheme implements SchemeNetworkFacilitator {
       };
     }
 
+    if (this.inFlightChannels.has(p.channelId)) {
+      return {
+        isValid: false,
+        invalidReason: "invalid_upto_svm_payload_channel_in_flight",
+        invalidMessage: "channel is already being processed",
+        payer: p.from,
+      };
+    }
+    this.inFlightChannels.add(p.channelId);
+
     // Escrow the ceiling before the resource is served: broadcast the open
-    // (idempotent — skip when the channel already exists).
+    // when needed, then bind the confirmed onchain account to the challenge.
     try {
       const rpc = createRpcClient(requirements.network, this.config.rpcUrl);
       if (!(await channelExists(rpc, p.channelId))) {
         await broadcastOpen(this.feePayer, rpc, p.openTransaction);
       }
+      const tokenProgram =
+        (requirements.extra?.tokenProgram as string | undefined) ??
+        getStablecoinTokenProgram(requirements.asset, requirements.network);
+      const channel = await fetchAndVerifyOpenChannel(rpc, p.channelId, {
+        authorizedSigner: receiverAuthorizer,
+        deposit: maxAmount,
+        gracePeriod: channelConfig.withdrawDelay,
+        mint: requirements.asset,
+        payee: feePayer,
+        payer: p.from,
+        rentPayer: feePayer,
+        splits: channelConfig.splits,
+      });
+      const verifiedChannel = {
+        ...channel,
+        expiresAt: BigInt(p.expiresAt),
+        maxAmount,
+        network: requirements.network,
+        tokenProgram,
+      };
+      this.verifiedChannels.set(p.channelId, verifiedChannel);
+      this.scheduleReservationExpiry(p.channelId, verifiedChannel, p.expiresAt);
     } catch (error) {
+      this.inFlightChannels.delete(p.channelId);
       return {
         isValid: false,
         invalidReason: "upto_channel_open_failed",
@@ -306,14 +357,24 @@ export class UptoSvmScheme implements SchemeNetworkFacilitator {
       };
     }
     const p: UptoSvmPayloadV2 = raw;
-    const maxAmount = BigInt(p.maxAmount);
+    const verifiedChannel = this.verifiedChannels.get(p.channelId);
+    if (verifiedChannel) {
+      // Consume atomically so two settle calls cannot race the same verified open.
+      this.verifiedChannels.delete(p.channelId);
+      const timer = this.reservationTimers.get(p.channelId);
+      if (timer !== undefined) clearTimeout(timer);
+      this.reservationTimers.delete(p.channelId);
+    }
 
     // Enforce actual ≤ ceiling first, against the signed `maxAmount` (never the
     // settlement-phase `amount`). Checked before any RPC work.
     let actual: bigint;
+    let payloadMaxAmount: bigint;
     try {
       actual = BigInt(requirements.amount);
+      payloadMaxAmount = BigInt(p.maxAmount);
     } catch {
+      this.inFlightChannels.delete(p.channelId);
       return {
         success: false,
         network: payload.accepted.network,
@@ -322,7 +383,21 @@ export class UptoSvmScheme implements SchemeNetworkFacilitator {
         payer: p.from,
       };
     }
-    if (actual > maxAmount) {
+    if (actual < 0n) {
+      this.inFlightChannels.delete(p.channelId);
+      return {
+        success: false,
+        network: payload.accepted.network,
+        transaction: "",
+        errorReason: "invalid_upto_svm_payload_amount",
+        payer: p.from,
+      };
+    }
+    if (
+      actual > payloadMaxAmount ||
+      (verifiedChannel !== undefined && actual > verifiedChannel.maxAmount)
+    ) {
+      this.inFlightChannels.delete(p.channelId);
       return {
         success: false,
         network: payload.accepted.network,
@@ -332,64 +407,56 @@ export class UptoSvmScheme implements SchemeNetworkFacilitator {
       };
     }
 
-    // Re-verify against the signed ceiling (not the actual amount). This also
-    // ensures the channel is open before we settle.
-    const verifyResult = await this.verify(payload, { ...requirements, amount: p.maxAmount });
-    if (!verifyResult.isValid) {
+    if (!verifiedChannel) {
+      this.inFlightChannels.delete(p.channelId);
       return {
         success: false,
         network: payload.accepted.network,
         transaction: "",
-        errorReason: verifyResult.invalidReason ?? "verification_failed",
-        errorMessage: verifyResult.invalidMessage,
+        errorReason: "invalid_upto_svm_payload_channel_not_verified",
         payer: p.from,
       };
     }
 
     try {
-      const tokenProgram =
-        (requirements.extra?.tokenProgram as string | undefined) ??
-        getStablecoinTokenProgram(requirements.asset, requirements.network);
-      const channelConfig = resolveUptoSvmPaymentChannelConfig(requirements);
-
       const settle = buildSettleAndSealInstructions({
-        channelId: p.channelId,
+        channelId: verifiedChannel.channelId,
         payeeSigner: this.feePayer,
         voucher:
           actual > 0n
             ? {
                 authorizedSigner: this.receiverAuthorizer.address,
                 cumulativeAmount: actual,
-                expiresAt: BigInt(p.expiresAt),
+                expiresAt: verifiedChannel.expiresAt,
                 signatureBase58: await signVoucher(this.receiverAuthorizer, {
-                  channelId: p.channelId,
+                  channelId: verifiedChannel.channelId,
                   cumulativeAmount: actual,
-                  expiresAt: BigInt(p.expiresAt),
+                  expiresAt: verifiedChannel.expiresAt,
                 }),
               }
             : undefined,
       });
 
       const distribute = await buildDistributeInstruction({
-        channelId: p.channelId,
-        mint: requirements.asset,
-        payee: channelConfig.feePayer,
-        payer: p.from,
-        rentPayer: this.feePayer.address,
-        splits: channelConfig.splits,
-        tokenProgram,
+        channelId: verifiedChannel.channelId,
+        mint: verifiedChannel.mint,
+        payee: verifiedChannel.payee,
+        payer: verifiedChannel.payer,
+        rentPayer: verifiedChannel.rentPayer,
+        splits: verifiedChannel.splits,
+        tokenProgram: verifiedChannel.tokenProgram,
       });
 
       const instructions: ServerInstruction[] = [...settle, distribute];
-      const rpc = createRpcClient(requirements.network, this.config.rpcUrl);
+      const rpc = createRpcClient(verifiedChannel.network, this.config.rpcUrl);
       const signature = await submitSettle(this.feePayer, rpc, instructions);
 
       return {
         success: true,
         transaction: signature,
-        network: payload.accepted.network,
+        network: verifiedChannel.network,
         amount: actual.toString(),
-        payer: p.from,
+        payer: verifiedChannel.payer,
       };
     } catch (error) {
       return {
@@ -400,6 +467,40 @@ export class UptoSvmScheme implements SchemeNetworkFacilitator {
         errorMessage: error instanceof Error ? error.message : String(error),
         payer: p.from,
       };
+    } finally {
+      this.inFlightChannels.delete(p.channelId);
     }
+  }
+
+  /**
+   * Release an abandoned verify reservation when its signed voucher window
+   * expires. Rust carries an RAII guard through settlement; the split
+   * verify/settle TypeScript interface needs an explicit equivalent.
+   *
+   * @param channelId - Reserved channel
+   * @param channel - Exact verified state associated with the reservation
+   * @param expiresAt - Payload expiry as Unix seconds
+   */
+  private scheduleReservationExpiry(
+    channelId: string,
+    channel: VerifiedSettlementChannel,
+    expiresAt: number,
+  ): void {
+    const delayMs = Math.max(0, Math.min(2_147_483_647, expiresAt * 1_000 - Date.now()));
+    const timer = setTimeout(() => {
+      if (this.verifiedChannels.get(channelId) !== channel) return;
+      this.verifiedChannels.delete(channelId);
+      this.inFlightChannels.delete(channelId);
+      this.reservationTimers.delete(channelId);
+    }, delayMs);
+
+    if (
+      typeof timer === "object" &&
+      "unref" in timer &&
+      typeof (timer as { unref?: unknown }).unref === "function"
+    ) {
+      (timer as { unref: () => void }).unref();
+    }
+    this.reservationTimers.set(channelId, timer);
   }
 }

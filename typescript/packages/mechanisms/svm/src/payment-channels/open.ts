@@ -35,10 +35,12 @@ import {
   OPEN_DISCRIMINATOR,
 } from "./generated/instructions/open";
 import { findEventAuthorityPda } from "./generated/pdas/eventAuthority";
-import { COMPUTE_BUDGET_PROGRAM_ADDRESS } from "../constants";
 import { ASSOCIATED_TOKEN_PROGRAM_ID, PAYMENT_CHANNELS_PROGRAM_ID } from "./onchain";
 
 const U64_MAX = (1n << 64n) - 1n;
+const OPEN_SLOT_WINDOW = 1_500n;
+const SYSTEM_PROGRAM_ID =
+  "11111111111111111111111111111111" as Address<"11111111111111111111111111111111">;
 const RENT_SYSVAR =
   "SysvarRent111111111111111111111111111111111" as Address<"SysvarRent111111111111111111111111111111111">;
 
@@ -256,6 +258,8 @@ export interface VerifyOpenExpected {
   withdrawDelay: number;
   /** Slot expected in the open args and channel PDA seed. */
   openSlot: bigint;
+  /** Server-issued slot used to enforce the program's open-slot freshness window. */
+  recentSlot?: bigint | undefined;
   /** Optional payment-channels program id override. */
   programId?: string | undefined;
   /** Expected distribution splits sealed into the channel. */
@@ -312,42 +316,42 @@ export async function verifyOpenTransaction(
   // the sponsor. Two defenses, before any account binding:
   //   1. Reject Address Lookup Tables — they hide instruction programs/accounts
   //      from `staticAccounts`. The in-SDK open builder never uses them.
-  //   2. Allowlist instruction programs to exactly { payment-channels `open`,
-  //      ComputeBudget }, with exactly one `open`. Nothing else gets the
-  //      fee payer's signature.
+  //   2. Require exactly one payment-channels `open` instruction. Nothing else
+  //      gets the fee payer's signature or expands its fee exposure.
   if (message.addressTableLookups && message.addressTableLookups.length > 0) {
     throw new Error(
       "verifyOpenTransaction: address lookup tables are not permitted in an open transaction",
     );
   }
-  let openIx: { accountIndices: readonly number[]; data: Uint8Array } | undefined;
-  let openCount = 0;
-  for (const ix of message.instructions) {
-    const program = message.staticAccounts[ix.programAddressIndex];
-    if (program === programIdStr) {
-      if (!ix.data || ix.data.length < 1 || ix.data[0] !== OPEN_DISCRIMINATOR) {
-        throw new Error(
-          "verifyOpenTransaction: payment-channels instruction is not `open` (only the channel open may be co-signed)",
-        );
-      }
-      openCount += 1;
-      openIx = { accountIndices: ix.accountIndices ?? [], data: ix.data };
-      continue;
-    }
-    if (program === COMPUTE_BUDGET_PROGRAM_ADDRESS) continue;
+  if (message.instructions.length !== 1) {
     throw new Error(
-      `verifyOpenTransaction: disallowed instruction program ${program} — the fee payer co-signs, so only the channel open (+ ComputeBudget) is permitted`,
+      `verifyOpenTransaction: expected exactly one open instruction, found ${message.instructions.length}`,
     );
   }
-  if (openCount !== 1) {
+  const instruction = message.instructions[0];
+  if (!instruction) {
+    throw new Error("verifyOpenTransaction: no payment-channels open instruction found");
+  }
+  const program = message.staticAccounts[instruction.programAddressIndex];
+  if (program !== programIdStr) {
     throw new Error(
-      `verifyOpenTransaction: expected exactly one open instruction, found ${openCount}`,
+      `verifyOpenTransaction: unexpected instruction program ${program}; only the channel open may be co-signed`,
     );
   }
-  if (!openIx) throw new Error("verifyOpenTransaction: no payment-channels open instruction found");
+  if (
+    !instruction.data ||
+    instruction.data.length < 1 ||
+    instruction.data[0] !== OPEN_DISCRIMINATOR
+  ) {
+    throw new Error("verifyOpenTransaction: payment-channels instruction is not `open`");
+  }
+  const openIx = {
+    accountIndices: instruction.accountIndices ?? [],
+    data: instruction.data,
+  };
 
   const indices = openIx.accountIndices;
-  if (indices.length < 8) {
+  if (indices.length < 14) {
     throw new Error(
       `verifyOpenTransaction: open instruction has too few accounts (${indices.length})`,
     );
@@ -366,7 +370,14 @@ export async function verifyOpenTransaction(
   const mintAddr = accountAt(3, "mint");
   const authorizedSignerAddr = accountAt(4, "authorizedSigner");
   const channelAddr = accountAt(5, "channel");
+  const payerTokenAccountAddr = accountAt(6, "payerTokenAccount");
+  const channelTokenAccountAddr = accountAt(7, "channelTokenAccount");
   const tokenProgramAddr = accountAt(8, "tokenProgram");
+  const systemProgramAddr = accountAt(9, "systemProgram");
+  const rentSysvarAddr = accountAt(10, "rent");
+  const associatedTokenProgramAddr = accountAt(11, "associatedTokenProgram");
+  const eventAuthorityAddr = accountAt(12, "eventAuthority");
+  const selfProgramAddr = accountAt(13, "selfProgram");
   const feePayerAddr = message.staticAccounts[0];
 
   if (feePayerAddr !== expected.feePayer) {
@@ -395,6 +406,34 @@ export async function verifyOpenTransaction(
       `verifyOpenTransaction: tokenProgram ${tokenProgramAddr} != expected ${expected.tokenProgram}`,
     );
   }
+  const tokenProgram = address(expected.tokenProgram);
+  const [expectedPayerTokenAccount] = await findAssociatedTokenPda({
+    mint: address(expected.mint),
+    owner: address(payerAddr),
+    tokenProgram,
+  });
+  const [expectedChannelTokenAccount] = await findAssociatedTokenPda({
+    mint: address(expected.mint),
+    owner: address(channelAddr),
+    tokenProgram,
+  });
+  const [expectedEventAuthority] = await findEventAuthorityPda({
+    programAddress: address(programIdStr),
+  });
+  const fixedAccounts: readonly [string, string, string][] = [
+    ["payerTokenAccount", payerTokenAccountAddr, expectedPayerTokenAccount],
+    ["channelTokenAccount", channelTokenAccountAddr, expectedChannelTokenAccount],
+    ["systemProgram", systemProgramAddr, SYSTEM_PROGRAM_ID],
+    ["rent", rentSysvarAddr, RENT_SYSVAR],
+    ["associatedTokenProgram", associatedTokenProgramAddr, ASSOCIATED_TOKEN_PROGRAM_ID],
+    ["eventAuthority", eventAuthorityAddr, expectedEventAuthority],
+    ["selfProgram", selfProgramAddr, programIdStr],
+  ];
+  for (const [label, actual, wanted] of fixedAccounts) {
+    if (actual !== wanted) {
+      throw new Error(`verifyOpenTransaction: ${label} ${actual} != expected ${wanted}`);
+    }
+  }
 
   const openData = getOpenInstructionDataDecoder().decode(openIx.data);
   const { deposit, gracePeriod, openSlot, recipients, salt } = openData.openArgs;
@@ -412,6 +451,18 @@ export async function verifyOpenTransaction(
   }
   if (openSlot !== expected.openSlot) {
     throw new Error(`verifyOpenTransaction: openSlot ${openSlot} != expected ${expected.openSlot}`);
+  }
+  if (expected.recentSlot !== undefined) {
+    if (openSlot > expected.recentSlot) {
+      throw new Error(
+        `verifyOpenTransaction: openSlot ${openSlot} is ahead of challenged recentSlot ${expected.recentSlot}`,
+      );
+    }
+    if (expected.recentSlot - openSlot > OPEN_SLOT_WINDOW) {
+      throw new Error(
+        `verifyOpenTransaction: openSlot ${openSlot} is outside the ${OPEN_SLOT_WINDOW}-slot freshness window of challenged recentSlot ${expected.recentSlot}`,
+      );
+    }
   }
   const expectedRecipients = expected.recipients ?? [];
   if (recipients.length !== expectedRecipients.length) {

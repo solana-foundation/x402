@@ -17,6 +17,7 @@ from ..authorizer_signer import sign_claim_batch
 from ..constants import BATCH_SETTLEMENT_ADDRESS
 from ..errors import (
     ERR_AUTHORIZER_ADDRESS_MISMATCH,
+    ERR_AUTHORIZER_NOT_CONFIGURED,
     ERR_CLAIM_SIMULATION_FAILED,
     ERR_CLAIM_TRANSACTION_FAILED,
 )
@@ -43,7 +44,8 @@ def execute_claim_with_signature(
     signer: FacilitatorEvmSigner,
     payload: ClaimPayload,
     requirements: PaymentRequirements,
-    authorizer_signer: AuthorizerSigner,
+    authorizer_signer: AuthorizerSigner | None,
+    data_suffix: str | None = None,
 ) -> SettleResponse:
     """Submit a batch claim via claimWithSignature()."""
     network = str(requirements.network)
@@ -51,6 +53,13 @@ def execute_claim_with_signature(
 
     sig_hex = payload.claim_authorizer_signature
     if not sig_hex:
+        if authorizer_signer is None:
+            return SettleResponse(
+                success=False,
+                error_reason=ERR_AUTHORIZER_NOT_CONFIGURED,
+                transaction="",
+                network=network,
+            )
         for claim in payload.claims:
             if to_checksum_address(claim.channel.receiver_authorizer) != to_checksum_address(
                 authorizer_signer.address
@@ -81,7 +90,12 @@ def execute_claim_with_signature(
 
     try:
         tx = signer.write_contract(
-            target, BATCH_SETTLEMENT_ABI, "claimWithSignature", claim_args, sig_bytes
+            target,
+            BATCH_SETTLEMENT_ABI,
+            "claimWithSignature",
+            claim_args,
+            sig_bytes,
+            data_suffix=data_suffix,
         )
         receipt = signer.wait_for_transaction_receipt(tx)
         if receipt.status != TX_STATUS_SUCCESS:

@@ -7,7 +7,6 @@ dist/
 .turbo/
 .next/
 next-env.d.ts
-proxy
 .env
 __pycache__/
 **/.DS_Store
@@ -33,6 +32,7 @@ e2e/servers/mcp-go/mcp-go
 e2e/servers/mcp-go/mcp-server
 e2e/servers/nethttp/nethttp
 e2e/legacy/servers/gin/gin
+go/legacy/bin/proxy
 
 # Example build artifacts
 examples/go/servers/upto/upto
@@ -42,6 +42,9 @@ examples/go/facilitator/batch-settlement/batch-settlement
 examples/go/servers/builder-codes/builder-codes
 examples/go/facilitator/builder-codes/builder-codes
 examples/go/clients/builder-codes/builder-codes
+
+# Generated setup-script output (smart-account addresses per run)
+typescript/packages/mechanisms/evm/scripts/setup-smart-accounts.log
 
 # Agent artifacts
 TASK.md

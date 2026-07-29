@@ -96,6 +96,13 @@
       "protocolFamily": "svm"
     },
     {
+      "path": "/api/exact/ccd",
+      "method": "GET",
+      "description": "Concordium endpoint using proxy middleware",
+      "requiresPayment": true,
+      "protocolFamily": "ccd"
+    },
+    {
       "path": "/api/exact/avm",
       "method": "GET",
       "description": "AVM endpoint using proxy middleware",
@@ -122,6 +129,31 @@
       "description": "Keeta endpoint using proxy middleware",
       "requiresPayment": true,
       "protocolFamily": "keeta"
+    },
+    {
+      "path": "/api/exact/near",
+      "method": "GET",
+      "description": "NEAR endpoint using proxy middleware",
+      "requiresPayment": true,
+      "protocolFamily": "near"
+    },
+    {
+      "path": "/api/exact/xrpl/sequence",
+      "method": "GET",
+      "description": "XRPL sequence endpoint using proxy middleware",
+      "requiresPayment": true,
+      "protocolFamily": "xrpl",
+      "scheme": "exact",
+      "assetTransferMethod": "sequence"
+    },
+    {
+      "path": "/api/exact/xrpl/ticketSequence",
+      "method": "GET",
+      "description": "XRPL ticketSequence endpoint using proxy middleware",
+      "requiresPayment": true,
+      "protocolFamily": "xrpl",
+      "scheme": "exact",
+      "assetTransferMethod": "ticketSequence"
     },
     {
       "path": "/api/exact/stellar",
@@ -223,6 +255,31 @@
       "protocolFamily": "keeta"
     },
     {
+      "path": "/api/exact/near/withx402",
+      "method": "GET",
+      "description": "NEAR endpoint using withX402 wrapper",
+      "requiresPayment": true,
+      "protocolFamily": "near"
+    },
+    {
+      "path": "/api/exact/xrpl/sequence/withx402",
+      "method": "GET",
+      "description": "XRPL sequence endpoint using withX402 wrapper",
+      "requiresPayment": true,
+      "protocolFamily": "xrpl",
+      "scheme": "exact",
+      "assetTransferMethod": "sequence"
+    },
+    {
+      "path": "/api/exact/xrpl/ticketSequence/withx402",
+      "method": "GET",
+      "description": "XRPL ticketSequence endpoint using withX402 wrapper",
+      "requiresPayment": true,
+      "protocolFamily": "xrpl",
+      "scheme": "exact",
+      "assetTransferMethod": "ticketSequence"
+    },
+    {
       "path": "/api/exact/stellar/withx402",
       "method": "GET",
       "description": "Stellar endpoint using withX402 wrapper",
@@ -247,11 +304,22 @@
     "optional": [
       "AVM_PAYEE_ADDRESS",
       "APTOS_PAYEE_ADDRESS",
+      "CCD_PAYEE_ADDRESS",
       "HEDERA_PAYEE_ADDRESS",
       "KEETA_PAYEE_ADDRESS",
       "STELLAR_PAYEE_ADDRESS",
       "TVM_PAYEE_ADDRESS",
       "TVM_NETWORK",
+      "NEAR_PAYEE_ADDRESS",
+      "NEAR_ASSET",
+      "NEAR_AMOUNT",
+      "NEAR_NETWORK",
+      "XRPL_PAYEE_ADDRESS",
+      "XRPL_ASSET",
+      "XRPL_AMOUNT",
+      "XRPL_ISSUER",
+      "XRPL_NETWORK",
+      "XRPL_WS_URL",
       "EVM_RECEIVER_AUTHORIZER_PRIVATE_KEY"
     ]
   }
