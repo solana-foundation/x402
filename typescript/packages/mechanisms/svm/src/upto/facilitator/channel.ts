@@ -113,7 +113,9 @@ export type ChannelRpc = ReturnType<typeof createRpcClient>;
  * @returns Whether the account exists
  */
 export async function channelExists(rpc: ChannelRpc, channelId: string): Promise<boolean> {
-  const info = await rpc.getAccountInfo(address(channelId), { encoding: "base64" }).send();
+  const info = await rpc
+    .getAccountInfo(address(channelId), { commitment: "confirmed", encoding: "base64" })
+    .send();
   return info.value !== null;
 }
 
