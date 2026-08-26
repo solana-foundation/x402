@@ -1,0 +1,29 @@
+{
+  "_comment": "SAMPLE of what the upto-svm facilitator already produces. `settleResponse` is the exact object UptoSvmFacilitatorScheme.settle() returns; `requirements`/`voucher`/`action` are the context it settled against. To anchor on-chain, replace these with a real devnet run (the SettleResponse + the PaymentRequirements + the signed voucher). All pubkeys and signatures below are fixtures.",
+  "settleResponse": {
+    "success": true,
+    "transaction": "5UptoSettleSealDistribute1Tx1Sig1Fixture1111111111111111111111111111111111111111111111",
+    "network": "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1",
+    "amount": "1200000",
+    "payer": "Payer1Fixture1Pubkey11111111111111111111111"
+  },
+  "requirements": {
+    "asset": "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU",
+    "payTo": "Merchant1PayTo1Fixture1Pubkey1111111111111",
+    "maxAmount": "5000000",
+    "decimals": 6
+  },
+  "channelId": "Channe1PDA1Fixture1Pubkey111111111111111111",
+  "voucher": {
+    "authorizedSigner": "RecvAuthz1Signer1Fixture1Pubkey111111111111",
+    "cumulativeAmount": "1200000",
+    "expiresAt": "1779200600",
+    "signatureBase58": "Voucher1Ed25519Sig1Fixture11111111111111111111111111111111111111111111111111111111111111"
+  },
+  "action": {
+    "agentId": "agent:checkout-bot",
+    "actionType": "api.call.metered",
+    "scope": "merchant:acme/api:weather/upto:5.00USDC",
+    "timestampMs": 1779200000000
+  }
+}
