@@ -193,7 +193,12 @@ server.register_extension(create_siwx_resource_server_extension(storage=storage)
 
 routes = {
     "GET /weather": {
-        "accepts": {"scheme": "exact", "price": "$0.001", "network": "eip155:84532", "payTo": "0x..."},
+        "accepts": {
+            "scheme": "exact",
+            "price": "$0.001",
+            "network": "eip155:84532",
+            "payTo": "0x...",
+        },
         "extensions": declare_siwx_extension(),
     },
     "GET /profile": {
@@ -226,6 +231,13 @@ from x402.extensions.sign_in_with_x import create_siwx_client_extension
 
 client.register_extension(create_siwx_client_extension(signers=[evm_signer]))
 ```
+
+The client extension automatically:
+- Detects SIWX support in 402 responses
+- Matches your wallet's chain with the server's `supportedChains`
+- Verifies the challenge is bound to the 402 response origin before signing
+- Signs and sends the authentication proof
+- Falls back to payment if SIWX auth fails or the challenge is not origin-bound
 
 Requires `x402[extensions]` (signinwithethereum, PyNaCl). EVM signing uses `x402[evm]`; Solana signing uses `x402[svm]`.
 

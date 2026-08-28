@@ -8,6 +8,7 @@ import {
   VerifyResponse,
 } from "@x402/core/types";
 import { resolveDataSuffix } from "../../../shared/extensions";
+import { verifyTypedDataSignature, classifyErc6492Payer } from "../../../shared/verifySignature";
 import { PaymentRequirementsV1 } from "@x402/core/types/v1";
 import { getAddress, Hex, isAddressEqual, parseErc6492Signature } from "viem";
 import { authorizationTypes } from "../../../constants";
@@ -19,6 +20,7 @@ import {
   diagnoseEip3009SimulationFailure,
   executeTransferWithAuthorization,
   simulateEip3009Transfer,
+  verifyEip3009TransferEvent,
 } from "../../facilitator/eip3009-utils";
 
 export interface VerifyV1Options {
@@ -175,8 +177,24 @@ export class ExactEvmSchemeV1 implements SchemeNetworkFacilitator {
             data: factoryCalldata as Hex,
           });
 
-          // Wait for deployment transaction
-          await this.signer.waitForTransactionReceipt({ hash: deployTx });
+          // Wait for deployment and verify it actually succeeded.
+          const deployReceipt = await this.signer.waitForTransactionReceipt({ hash: deployTx });
+          if (deployReceipt.status !== "success") {
+            return {
+              success: false,
+              errorReason: Errors.ErrSmartWalletDeploymentFailed,
+              transaction: "",
+              network: payloadV1.network,
+              payer: exactEvmPayload.authorization.from,
+            };
+          }
+
+          // Do NOT re-simulate the transfer here. The authoritative pre-check is the atomic
+          // deploy+transfer simulation in verify; a second standalone eth_call after the real
+          // deploy tx races the deploy's state propagation across load-balanced RPC nodes and
+          // false-rejected valid wallets. The on-chain transferWithAuthorization below is the
+          // definitive signature check; a genuinely unsupported inner signature reverts there
+          // and is classified by parseEip3009TransferError.
         }
       }
 
@@ -205,6 +223,26 @@ export class ExactEvmSchemeV1 implements SchemeNetworkFacilitator {
           transaction: tx,
           network: payloadV1.network,
           payer: exactEvmPayload.authorization.from,
+        };
+      }
+
+      // Receipt status only proves the tx did not revert.
+      // When logs are present, require the expected ERC-20 Transfer event.
+      const auth = exactEvmPayload.authorization;
+      if (
+        receipt.logs != null &&
+        !verifyEip3009TransferEvent(receipt.logs, getAddress(requirements.asset), {
+          from: getAddress(auth.from),
+          to: getAddress(auth.to),
+          value: BigInt(auth.value),
+        })
+      ) {
+        return {
+          success: false,
+          errorReason: Errors.ErrTransferEventMismatch,
+          transaction: tx,
+          network: payloadV1.network,
+          payer: auth.from,
         };
       }
 
@@ -275,7 +313,7 @@ export class ExactEvmSchemeV1 implements SchemeNetworkFacilitator {
       };
     }
 
-    const { name, version } = requirements.extra;
+    const { name, version } = requirements.extra as { name: string; version: string };
     const erc20Address = getAddress(requirements.asset);
 
     // Verify network matches
@@ -307,57 +345,55 @@ export class ExactEvmSchemeV1 implements SchemeNetworkFacilitator {
       },
     };
 
-    // Verify signature (flatten EIP-6492 handling out of catch block)
-    let isValid = false;
-    try {
-      isValid = await this.signer.verifyTypedData({
+    const signature = exactEvmPayload.signature!;
+
+    // Classify the payer (counterfactual vs deployed) and extract inner sig in one shot.
+    const {
+      isCounterfactual,
+      innerSignature,
+      eip6492Deployment: classification6492,
+    } = await classifyErc6492Payer(this.signer, signature, payer);
+
+    if (classification6492) {
+      eip6492Deployment = classification6492;
+    }
+
+    if (isCounterfactual) {
+      // Mirror settle's allowlist gate so verify predicts settle: a counterfactual payment whose
+      // factory is not allowlisted is rejected at settle, so reject it here too.
+      const factory = classification6492?.factoryAddress;
+      const factoryAllowed =
+        !!factory &&
+        this.config.eip6492AllowedFactories.some(
+          a => a.trim().toLowerCase() === factory.toLowerCase(),
+        );
+      if (!factoryAllowed) {
+        return {
+          isValid: false,
+          invalidReason: Errors.ErrFactoryNotAllowed,
+          payer,
+        };
+      }
+    }
+
+    if (!isCounterfactual) {
+      // Non-counterfactual path: verify using the strict primitive that mirrors
+      // on-chain SignatureChecker semantics (ecrecover for EOAs, strict EIP-1271
+      // for any address with code). No ECDSA fallback for code addresses.
+      const isValid = await verifyTypedDataSignature(this.signer, {
         address: payer,
         ...permitTypedData,
-        signature: exactEvmPayload.signature!,
+        signature: innerSignature,
       });
-    } catch {
-      isValid = false;
-    }
-
-    const signature = exactEvmPayload.signature!;
-    const sigLen = signature.startsWith("0x") ? signature.length - 2 : signature.length;
-
-    // Extract EIP-6492 deployment info (factory address + calldata) if present
-    const erc6492Data = parseErc6492Signature(signature);
-    const hasDeploymentInfo =
-      erc6492Data.address &&
-      erc6492Data.data &&
-      !isAddressEqual(erc6492Data.address, "0x0000000000000000000000000000000000000000");
-
-    if (hasDeploymentInfo) {
-      eip6492Deployment = {
-        factoryAddress: erc6492Data.address!,
-        factoryCalldata: erc6492Data.data!,
-      };
-    }
-
-    if (!isValid) {
-      const isSmartWallet = sigLen > 130; // 65 bytes = 130 hex chars for EOA
-
-      if (!isSmartWallet) {
+      if (!isValid) {
         return {
           isValid: false,
           invalidReason: Errors.ErrInvalidSignature,
           payer,
         };
       }
-
-      const bytecode = await this.signer.getCode({ address: payer });
-      const isDeployed = bytecode && bytecode !== "0x";
-
-      if (!isDeployed && !hasDeploymentInfo) {
-        return {
-          isValid: false,
-          invalidReason: Errors.ErrUndeployedSmartWallet,
-          payer,
-        };
-      }
     }
+    // Counterfactual path: defer to on-chain simulation which deploys + verifies atomically.
 
     // Verify payment recipient matches
     if (getAddress(exactEvmPayload.authorization.to) !== getAddress(requirements.payTo)) {

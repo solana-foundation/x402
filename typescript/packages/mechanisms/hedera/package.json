@@ -1,6 +1,6 @@
 {
   "name": "@x402/hedera",
-  "version": "2.15.0",
+  "version": "2.24.0",
   "main": "./dist/cjs/index.js",
   "module": "./dist/esm/index.js",
   "types": "./dist/cjs/index.d.ts",
@@ -42,9 +42,11 @@
     "vite-tsconfig-paths": "^5.1.4",
     "vitest": "^3.0.5"
   },
+  "//": "@hiero-ledger/proto must stay pinned in lockstep with @hiero-ledger/sdk (see src/signer.ts).",
   "dependencies": {
     "@x402/core": "workspace:~",
-    "@hiero-ledger/sdk": "2.80.0"
+    "@hiero-ledger/proto": "2.31.0",
+    "@hiero-ledger/sdk": "2.85.0"
   },
   "exports": {
     ".": {

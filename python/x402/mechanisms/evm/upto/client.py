@@ -12,6 +12,7 @@ from ..constants import (
     UPTO_PERMIT2_WITNESS_TYPES,
     X402_UPTO_PERMIT2_PROXY_ADDRESS,
 )
+from ..default_assets import find_default_asset
 from ..signer import (
     ClientEvmSigner,
     ClientEvmSignerWithReadContract,
@@ -32,11 +33,11 @@ from ..utils import (
 
 
 def _wrap_if_local_account(signer: Any) -> ClientEvmSigner:
-    """Auto-wrap eth_account LocalAccount in EthAccountSigner if needed."""
+    """Auto-wrap an eth_account-compatible signer (any BaseAccount) in EthAccountSigner."""
     try:
-        from eth_account.signers.local import LocalAccount
+        from eth_account.signers.base import BaseAccount
 
-        if isinstance(signer, LocalAccount):
+        if isinstance(signer, BaseAccount):
             from ..signers import EthAccountSigner
 
             return EthAccountSigner(signer)
@@ -55,6 +56,7 @@ class UptoEvmScheme:
     """
 
     scheme = SCHEME_UPTO
+    find_default_asset = staticmethod(find_default_asset)
 
     def __init__(self, signer: ClientEvmSigner):
         self._signer = _wrap_if_local_account(signer)

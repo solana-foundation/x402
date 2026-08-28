@@ -18,10 +18,11 @@ import (
 // BatchSettlementRequestContext carries per-request state across the verify->settle
 // lifecycle for a single payment.
 type BatchSettlementRequestContext struct {
-	ChannelId       string
-	PendingId       string
-	ChannelSnapshot *ChannelSession
-	LocalVerify     bool
+	ChannelId            string
+	PendingId            string
+	ChannelSnapshot      *ChannelSession
+	LocalVerify          bool
+	ReservationCommitted bool
 }
 
 const (
@@ -88,7 +89,7 @@ func requestContextKey(payload any) string {
 			view.GetScheme(),
 			view.GetNetwork(),
 			payloadType,
-			batchsettlement.NormalizeChannelId(channelId),
+			strings.ToLower(channelId),
 			maxClaimable,
 			signature,
 			channelConfigKey(payloadMap["channelConfig"]),
@@ -214,6 +215,9 @@ func (s *BatchSettlementEvmScheme) MergeRequestContext(payload any, partial Batc
 	if partial.LocalVerify {
 		merged.LocalVerify = true
 	}
+	if partial.ReservationCommitted {
+		merged.ReservationCommitted = true
+	}
 	s.requestContexts[key] = &merged
 }
 
@@ -268,7 +272,7 @@ func (s *BatchSettlementEvmScheme) TakeChannelSnapshot(payload any) *ChannelSess
 // record is deleted entirely.
 func (s *BatchSettlementEvmScheme) ClearPendingRequest(payload any) error {
 	rc := s.TakeRequestContext(payload)
-	if rc == nil || rc.ChannelId == "" || rc.PendingId == "" {
+	if rc == nil || !rc.ReservationCommitted || rc.ChannelId == "" || rc.PendingId == "" {
 		return nil
 	}
 	_, err := s.storage.UpdateChannel(rc.ChannelId, func(current *ChannelSession) *ChannelSession {
@@ -297,9 +301,19 @@ func (s *BatchSettlementEvmScheme) EnrichPaymentRequiredResponse(ctx x402.Paymen
 		return
 	}
 
-	channelId := extractChannelIdFromPayload(ctx.PaymentPayload.Payload)
+	payload := ctx.PaymentPayload.Payload
+	channelId := extractChannelIdFromPayload(payload)
 	if channelId == "" {
 		return
+	}
+
+	// Soft-fail when the claimed channelId does not bind to channelConfig+network.
+	if cfgMap, ok := payload["channelConfig"].(map[string]interface{}); ok {
+		if cfg, err := batchsettlement.ChannelConfigFromMap(cfgMap); err == nil {
+			if batchsettlement.ChannelIdBindingError(cfg, channelId, ctx.PaymentPayload.Accepted.Network) != "" {
+				return
+			}
+		}
 	}
 
 	var session *ChannelSession
@@ -307,7 +321,7 @@ func (s *BatchSettlementEvmScheme) EnrichPaymentRequiredResponse(ctx x402.Paymen
 		session = s.TakeChannelSnapshot(ctx.PaymentPayload)
 	}
 	if session == nil {
-		stored, err := s.storage.Get(batchsettlement.NormalizeChannelId(channelId))
+		stored, err := s.storage.Get(channelId)
 		if err != nil || stored == nil {
 			return
 		}
@@ -354,7 +368,8 @@ func (s *BatchSettlementEvmScheme) EnrichPaymentRequiredResponse(ctx x402.Paymen
 func (s *BatchSettlementEvmScheme) OnVerifiedPaymentCanceledHook() x402.OnVerifiedPaymentCanceledHook {
 	return func(ctx x402.VerifiedPaymentCanceledContext) error {
 		if ctx.Reason != x402.CancellationReasonHandlerThrew &&
-			ctx.Reason != x402.CancellationReasonHandlerFailed {
+			ctx.Reason != x402.CancellationReasonHandlerFailed &&
+			ctx.Reason != x402.CancellationReasonAfterVerifyAborted {
 			return nil
 		}
 		return s.ClearPendingRequest(ctx.Payload)
@@ -379,13 +394,30 @@ func (s *BatchSettlementEvmScheme) Scheme() string {
 	return batchsettlement.SchemeBatched
 }
 
-// GetAssetDecimals implements AssetDecimalsProvider.
-func (s *BatchSettlementEvmScheme) GetAssetDecimals(asset string, network x402.Network) int {
-	info, err := evm.GetAssetInfo(string(network), asset)
-	if err != nil || info == nil {
-		return 6
+// DefaultAssetTransferMethod returns the ATM used when extra.assetTransferMethod is absent.
+func (s *BatchSettlementEvmScheme) DefaultAssetTransferMethod() string {
+	return string(evm.AssetTransferMethodEIP3009)
+}
+
+// PaymentFlows returns ATM-keyed payment flow support for batch-settlement EVM.
+func (s *BatchSettlementEvmScheme) PaymentFlows() map[string]x402.PaymentFlowConfig {
+	auth := x402.PaymentFlowConfig{
+		Supported: []x402.PaymentFlowName{x402.PaymentFlowAuthorization},
+		Default:   x402.PaymentFlowAuthorization,
 	}
-	return info.Decimals
+	return map[string]x402.PaymentFlowConfig{
+		string(evm.AssetTransferMethodEIP3009): auth,
+		string(evm.AssetTransferMethodPermit2): auth,
+	}
+}
+
+// GetAssetDecimals implements AssetDecimalsProvider.
+func (s *BatchSettlementEvmScheme) GetAssetDecimals(asset string, network x402.Network) (int, bool) {
+	found := evm.FindDefaultAsset(asset, string(network))
+	if found == nil {
+		return 0, false
+	}
+	return found.Decimals, true
 }
 
 // RegisterMoneyParser registers a custom money parser.
@@ -415,6 +447,31 @@ func (s *BatchSettlementEvmScheme) GetReceiverAuthorizerAddress() string {
 		return s.receiverAuthorizerSigner.Address()
 	}
 	return ""
+}
+
+// ValidateFacilitatorSupport rejects startup when this scheme delegates the
+// receiver-authorizer role but the facilitator does not advertise a usable
+// receiverAuthorizer.
+func (s *BatchSettlementEvmScheme) ValidateFacilitatorSupport(
+	network x402.Network,
+	supportedKind types.SupportedKind,
+	_ []string,
+) error {
+	if s.receiverAuthorizerSigner != nil {
+		return nil
+	}
+
+	advertised, _ := supportedKind.Extra["receiverAuthorizer"].(string)
+	if advertised != "" && !strings.EqualFold(advertised, zeroAddress) {
+		return nil
+	}
+
+	return fmt.Errorf(
+		"no receiver authorizer signer is configured and the facilitator does not advertise "+
+			"a receiverAuthorizer on %s. Configure a ReceiverAuthorizerSigner or use a "+
+			"facilitator that advertises one",
+		network,
+	)
 }
 
 // ParsePrice parses a price and converts it to an asset amount.
@@ -449,7 +506,7 @@ func (s *BatchSettlementEvmScheme) ParsePrice(price x402.Price, network x402.Net
 		}
 	}
 
-	decimalAmount, err := parseMoneyToDecimal(price)
+	decimalAmount, symbol, err := x402.ParseMoney(price)
 	if err != nil {
 		return x402.AssetAmount{}, err
 	}
@@ -464,7 +521,7 @@ func (s *BatchSettlementEvmScheme) ParsePrice(price x402.Price, network x402.Net
 		}
 	}
 
-	return defaultMoneyConversion(decimalAmount, network)
+	return defaultMoneyConversion(decimalAmount, network, symbol)
 }
 
 // EnhancePaymentRequirements adds batched-specific fields to payment requirements.
@@ -661,8 +718,8 @@ func (s *BatchSettlementEvmScheme) SignClaimBatch(ctx context.Context, claims []
 // non-default settlement asset for this manager.
 func (s *BatchSettlementEvmScheme) CreateChannelManager(facilitator x402.FacilitatorClient, network x402.Network) *BatchSettlementChannelManager {
 	token := ""
-	if cfg, err := evm.GetNetworkConfig(string(network)); err == nil {
-		token = cfg.DefaultAsset.Address
+	if info, err := evm.GetDefaultAsset(string(network), ""); err == nil {
+		token = info.Asset
 	}
 	return NewBatchSettlementChannelManager(ChannelManagerConfig{
 		Scheme:      s,
@@ -675,85 +732,38 @@ func (s *BatchSettlementEvmScheme) CreateChannelManager(facilitator x402.Facilit
 
 // UpdateSession updates or creates a session for a channel.
 func (s *BatchSettlementEvmScheme) UpdateSession(channelId string, session *ChannelSession) error {
-	return s.storage.Set(batchsettlement.NormalizeChannelId(channelId), session)
+	return s.storage.Set(channelId, session)
 }
 
 // GetSession retrieves a session for a channel.
 func (s *BatchSettlementEvmScheme) GetSession(channelId string) (*ChannelSession, error) {
-	return s.storage.Get(batchsettlement.NormalizeChannelId(channelId))
+	return s.storage.Get(channelId)
 }
 
 // DeleteSession removes a session for a channel.
 func (s *BatchSettlementEvmScheme) DeleteSession(channelId string) error {
-	return s.storage.Delete(batchsettlement.NormalizeChannelId(channelId))
+	return s.storage.Delete(channelId)
 }
 
 // Helper functions
 
-func parseMoneyToDecimal(price x402.Price) (float64, error) {
-	switch v := price.(type) {
-	case string:
-		cleanPrice := strings.TrimSpace(v)
-		cleanPrice = strings.TrimPrefix(cleanPrice, "$")
-		cleanPrice = strings.TrimSpace(cleanPrice)
-		amount, err := strconv.ParseFloat(cleanPrice, 64)
-		if err != nil {
-			return 0, fmt.Errorf(ErrFailedToParsePrice+": '%s': %w", v, err)
-		}
-		return amount, nil
-	case float64:
-		return v, nil
-	case int:
-		return float64(v), nil
-	case int64:
-		return float64(v), nil
-	default:
-		return 0, fmt.Errorf(ErrUnsupportedPriceType+": %T", price)
-	}
-}
-
-func defaultMoneyConversion(amount float64, network x402.Network) (x402.AssetAmount, error) {
-	networkStr := string(network)
-	config, err := evm.GetNetworkConfig(networkStr)
+func defaultMoneyConversion(amount string, network x402.Network, symbol string) (x402.AssetAmount, error) {
+	assetInfo, tokenAmount, err := evm.ConvertDefaultMoney(amount, string(network), symbol)
 	if err != nil {
 		return x402.AssetAmount{}, err
 	}
-	if config.DefaultAsset.Address == "" {
-		return x402.AssetAmount{}, fmt.Errorf("no default stablecoin for network %s", networkStr)
-	}
 
 	extra := map[string]interface{}{
-		// Token EIP-712 domain — see comment in GetExtra above for why both
-		// ERC-3009 and Permit2(+EIP-2612) paths need name/version.
-		"name":    config.DefaultAsset.Name,
-		"version": config.DefaultAsset.Version,
+		"name":    assetInfo.Name,
+		"version": assetInfo.Version,
 	}
-	if config.DefaultAsset.AssetTransferMethod != "" {
-		extra["assetTransferMethod"] = string(config.DefaultAsset.AssetTransferMethod)
-	}
-
-	oneUnit := float64(1)
-	for i := 0; i < config.DefaultAsset.Decimals; i++ {
-		oneUnit *= 10
-	}
-
-	if amount >= oneUnit && amount == float64(int64(amount)) {
-		return x402.AssetAmount{
-			Asset:  config.DefaultAsset.Address,
-			Amount: fmt.Sprintf("%.0f", amount),
-			Extra:  extra,
-		}, nil
-	}
-
-	amountStr := fmt.Sprintf("%.6f", amount)
-	parsedAmount, err := evm.ParseAmount(amountStr, config.DefaultAsset.Decimals)
-	if err != nil {
-		return x402.AssetAmount{}, fmt.Errorf(ErrFailedToConvertAmt+": %w", err)
+	if assetInfo.AssetTransferMethod != "" {
+		extra["assetTransferMethod"] = string(assetInfo.AssetTransferMethod)
 	}
 
 	return x402.AssetAmount{
-		Asset:  config.DefaultAsset.Address,
-		Amount: parsedAmount.String(),
+		Asset:  assetInfo.Asset,
+		Amount: tokenAmount,
 		Extra:  extra,
 	}, nil
 }

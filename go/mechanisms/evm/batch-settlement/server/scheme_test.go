@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"math/big"
+	"strings"
 	"testing"
 
 	x402 "github.com/x402-foundation/x402/go/v2"
@@ -130,7 +131,7 @@ func TestParsePrice_UnsupportedType(t *testing.T) {
 func TestRegisterMoneyParser_OverridesDefault(t *testing.T) {
 	s := NewBatchSettlementEvmScheme("0xreceiver", nil)
 	called := false
-	s.RegisterMoneyParser(func(_ float64, _ x402.Network) (*x402.AssetAmount, error) {
+	s.RegisterMoneyParser(func(_ string, _ x402.Network) (*x402.AssetAmount, error) {
 		called = true
 		return &x402.AssetAmount{Amount: "777", Asset: "0xcustom"}, nil
 	})
@@ -379,29 +380,30 @@ func TestSignClaimBatch_OK(t *testing.T) {
 
 func TestSession_RoundTrip_CaseInsensitive(t *testing.T) {
 	s := NewBatchSettlementEvmScheme("0xreceiver", nil)
-	in := sampleSession("0xABCD", "10")
-	if err := s.UpdateSession("0xABCD", in); err != nil {
+	upper := "0x" + strings.ToUpper(strings.TrimPrefix(testChA, "0x"))
+	in := sampleSession(upper, "10")
+	if err := s.UpdateSession(upper, in); err != nil {
 		t.Fatalf("update: %v", err)
 	}
-	got, err := s.GetSession("0xabcd")
+	got, err := s.GetSession(testChA)
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
-	if got == nil || got.ChannelId != "0xABCD" {
+	if got == nil || got.ChannelId != upper {
 		t.Fatalf("got %+v", got)
 	}
-	if err := s.DeleteSession("0XABCD"); err != nil {
+	if err := s.DeleteSession(upper); err != nil {
 		t.Fatalf("delete: %v", err)
 	}
-	if got2, _ := s.GetSession("0xabcd"); got2 != nil {
+	if got2, _ := s.GetSession(testChA); got2 != nil {
 		t.Fatalf("expected nil after delete")
 	}
 }
 
-func TestGetAssetDecimals_DefaultsTo6(t *testing.T) {
+func TestGetAssetDecimals_UnknownAsset(t *testing.T) {
 	s := NewBatchSettlementEvmScheme("0xreceiver", nil)
-	if got := s.GetAssetDecimals("0xunknown", x402.Network("nope")); got != 6 {
-		t.Fatalf("got %d", got)
+	if _, ok := s.GetAssetDecimals("0xunknown", x402.Network("nope")); ok {
+		t.Fatal("expected ok=false for unknown asset")
 	}
 }
 
@@ -413,19 +415,19 @@ func TestCreateChannelManager_NotNil(t *testing.T) {
 	}
 }
 
-func TestParseMoneyToDecimal_AllNumericTypes(t *testing.T) {
+func TestParseMoney_AllNumericTypes(t *testing.T) {
 	cases := []struct {
 		in   x402.Price
-		want float64
+		want string
 	}{
-		{"1.5", 1.5},
-		{"$2.25", 2.25},
-		{float64(3.5), 3.5},
-		{int(4), 4.0},
-		{int64(5), 5.0},
+		{"1.5", "1.5"},
+		{"$2.25", "2.25"},
+		{float64(3.5), "3.5"},
+		{int(4), "4"},
+		{int64(5), "5"},
 	}
 	for _, c := range cases {
-		got, err := parseMoneyToDecimal(c.in)
+		got, _, err := x402.ParseMoney(c.in)
 		if err != nil {
 			t.Fatalf("err on %v: %v", c.in, err)
 		}
@@ -435,14 +437,14 @@ func TestParseMoneyToDecimal_AllNumericTypes(t *testing.T) {
 	}
 }
 
-func TestParseMoneyToDecimal_BadString(t *testing.T) {
-	if _, err := parseMoneyToDecimal("nope"); err == nil {
+func TestParseMoney_BadString(t *testing.T) {
+	if _, _, err := x402.ParseMoney("nope"); err == nil {
 		t.Fatal("expected error")
 	}
 }
 
-func TestParseMoneyToDecimal_UnsupportedType(t *testing.T) {
-	if _, err := parseMoneyToDecimal(big.NewInt(1)); err == nil {
+func TestParseMoney_UnsupportedType(t *testing.T) {
+	if _, _, err := x402.ParseMoney(big.NewInt(1)); err == nil {
 		t.Fatal("expected error")
 	}
 }
@@ -457,7 +459,8 @@ func makeBatchedPayload(channelId string) *types.PaymentPayload {
 	return &types.PaymentPayload{
 		X402Version: 2,
 		Payload: map[string]interface{}{
-			"type": "voucher",
+			"type":          "voucher",
+			"channelConfig": batchsettlement.ChannelConfigToMap(testConfig()),
 			"voucher": map[string]interface{}{
 				"channelId":          channelId,
 				"maxClaimableAmount": "100",
@@ -485,8 +488,9 @@ func enrich(s *BatchSettlementEvmScheme, pp *types.PaymentPayload, errReason str
 
 func TestRememberAndTakeChannelSnapshot_RoundTrip(t *testing.T) {
 	s := NewBatchSettlementEvmScheme("0xreceiver", nil)
-	pp := makeBatchedPayload("0xabcd")
-	sess := sampleSession("0xabcd", "10")
+	id := testChannelId(t)
+	pp := makeBatchedPayload(id)
+	sess := sampleSession(id, "10")
 
 	s.RememberChannelSnapshot(pp, sess)
 	got := s.TakeChannelSnapshot(pp)
@@ -501,8 +505,9 @@ func TestRememberAndTakeChannelSnapshot_RoundTrip(t *testing.T) {
 
 func TestRememberChannelSnapshot_NilInputsAreNoOp(t *testing.T) {
 	s := NewBatchSettlementEvmScheme("0xreceiver", nil)
-	pp := makeBatchedPayload("0xabcd")
-	s.RememberChannelSnapshot(nil, sampleSession("0xabcd", "10"))
+	id := testChannelId(t)
+	pp := makeBatchedPayload(id)
+	s.RememberChannelSnapshot(nil, sampleSession(id, "10"))
 	s.RememberChannelSnapshot(pp, nil)
 	if got := s.TakeChannelSnapshot(pp); got != nil {
 		t.Fatalf("expected nil snapshot, got %+v", got)
@@ -514,8 +519,9 @@ func TestRememberChannelSnapshot_NilInputsAreNoOp(t *testing.T) {
 
 func TestEnrichPaymentRequiredResponse_WrongReasonNoOp(t *testing.T) {
 	s := NewBatchSettlementEvmScheme("0xreceiver", nil)
-	pp := makeBatchedPayload("0xabcd")
-	s.RememberChannelSnapshot(pp, sampleSession("0xabcd", "10"))
+	id := testChannelId(t)
+	pp := makeBatchedPayload(id)
+	s.RememberChannelSnapshot(pp, sampleSession(id, "10"))
 	reqs := enrich(s, pp, "some_other_reason",
 		[]types.PaymentRequirements{{Scheme: batchsettlement.SchemeBatched, Network: "eip155:8453"}})
 	if reqs[0].Extra != nil {
@@ -534,8 +540,9 @@ func TestEnrichPaymentRequiredResponse_NilPayloadNoOp(t *testing.T) {
 
 func TestEnrichPaymentRequiredResponse_FromSnapshot(t *testing.T) {
 	s := NewBatchSettlementEvmScheme("0xreceiver", nil)
-	pp := makeBatchedPayload("0xabcd")
-	s.RememberChannelSnapshot(pp, sampleSession("0xabcd", "42"))
+	id := testChannelId(t)
+	pp := makeBatchedPayload(id)
+	s.RememberChannelSnapshot(pp, sampleSession(id, "42"))
 
 	reqs := enrich(s, pp, batchsettlement.ErrCumulativeAmountMismatch,
 		[]types.PaymentRequirements{{Scheme: batchsettlement.SchemeBatched, Network: "eip155:8453"}})
@@ -544,7 +551,7 @@ func TestEnrichPaymentRequiredResponse_FromSnapshot(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected channelState map, got %+v", reqs[0].Extra)
 	}
-	if channelState["channelId"] != "0xabcd" {
+	if channelState["channelId"] != id {
 		t.Fatalf("channelId = %v", channelState["channelId"])
 	}
 	if channelState["chargedCumulativeAmount"] != "42" {
@@ -571,8 +578,9 @@ func TestEnrichPaymentRequiredResponse_FromSnapshot(t *testing.T) {
 
 func TestEnrichPaymentRequiredResponse_FallsBackToStorage(t *testing.T) {
 	s := NewBatchSettlementEvmScheme("0xreceiver", nil)
-	pp := makeBatchedPayload("0xabcd")
-	_ = s.UpdateSession("0xabcd", sampleSession("0xabcd", "77"))
+	id := testChannelId(t)
+	pp := makeBatchedPayload(id)
+	_ = s.UpdateSession(id, sampleSession(id, "77"))
 
 	reqs := enrich(s, pp, batchsettlement.ErrCumulativeAmountMismatch,
 		[]types.PaymentRequirements{{Scheme: batchsettlement.SchemeBatched, Network: "eip155:8453"}})
@@ -588,7 +596,8 @@ func TestEnrichPaymentRequiredResponse_FallsBackToStorage(t *testing.T) {
 
 func TestEnrichPaymentRequiredResponse_NoSessionNoOp(t *testing.T) {
 	s := NewBatchSettlementEvmScheme("0xreceiver", nil)
-	pp := makeBatchedPayload("0xabcd")
+	id := testChannelId(t)
+	pp := makeBatchedPayload(id)
 	reqs := enrich(s, pp, batchsettlement.ErrCumulativeAmountMismatch,
 		[]types.PaymentRequirements{{Scheme: batchsettlement.SchemeBatched, Network: "eip155:8453"}})
 	if reqs[0].Extra != nil {
@@ -598,8 +607,9 @@ func TestEnrichPaymentRequiredResponse_NoSessionNoOp(t *testing.T) {
 
 func TestEnrichPaymentRequiredResponse_SkipsNonBatchedAndMismatchedNetwork(t *testing.T) {
 	s := NewBatchSettlementEvmScheme("0xreceiver", nil)
-	pp := makeBatchedPayload("0xabcd")
-	s.RememberChannelSnapshot(pp, sampleSession("0xabcd", "10"))
+	id := testChannelId(t)
+	pp := makeBatchedPayload(id)
+	s.RememberChannelSnapshot(pp, sampleSession(id, "10"))
 
 	reqs := enrich(s, pp, batchsettlement.ErrCumulativeAmountMismatch, []types.PaymentRequirements{
 		{Scheme: "exact", Network: "eip155:8453"},
@@ -648,8 +658,8 @@ func TestExtractChannelIdFromPayload(t *testing.T) {
 		t.Fatalf("channelId non-string: got %q", got)
 	}
 	if got := extractChannelIdFromPayload(map[string]interface{}{
-		"voucher": map[string]interface{}{"channelId": "0xabcd"},
-	}); got != "0xabcd" {
+		"voucher": map[string]interface{}{"channelId": testChA},
+	}); got != testChA {
 		t.Fatalf("got %q", got)
 	}
 }

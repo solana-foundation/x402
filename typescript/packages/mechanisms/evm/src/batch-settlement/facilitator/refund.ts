@@ -7,10 +7,16 @@ import type {
   ChannelState,
 } from "../types";
 import { batchSettlementABI } from "../abi";
-import { BATCH_SETTLEMENT_ADDRESS } from "../constants";
+import {
+  BATCH_SETTLEMENT_ADDRESS,
+  CHANNEL_STATE_POLL_MS,
+  CHANNEL_STATE_POLL_INTERVAL_MS,
+} from "../constants";
 import { computeChannelId } from "../utils";
 import { signClaimBatch, signRefund } from "../authorizerSigner";
 import * as Errors from "../errors";
+import { truncateErrorMessage } from "../../utils";
+import { waitAndReturnSettleResponse } from "../../shared/settleReceipt";
 import { buildVoucherClaimArgs } from "./claim";
 import { readChannelState, toContractChannelConfig } from "./utils";
 
@@ -28,9 +34,6 @@ type RefundSettlementDetails = {
   amount: string;
   extra: RefundSettlementExtra;
 };
-
-const REFUND_STATE_POLL_MS = 2_000;
-const REFUND_STATE_POLL_INTERVAL_MS = 150;
 
 /**
  * Computes the token amount that `refundWithSignature` would transfer after any
@@ -125,7 +128,7 @@ async function readPostRefundState(
   submittedNonce: string,
 ): Promise<ChannelState | null> {
   const expectedNonce = BigInt(submittedNonce) + 1n;
-  const deadline = Date.now() + REFUND_STATE_POLL_MS;
+  const deadline = Date.now() + CHANNEL_STATE_POLL_MS;
 
   do {
     let state: ChannelState;
@@ -137,7 +140,7 @@ async function readPostRefundState(
     if (state.refundNonce >= expectedNonce) {
       return state;
     }
-    await new Promise(resolve => setTimeout(resolve, REFUND_STATE_POLL_INTERVAL_MS));
+    await new Promise(resolve => setTimeout(resolve, CHANNEL_STATE_POLL_INTERVAL_MS));
   } while (Date.now() < deadline);
 
   return null;
@@ -187,7 +190,8 @@ function buildRefundExtraFromPostState(
  * @param signer - Facilitator signer used to submit the onchain transactions.
  * @param payload - Refund payload with optional signatures, amount, and nonce.
  * @param requirements - Payment requirements for network identification.
- * @param authorizerSigner - Dedicated key for producing EIP-712 signatures.
+ * @param authorizerSigner - Optional dedicated key for producing EIP-712 signatures.
+ *   When omitted, the payload must already carry the required authorizer signatures.
  * @param dataSuffix - Optional hex suffix appended to the refund transaction.
  * @returns A {@link SettleResponse} with the transaction hash on success.
  */
@@ -195,7 +199,7 @@ export async function executeRefundWithSignature(
   signer: FacilitatorEvmSigner,
   payload: BatchSettlementEnrichedRefundPayload,
   requirements: PaymentRequirements,
-  authorizerSigner: AuthorizerSigner,
+  authorizerSigner: AuthorizerSigner | undefined,
   dataSuffix?: `0x${string}`,
 ): Promise<SettleResponse> {
   const network = requirements.network;
@@ -217,10 +221,21 @@ export async function executeRefundWithSignature(
     }
 
     const hasClientSig = payload.refundAuthorizerSignature !== undefined;
-    const authorizerMismatch =
-      getAddress(payload.channelConfig.receiverAuthorizer) !== getAddress(authorizerSigner.address);
 
-    if (!hasClientSig && authorizerMismatch) {
+    if (!hasClientSig && !authorizerSigner) {
+      return {
+        success: false,
+        errorReason: Errors.ErrAuthorizerNotConfigured,
+        transaction: "",
+        network,
+      };
+    }
+
+    if (
+      !hasClientSig &&
+      authorizerSigner &&
+      getAddress(payload.channelConfig.receiverAuthorizer) !== getAddress(authorizerSigner.address)
+    ) {
       return {
         success: false,
         errorReason: Errors.ErrAuthorizerAddressMismatch,
@@ -231,7 +246,13 @@ export async function executeRefundWithSignature(
 
     const refundSig =
       payload.refundAuthorizerSignature ??
-      (await signRefund(authorizerSigner, channelId, payload.amount, payload.refundNonce, network));
+      (await signRefund(
+        authorizerSigner!,
+        channelId,
+        payload.amount,
+        payload.refundNonce,
+        network,
+      ));
 
     const refundCalldata = encodeFunctionData({
       abi: batchSettlementABI,
@@ -249,6 +270,14 @@ export async function executeRefundWithSignature(
     if (payload.claims.length > 0) {
       let claimSig = payload.claimAuthorizerSignature;
       if (!claimSig) {
+        if (!authorizerSigner) {
+          return {
+            success: false,
+            errorReason: Errors.ErrAuthorizerNotConfigured,
+            transaction: "",
+            network,
+          };
+        }
         claimSig = await signClaimBatch(authorizerSigner, payload.claims, network);
       }
 
@@ -319,39 +348,33 @@ export async function executeRefundWithSignature(
       });
     }
 
-    const receipt = await signer.waitForTransactionReceipt({ hash: tx });
-    if (receipt.status !== "success") {
-      return {
-        success: false,
-        errorReason: Errors.ErrRefundTransactionFailed,
-        errorMessage: `transaction reverted (receipt status ${receipt.status})`,
-        transaction: tx,
-        network,
-      };
-    }
+    return await waitAndReturnSettleResponse(signer, tx, network, payload.channelConfig.payer, {
+      failedStatusReason: Errors.ErrRefundTransactionFailed,
+      onSuccess: async () => {
+        const postState =
+          preState && preState.withdrawRequestedAt !== 0
+            ? await readPostRefundState(signer, channelId, payload.refundNonce)
+            : null;
+        const refundDetails =
+          preState && postState
+            ? buildRefundExtraFromPostState(channelId, preState, postState)
+            : buildRefundExtra(payload, channelId, preState);
 
-    const postState =
-      preState && preState.withdrawRequestedAt !== 0
-        ? await readPostRefundState(signer, channelId, payload.refundNonce)
-        : null;
-    const refundDetails =
-      preState && postState
-        ? buildRefundExtraFromPostState(channelId, preState, postState)
-        : buildRefundExtra(payload, channelId, preState);
-
-    return {
-      success: true,
-      transaction: tx,
-      network,
-      payer: payload.channelConfig.payer,
-      amount: refundDetails.amount,
-      extra: refundDetails.extra,
-    };
+        return {
+          success: true,
+          transaction: tx,
+          network,
+          payer: payload.channelConfig.payer,
+          amount: refundDetails.amount,
+          extra: refundDetails.extra,
+        };
+      },
+    });
   } catch (e) {
     return {
       success: false,
       errorReason: Errors.ErrRefundTransactionFailed,
-      errorMessage: e instanceof Error ? e.message : String(e),
+      errorMessage: truncateErrorMessage(e instanceof Error ? e.message : String(e)),
       transaction: "",
       network,
     };

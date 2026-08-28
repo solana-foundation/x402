@@ -1,6 +1,6 @@
 """Sign-In-With-X extension for x402 v2."""
 
-from .client import CompleteSIWxInfo, create_siwx_payload
+from .client import CompleteSIWxInfo, assert_siwx_challenge_bound_to_origin, create_siwx_payload
 from .declare import declare_siwx_extension, get_signature_type
 from .encode import encode_siwx_header
 from .evm import (
@@ -12,11 +12,14 @@ from .evm import (
 from .hooks import (
     CreateSIWxClientExtensionOptions,
     CreateSIWxHookOptions,
+    CreateSIWxRequestHookOptions,
+    CreateSIWxSettleHookOptions,
     SIWxHookEvent,
     create_siwx_client_extension,
     create_siwx_client_hook,
     create_siwx_request_hook,
     create_siwx_settle_hook,
+    normalize_configured_origin,
 )
 from .message import create_siwx_message
 from .parse import parse_siwx_header
@@ -50,12 +53,15 @@ from .types import (
     EVMMessageVerifier,
     SignatureScheme,
     SignatureType,
+    SIWxErrorCode,
     SIWxExtension,
     SIWxExtensionInfo,
     SIWxExtensionSchema,
     SIWxPayload,
+    SIWxValidationCode,
     SIWxValidationOptions,
     SIWxValidationResult,
+    SIWxVerifyCode,
     SIWxVerifyOptions,
     SIWxVerifyResult,
     SupportedChain,
@@ -76,9 +82,12 @@ __all__ = [
     "SignatureScheme",
     "SignatureType",
     "SupportedChain",
+    "SIWxValidationCode",
     "SIWxValidationResult",
     "SIWxValidationOptions",
+    "SIWxVerifyCode",
     "SIWxVerifyResult",
+    "SIWxErrorCode",
     "EVMMessageVerifier",
     "SIWxVerifyOptions",
     "CompleteSIWxInfo",
@@ -86,11 +95,15 @@ __all__ = [
     "declare_siwx_extension",
     "create_siwx_resource_server_extension",
     "CreateSIWxResourceServerExtensionOptions",
+    "CreateSIWxSettleHookOptions",
+    "CreateSIWxRequestHookOptions",
+    "normalize_configured_origin",
     "parse_siwx_header",
     "validate_siwx_message",
     "verify_siwx_signature",
     "build_siwx_schema",
     "create_siwx_message",
+    "assert_siwx_challenge_bound_to_origin",
     "create_siwx_payload",
     "encode_siwx_header",
     "create_siwx_client_extension",

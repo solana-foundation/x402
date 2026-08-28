@@ -13,13 +13,20 @@ except ImportError as e:
     ) from e
 
 from .....schemas import PaymentRequirements, SettleResponse
-from ...constants import TX_STATUS_SUCCESS
+from ...settle_receipt import wait_for_receipt_and_build_response
 from ...signer import FacilitatorEvmSigner
+from ...types import TransactionReceipt
+from ...utils import truncate_error_message
 from ..abi import BATCH_SETTLEMENT_ABI
 from ..authorizer_signer import sign_claim_batch, sign_refund
-from ..constants import BATCH_SETTLEMENT_ADDRESS
+from ..constants import (
+    BATCH_SETTLEMENT_ADDRESS,
+    CHANNEL_STATE_POLL_INTERVAL_S,
+    CHANNEL_STATE_POLL_S,
+)
 from ..errors import (
     ERR_AUTHORIZER_ADDRESS_MISMATCH,
+    ERR_AUTHORIZER_NOT_CONFIGURED,
     ERR_REFUND_NO_BALANCE,
     ERR_REFUND_SIMULATION_FAILED,
     ERR_REFUND_TRANSACTION_FAILED,
@@ -32,9 +39,6 @@ from ..types import (
 from ..utils import compute_channel_id
 from .claim import build_voucher_claim_args
 from .utils import read_channel_state, to_contract_channel_config
-
-_REFUND_STATE_POLL_S = 2.0
-_REFUND_STATE_POLL_INTERVAL_S = 0.15
 
 
 def _get_refundable_amount(
@@ -112,7 +116,7 @@ def _read_post_refund_state(
     signer: FacilitatorEvmSigner, channel_id: str, submitted_nonce: str
 ) -> ChannelState | None:
     expected = int(submitted_nonce) + 1
-    deadline = time.time() + _REFUND_STATE_POLL_S
+    deadline = time.time() + CHANNEL_STATE_POLL_S
     while True:
         try:
             state = read_channel_state(signer, channel_id)
@@ -122,7 +126,7 @@ def _read_post_refund_state(
             return state
         if time.time() >= deadline:
             return None
-        time.sleep(_REFUND_STATE_POLL_INTERVAL_S)
+        time.sleep(CHANNEL_STATE_POLL_INTERVAL_S)
 
 
 def _encode_calldata(function_name: str, args: list) -> bytes:
@@ -139,7 +143,8 @@ def execute_refund_with_signature(
     signer: FacilitatorEvmSigner,
     payload: EnrichedRefundPayload,
     requirements: PaymentRequirements,
-    authorizer_signer: AuthorizerSigner,
+    authorizer_signer: AuthorizerSigner | None,
+    data_suffix: str | None = None,
 ) -> SettleResponse:
     """Submit a cooperative refund via `refundWithSignature`, optionally batched with claims."""
     network = str(requirements.network)
@@ -160,26 +165,34 @@ def execute_refund_with_signature(
                 network=network,
             )
 
-        has_client_sig = payload.refund_authorizer_signature is not None
-        authorizer_mismatch = to_checksum_address(
-            payload.channel_config.receiver_authorizer
-        ) != to_checksum_address(authorizer_signer.address)
+        refund_sig_hex = payload.refund_authorizer_signature
+        if refund_sig_hex is None:
+            if authorizer_signer is None:
+                return SettleResponse(
+                    success=False,
+                    error_reason=ERR_AUTHORIZER_NOT_CONFIGURED,
+                    transaction="",
+                    network=network,
+                )
 
-        if not has_client_sig and authorizer_mismatch:
-            return SettleResponse(
-                success=False,
-                error_reason=ERR_AUTHORIZER_ADDRESS_MISMATCH,
-                transaction="",
-                network=network,
+            if to_checksum_address(
+                payload.channel_config.receiver_authorizer
+            ) != to_checksum_address(authorizer_signer.address):
+                return SettleResponse(
+                    success=False,
+                    error_reason=ERR_AUTHORIZER_ADDRESS_MISMATCH,
+                    transaction="",
+                    network=network,
+                )
+
+            refund_sig_hex = sign_refund(
+                authorizer_signer,
+                channel_id,
+                payload.amount,
+                payload.refund_nonce,
+                network,
             )
 
-        refund_sig_hex = payload.refund_authorizer_signature or sign_refund(
-            authorizer_signer,
-            channel_id,
-            payload.amount,
-            payload.refund_nonce,
-            network,
-        )
         refund_sig_bytes = bytes.fromhex(refund_sig_hex.removeprefix("0x"))
 
         contract_channel = to_contract_channel_config(payload.channel_config)
@@ -191,9 +204,16 @@ def execute_refund_with_signature(
         ]
 
         if payload.claims:
-            claim_sig_hex = payload.claim_authorizer_signature or sign_claim_batch(
-                authorizer_signer, payload.claims, network
-            )
+            claim_sig_hex = payload.claim_authorizer_signature
+            if not claim_sig_hex:
+                if authorizer_signer is None:
+                    return SettleResponse(
+                        success=False,
+                        error_reason=ERR_AUTHORIZER_NOT_CONFIGURED,
+                        transaction="",
+                        network=network,
+                    )
+                claim_sig_hex = sign_claim_batch(authorizer_signer, payload.claims, network)
             claim_sig_bytes = bytes.fromhex(claim_sig_hex.removeprefix("0x"))
             claim_args = [build_voucher_claim_args(payload.claims), claim_sig_bytes]
 
@@ -209,13 +229,17 @@ def execute_refund_with_signature(
                 return SettleResponse(
                     success=False,
                     error_reason=ERR_REFUND_SIMULATION_FAILED,
-                    error_message=str(e)[:500],
+                    error_message=truncate_error_message(str(e)),
                     transaction="",
                     network=network,
                 )
 
             tx = signer.write_contract(
-                contract_addr, BATCH_SETTLEMENT_ABI, "multicall", *multicall_args
+                contract_addr,
+                BATCH_SETTLEMENT_ABI,
+                "multicall",
+                *multicall_args,
+                data_suffix=data_suffix,
             )
         else:
             try:
@@ -229,7 +253,7 @@ def execute_refund_with_signature(
                 return SettleResponse(
                     success=False,
                     error_reason=ERR_REFUND_SIMULATION_FAILED,
-                    error_message=str(e)[:500],
+                    error_message=truncate_error_message(str(e)),
                     transaction="",
                     network=network,
                 )
@@ -239,41 +263,44 @@ def execute_refund_with_signature(
                 BATCH_SETTLEMENT_ABI,
                 "refundWithSignature",
                 *refund_args,
+                data_suffix=data_suffix,
             )
 
-        receipt = signer.wait_for_transaction_receipt(tx)
-        if receipt.status != TX_STATUS_SUCCESS:
+        def _build_refund_success(_receipt: TransactionReceipt) -> SettleResponse:
+            post_state = (
+                _read_post_refund_state(signer, channel_id, payload.refund_nonce)
+                if pre_state and pre_state.withdraw_requested_at != 0
+                else None
+            )
+            if pre_state and post_state:
+                amount, extra = _build_refund_extra_from_post_state(
+                    channel_id, pre_state, post_state
+                )
+            else:
+                amount, extra = _build_refund_extra(payload, channel_id, pre_state)
+
             return SettleResponse(
-                success=False,
-                error_reason=ERR_REFUND_TRANSACTION_FAILED,
-                error_message=f"transaction reverted (receipt status {receipt.status})",
+                success=True,
                 transaction=tx,
                 network=network,
+                payer=payload.channel_config.payer,
+                amount=amount,
+                extra=extra,
             )
 
-        post_state = (
-            _read_post_refund_state(signer, channel_id, payload.refund_nonce)
-            if pre_state and pre_state.withdraw_requested_at != 0
-            else None
-        )
-        if pre_state and post_state:
-            amount, extra = _build_refund_extra_from_post_state(channel_id, pre_state, post_state)
-        else:
-            amount, extra = _build_refund_extra(payload, channel_id, pre_state)
-
-        return SettleResponse(
-            success=True,
-            transaction=tx,
-            network=network,
-            payer=payload.channel_config.payer,
-            amount=amount,
-            extra=extra,
+        return wait_for_receipt_and_build_response(
+            signer,
+            tx,
+            network,
+            payload.channel_config.payer,
+            failed_reason=ERR_REFUND_TRANSACTION_FAILED,
+            on_success=_build_refund_success,
         )
     except Exception as e:
         return SettleResponse(
             success=False,
             error_reason=ERR_REFUND_TRANSACTION_FAILED,
-            error_message=str(e)[:500],
+            error_message=truncate_error_message(str(e)),
             transaction="",
             network=network,
         )

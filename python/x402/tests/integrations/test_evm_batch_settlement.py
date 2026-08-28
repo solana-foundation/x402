@@ -35,7 +35,7 @@ from x402.mechanisms.evm.batch_settlement.client import (
     BatchSettlementDepositPolicy,
     BatchSettlementEvmSchemeOptions,
     InMemoryClientChannelStorage,
-    process_settle_response,
+    update_channel_from_settle,
 )
 from x402.mechanisms.evm.batch_settlement.client import (
     BatchSettlementEvmScheme as BatchSettlementClientScheme,
@@ -59,7 +59,12 @@ from x402.schemas import (
     VerifyResponse,
 )
 
-CLIENT_PRIVATE_KEY = os.environ.get("EVM_CLIENT_PRIVATE_KEY")
+# Prefer EVM_CLIENT_EOA_PRIVATE_KEY (a plain EOA, not ERC-7702 delegated) so that
+# strict verify_typed_data_strict routing (code-length-based) does not cause the
+# facilitator to try EIP-1271 on an address that has been delegated for 7702 tests.
+CLIENT_PRIVATE_KEY = os.environ.get("EVM_CLIENT_EOA_PRIVATE_KEY") or os.environ.get(
+    "EVM_CLIENT_PRIVATE_KEY"
+)
 FACILITATOR_PRIVATE_KEY = os.environ.get("EVM_FACILITATOR_PRIVATE_KEY")
 RECEIVER_AUTHORIZER_PRIVATE_KEY = os.environ.get(
     "EVM_RECEIVER_AUTHORIZER_PRIVATE_KEY", FACILITATOR_PRIVATE_KEY
@@ -72,8 +77,8 @@ USDC_ADDRESS = "0x036CbD53842c5426634e7929541eC2318f3dCF7e"
 pytestmark = pytest.mark.skipif(
     not CLIENT_PRIVATE_KEY or not FACILITATOR_PRIVATE_KEY,
     reason=(
-        "EVM_CLIENT_PRIVATE_KEY and EVM_FACILITATOR_PRIVATE_KEY environment "
-        "variables required for batch-settlement integration tests"
+        "EVM_CLIENT_EOA_PRIVATE_KEY (or EVM_CLIENT_PRIVATE_KEY) and EVM_FACILITATOR_PRIVATE_KEY "
+        "environment variables required for batch-settlement integration tests"
     ),
 )
 
@@ -245,7 +250,21 @@ class TestBatchSettlementEvmIntegration:
         deposit_channel_id = first_payload.payload["voucher"]["channelId"]
         _wait_for_channel_balance(self.w3, deposit_channel_id)
 
-        process_settle_response(self.client_storage, settle_response)
+        deposit_amount = first_payload.payload["deposit"]["amount"]
+        extra = settle_response.extra or {}
+        update_channel_from_settle(
+            self.client_storage,
+            {
+                "server": {"charged_amount": extra["chargedAmount"]}
+                if extra.get("chargedAmount") is not None
+                else {},
+                "local": {
+                    "channel_id": deposit_channel_id,
+                    "request_amount": accepted.amount,
+                    "deposit_amount": deposit_amount,
+                },
+            },
+        )
 
         followup_required = self.server.create_payment_required_response(accepts, resource)
         second_payload = self.client.create_payment_payload(followup_required)

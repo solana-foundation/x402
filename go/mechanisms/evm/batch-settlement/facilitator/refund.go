@@ -15,15 +15,6 @@ import (
 	"github.com/x402-foundation/x402/go/v2/types"
 )
 
-// The post-refund state is only polled when the channel was in
-// pending-withdrawal at refund time, since withdraw cancellation makes a simple
-// `preBalance - actualRefund` formula inaccurate; otherwise the formula is
-// exact and a re-read is unnecessary.
-const (
-	refundStatePollDeadline = 2 * time.Second
-	refundStatePollInterval = 150 * time.Millisecond
-)
-
 func getRefundableAmount(
 	payload *batchsettlement.BatchSettlementEnrichedRefundPayload,
 	preState *batchsettlement.ChannelState,
@@ -99,6 +90,10 @@ func ExecuteRefundWithSignature(
 				fmt.Sprintf("invalid refund authorizer signature: %s", err))
 		}
 	} else {
+		if authorizerSigner == nil {
+			return nil, x402.NewSettleError(ErrAuthorizerNotConfigured, "", network, "",
+				"no refund authorizer signature in payload and no authorizer signer configured")
+		}
 		// Verify authorizer address matches config's receiverAuthorizer
 		if !strings.EqualFold(payload.ChannelConfig.ReceiverAuthorizer, authorizerSigner.Address()) {
 			return nil, x402.NewSettleError(ErrAuthorizerAddressMismatch, "", network, "",
@@ -123,7 +118,7 @@ func ExecuteRefundWithSignature(
 	// pre/post-state reads, and the response Extra.channelState.
 	channelId, err := batchsettlement.ComputeChannelId(payload.ChannelConfig, string(network))
 	if err != nil {
-		return nil, x402.NewSettleError(ErrInvalidRefundPayload, "", network, payload.ChannelConfig.Payer,
+		return nil, x402.NewSettleError(ErrInvalidRefundPayload, payload.ChannelConfig.Payer, network, "",
 			fmt.Sprintf("failed to compute channel id: %s", err))
 	}
 
@@ -154,6 +149,10 @@ func ExecuteRefundWithSignature(
 					fmt.Sprintf("invalid claim authorizer signature: %s", err))
 			}
 		} else {
+			if authorizerSigner == nil {
+				return nil, x402.NewSettleError(ErrAuthorizerNotConfigured, "", network, "",
+					"no claim authorizer signature in payload and no authorizer signer configured")
+			}
 			var err error
 			claimSig, err = authorizerSigner.SignClaimBatch(ctx, payload.Claims, string(network))
 			if err != nil {
@@ -217,15 +216,9 @@ func ExecuteRefundWithSignature(
 			return nil, x402.NewSettleError(ErrRefundTransactionFailed, "", network, "",
 				fmt.Sprintf("multicall (claim+refund) transaction failed: %s", err))
 		}
-
-		receipt, err := signer.WaitForTransactionReceipt(ctx, txHash)
-		if err != nil {
-			return nil, x402.NewSettleError(ErrWaitForReceipt, txHash, network, "",
-				fmt.Sprintf("failed waiting for multicall receipt: %s", err))
-		}
-		if receipt.Status != evm.TxStatusSuccess {
-			return nil, x402.NewSettleError(ErrTransactionReverted, txHash, network, "",
-				"multicall (claim+refund) transaction reverted")
+		if _, err := evm.WaitForSettleReceipt(ctx, signer, txHash, payload.ChannelConfig.Payer, network,
+			ErrRefundTransactionFailed, ErrTransactionReverted); err != nil {
+			return nil, err
 		}
 
 		details := computeRefundSettlementDetails(ctx, signer, payload, channelId, preState, refundAmount)
@@ -270,15 +263,9 @@ func ExecuteRefundWithSignature(
 		return nil, x402.NewSettleError(ErrRefundTransactionFailed, "", network, "",
 			fmt.Sprintf("refundWithSignature transaction failed: %s", err))
 	}
-
-	receipt, err := signer.WaitForTransactionReceipt(ctx, txHash)
-	if err != nil {
-		return nil, x402.NewSettleError(ErrWaitForReceipt, txHash, network, "",
-			fmt.Sprintf("failed waiting for refundWithSignature receipt: %s", err))
-	}
-	if receipt.Status != evm.TxStatusSuccess {
-		return nil, x402.NewSettleError(ErrTransactionReverted, txHash, network, "",
-			"refundWithSignature transaction reverted")
+	if _, err := evm.WaitForSettleReceipt(ctx, signer, txHash, payload.ChannelConfig.Payer, network,
+		ErrRefundTransactionFailed, ErrTransactionReverted); err != nil {
+		return nil, err
 	}
 
 	details := computeRefundSettlementDetails(ctx, signer, payload, channelId, preState, refundAmount)
@@ -341,7 +328,7 @@ func computeRefundSettlementDetails(
 	if preState != nil && preWithdrawRequestedAt != 0 {
 		expectedNonce := new(big.Int).Add(preRefundNonce, big.NewInt(1))
 		var postState *batchsettlement.ChannelState
-		deadline := time.Now().Add(refundStatePollDeadline)
+		deadline := time.Now().Add(channelStatePollDeadline)
 		for {
 			s, err := ReadChannelState(ctx, signer, channelId)
 			if err == nil && s != nil && s.RefundNonce != nil && s.RefundNonce.Cmp(expectedNonce) >= 0 {
@@ -351,7 +338,7 @@ func computeRefundSettlementDetails(
 			if !time.Now().Before(deadline) {
 				break
 			}
-			time.Sleep(refundStatePollInterval)
+			time.Sleep(channelStatePollInterval)
 		}
 		if postState != nil {
 			actualRefund := big.NewInt(0)

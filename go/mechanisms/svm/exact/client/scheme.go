@@ -13,6 +13,7 @@ import (
 	"github.com/gagliardetto/solana-go/programs/token"
 	"github.com/gagliardetto/solana-go/rpc"
 
+	x402 "github.com/x402-foundation/x402/go/v2"
 	"github.com/x402-foundation/x402/go/v2/mechanisms/svm"
 	"github.com/x402-foundation/x402/go/v2/types"
 )
@@ -43,6 +44,14 @@ func (c *ExactSvmScheme) Scheme() string {
 	return svm.SchemeExact
 }
 
+func (c *ExactSvmScheme) FindDefaultAsset(asset string, network x402.Network) *x402.DefaultAsset {
+	info := svm.FindDefaultAsset(asset, string(network))
+	if info == nil {
+		return nil
+	}
+	return &x402.DefaultAsset{Asset: info.Asset, Decimals: info.Decimals, Symbol: info.Symbol}
+}
+
 // CreatePaymentPayload creates a V2 payment payload for the Exact scheme
 func (c *ExactSvmScheme) CreatePaymentPayload(
 	ctx context.Context,
@@ -59,8 +68,6 @@ func (c *ExactSvmScheme) CreatePaymentPayload(
 	if err != nil {
 		return types.PaymentPayload{}, err
 	}
-
-	// Get RPC URL (custom or default)
 	rpcURL := config.RPCURL
 	if c.config != nil && c.config.RPCURL != "" {
 		rpcURL = c.config.RPCURL
@@ -127,14 +134,11 @@ func (c *ExactSvmScheme) CreatePaymentPayload(
 		return types.PaymentPayload{}, fmt.Errorf(ErrInvalidFeePayerAddress+": %w", err)
 	}
 
-	// Get latest blockhash
-	latestBlockhash, err := rpcClient.GetLatestBlockhash(ctx, rpc.CommitmentFinalized)
+	recentBlockhash, err := c.resolveRecentBlockhash(ctx, rpcClient, requirements)
 	if err != nil {
-		return types.PaymentPayload{}, fmt.Errorf(ErrFailedToGetLatestBlockhash+": %w", err)
+		return types.PaymentPayload{}, err
 	}
-	recentBlockhash := latestBlockhash.Value.Blockhash
 
-	// Build compute budget instructions
 	cuLimit, err := computebudget.NewSetComputeUnitLimitInstructionBuilder().
 		SetUnits(svm.DefaultComputeUnitLimit).
 		ValidateAndBuild()
@@ -221,4 +225,23 @@ func (c *ExactSvmScheme) CreatePaymentPayload(
 		X402Version: 2,
 		Payload:     svmPayload.ToMap(),
 	}, nil
+}
+
+func (c *ExactSvmScheme) resolveRecentBlockhash(
+	ctx context.Context,
+	rpcClient *rpc.Client,
+	requirements types.PaymentRequirements,
+) (solana.Hash, error) {
+	if blockhash, ok := requirements.Extra["recentBlockhash"].(string); ok && blockhash != "" {
+		recentBlockhash, err := solana.HashFromBase58(blockhash)
+		if err == nil {
+			return recentBlockhash, nil
+		}
+	}
+
+	latestBlockhash, err := rpcClient.GetLatestBlockhash(ctx, rpc.CommitmentFinalized)
+	if err != nil {
+		return solana.Hash{}, fmt.Errorf(ErrFailedToGetLatestBlockhash+": %w", err)
+	}
+	return latestBlockhash.Value.Blockhash, nil
 }

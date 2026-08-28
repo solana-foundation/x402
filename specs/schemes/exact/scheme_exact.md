@@ -11,7 +11,14 @@ amount of funds they need to be transferred.
 - Purchasing digital credits
 - An LLM paying to use a tool
 
-## Appendix
+## Payment Flow
+
+By default, `exact` uses the `authorization` payment flow (verify → resource → settle): the payment is verified before the resource executes and settled afterward.
+
+`exact` MAY also use the `upfront` payment flow (settle → resource → respond) when the resource needs on-chain finality before execution. Payload creation, verification checks, and settlement mechanics are unchanged; only resource-server ordering changes. Facilitator `/verify` is not invoked; `/settle` both validates and commits the payment.
+
+When the resolved flow is not `authorization`, `accepts[].extra.paymentFlow` MUST be `"upfront"`. Clients SHOULD prefer `authorization` when both flows are offered. See [Payment Flow Models](../../x402-specification-v2.md) (section 6.1) in the core specification.
+
 
 ## Critical Validation Requirements
 
@@ -38,4 +45,13 @@ While implementation details vary by network, facilitators MUST enforce security
 - Replay protection: seqno MUST be strictly equal to on-chain value; duplicate `settlementBoc` submissions rejected via BoC hash dedup.
 - Simulation verification: SHOULD simulate via emulation during `/verify` to confirm expected balance changes.
 
-Network-specific rules are in per-network documents: `scheme_exact_svm.md` (Solana), `scheme_exact_stellar.md` (Stellar), `scheme_exact_evm.md` (EVM), `scheme_exact_sui.md` (SUI), `scheme_exact_ton.md` (TON).
+### Starknet
+
+- Facilitator safety: the submitting executor MUST come from facilitator configuration, never client input, and MUST NOT be the payer or the recipient.
+- Transfer correctness: the signed SNIP-9 OutsideExecution MUST contain exactly one call — `transfer` on `requirements.asset` with calldata `[payTo, amount_low, amount_high]` — and the u256 amount MUST equal `requirements.amount` exactly.
+- Signature validity: the SNIP-12 hash MUST be computed from the facilitator's own canonical reconstruction of the typed data and validate via SNIP-6 `is_valid_signature`.
+- Caller binding and expiry: `Caller` MUST equal `extra.feePayer` — the required sponsor address the facilitator announces via `/supported` and the resource server puts in the requirements; `Execute Before` MUST cover the advertised `maxTimeoutSeconds` window (within a skew margin) at verification, with a minimum remaining window at settlement.
+- Replay protection: the SNIP-9 nonce MUST be unused at verification; it is consumed on-chain at execution.
+- Simulation verification: MUST simulate the settlement and fail closed unless it shows exactly one asset `Transfer` from payer to `payTo` for the exact amount.
+
+Network-specific rules are in per-network documents: `scheme_exact_svm.md` (Solana), `scheme_exact_stellar.md` (Stellar), `scheme_exact_evm.md` (EVM), `scheme_exact_sui.md` (SUI), `scheme_exact_ton.md` (TON), `scheme_exact_starknet.md` (Starknet).

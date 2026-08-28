@@ -5,12 +5,27 @@
  * optional chain configuration via environment variables.
  *
  * New chain support should be added here in alphabetic order by network prefix
- * (e.g., "eip155" before "solana" before "stellar").
+ * (e.g., "algorand" before "aptos" before "ccd" before "eip155" before "hedera" before "near" before "solana" before "stellar" before "tvm" before "xrpl").
  */
 
+import {
+  Account,
+  Ed25519PrivateKey,
+  PrivateKey as AptosPrivateKey,
+  PrivateKeyVariants,
+} from "@aptos-labs/ts-sdk";
 import * as KeetaNet from "@keetanetwork/keetanet-client";
+import { toFacilitatorAptosSigner } from "@x402/aptos";
+import { ExactAptosScheme } from "@x402/aptos/exact/facilitator";
 import { toFacilitatorAvmSigner } from "@x402/avm";
 import { ExactAvmScheme } from "@x402/avm/exact/facilitator";
+import { ExactConcordiumScheme } from "@x402/concordium/exact/facilitator";
+import {
+  CONCORDIUM_TESTNET_CAIP2,
+  getConcordiumGrpcUrl,
+  parseGrpcUrl,
+  toConcordiumFacilitatorSigner,
+} from "@x402/concordium";
 import { x402Facilitator } from "@x402/core/facilitator";
 import {
   PaymentPayload,
@@ -29,6 +44,7 @@ import {
   createHederaClient,
   createHederaPreflightTransfer,
   createHederaSignAndSubmitTransaction,
+  createHederaVerifyPayerSignature,
   toFacilitatorHederaSigner,
 } from "@x402/hedera";
 import { ExactHederaScheme } from "@x402/hedera/exact/facilitator";
@@ -38,6 +54,12 @@ import {
   FacilitatorKeetaSigner,
 } from "@x402/keeta";
 import { ExactKeetaScheme } from "@x402/keeta/exact/facilitator";
+import {
+  createFacilitatorNearSigner,
+  NEAR_TESTNET_CAIP2,
+  type FacilitatorRelayerConfig,
+} from "@x402/near";
+import { ExactNearScheme } from "@x402/near/exact/facilitator";
 import { toFacilitatorSvmSigner } from "@x402/svm";
 import { ExactSvmScheme } from "@x402/svm/exact/facilitator";
 import { base58 } from "@scure/base";
@@ -51,6 +73,8 @@ import {
   TVM_PROVIDER_TONCENTER,
 } from "@x402/tvm";
 import { ExactTvmScheme } from "@x402/tvm/exact/facilitator";
+import { XRPL_TESTNET } from "@x402/xrpl";
+import { ExactXrplScheme } from "@x402/xrpl/exact/facilitator";
 import dotenv from "dotenv";
 import express from "express";
 import { createWalletClient, http, publicActions } from "viem";
@@ -64,39 +88,65 @@ const PORT = process.env.PORT || "4022";
 
 // Configuration - optional per network (alphabetic order)
 const avmPrivateKey = process.env.AVM_PRIVATE_KEY as string | undefined;
+const aptosPrivateKey = process.env.APTOS_PRIVATE_KEY as string | undefined;
+const aptosRpcUrl = process.env.APTOS_RPC_URL as string | undefined;
+const ccdFacilitatorPrivateKey = process.env.CCD_FACILITATOR_PRIVATE_KEY as
+  | string
+  | undefined;
+const ccdFacilitatorAddress = process.env.CCD_FACILITATOR_ADDRESS as
+  | string
+  | undefined;
 const evmPrivateKey = process.env.EVM_PRIVATE_KEY as `0x${string}` | undefined;
 const keetaMnemonic = process.env.KEETA_MNEMONIC as string | undefined;
+const nearRelayerAccountId = process.env.NEAR_RELAYER_ACCOUNT_ID as
+  | string
+  | undefined;
+const nearRelayerPrivateKey = process.env.NEAR_RELAYER_PRIVATE_KEY as
+  | FacilitatorRelayerConfig["secretKey"]
+  | undefined;
+const nearNetwork = process.env.NEAR_NETWORK || NEAR_TESTNET_CAIP2;
+const nearRpcUrl = process.env.NEAR_RPC_URL as string | undefined;
 const svmPrivateKey = process.env.SVM_PRIVATE_KEY as string | undefined;
 const stellarPrivateKey = process.env.STELLAR_PRIVATE_KEY as string | undefined;
 const tvmPrivateKey = process.env.TVM_PRIVATE_KEY as string | undefined;
 const hederaAccountId = process.env.HEDERA_ACCOUNT_ID;
 // Hedera private key should be an ECDSA key string (0x-prefixed or DER-encoded).
 const hederaPrivateKey = process.env.HEDERA_PRIVATE_KEY;
+// XRPL is keyless for the facilitator: the payer signs and pays fees.
+const xrplNetwork = process.env.XRPL_NETWORK || XRPL_TESTNET;
+const xrplWsUrl = process.env.XRPL_WS_URL as string | undefined;
 
 // Validate at least one private key is provided
 if (
   !avmPrivateKey &&
+  !aptosPrivateKey &&
+  !(ccdFacilitatorPrivateKey && ccdFacilitatorAddress) &&
   !evmPrivateKey &&
   !keetaMnemonic &&
+  !(nearRelayerAccountId && nearRelayerPrivateKey) &&
   !svmPrivateKey &&
   !stellarPrivateKey &&
   !tvmPrivateKey &&
   !(hederaAccountId && hederaPrivateKey)
 ) {
   console.error(
-    "❌ At least one of AVM_PRIVATE_KEY, EVM_PRIVATE_KEY, KEETA_MNEMONIC, SVM_PRIVATE_KEY, STELLAR_PRIVATE_KEY, TVM_PRIVATE_KEY, or HEDERA_ACCOUNT_ID + HEDERA_PRIVATE_KEY is required",
+    "❌ At least one of AVM_PRIVATE_KEY, APTOS_PRIVATE_KEY, CCD_FACILITATOR_PRIVATE_KEY + CCD_FACILITATOR_ADDRESS, EVM_PRIVATE_KEY, KEETA_MNEMONIC, NEAR_RELAYER_ACCOUNT_ID + NEAR_RELAYER_PRIVATE_KEY, SVM_PRIVATE_KEY, STELLAR_PRIVATE_KEY, TVM_PRIVATE_KEY, or HEDERA_ACCOUNT_ID + HEDERA_PRIVATE_KEY is required",
   );
   process.exit(1);
 }
 
 // Network configuration (alphabetic order)
-const AVM_NETWORK = "algorand:SGO1GKSzyE7IEPItTxCByw9x8FmnrCDexi9/cOUJOiI="; // Algorand Testnet
+const AVM_NETWORK = "algorand:SGO1GKSzyE7IEPItTxCByw9x8FmnrCDe"; // Algorand Testnet
+const APTOS_NETWORK = (process.env.APTOS_NETWORK || "aptos:2") as Network; // Aptos Testnet
+const CCD_NETWORK = CONCORDIUM_TESTNET_CAIP2; // Concordium Testnet
 const EVM_NETWORK = "eip155:84532"; // Base Sepolia
 const HEDERA_NETWORK = "hedera:testnet"; // Hedera Testnet
 const KEETA_NETWORK = KEETA_TESTNET_CAIP2; // Keeta Testnet
+const NEAR_NETWORK = nearNetwork as Network; // NEAR Testnet
 const SVM_NETWORK = "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1"; // Solana Devnet
 const STELLAR_NETWORK = "stellar:testnet"; // Stellar Testnet
 const TVM_NETWORK = (process.env.TVM_NETWORK || "tvm:-3") as Network; // TON Testnet
+const XRPL_NETWORK = xrplNetwork as Network; // XRPL Testnet
 
 // Initialize the x402 Facilitator
 const facilitator = new x402Facilitator()
@@ -124,6 +174,42 @@ if (avmPrivateKey) {
   const avmSigner = toFacilitatorAvmSigner(avmPrivateKey);
   console.info(`AVM Facilitator account: ${avmSigner.getAddresses()[0]}`);
   facilitator.register(AVM_NETWORK, new ExactAvmScheme(avmSigner));
+}
+
+// Register Aptos scheme if private key is provided
+if (aptosPrivateKey) {
+  const formattedKey = AptosPrivateKey.formatPrivateKey(
+    aptosPrivateKey,
+    PrivateKeyVariants.Ed25519,
+  );
+  const aptosAccount = Account.fromPrivateKey({
+    privateKey: new Ed25519PrivateKey(formattedKey),
+  });
+  const aptosSigner = toFacilitatorAptosSigner(
+    aptosAccount,
+    aptosRpcUrl ? { defaultRpcUrl: aptosRpcUrl } : undefined,
+  );
+  facilitator.register(APTOS_NETWORK, new ExactAptosScheme(aptosSigner));
+  console.info(
+    `Aptos Facilitator account: ${aptosAccount.accountAddress.toStringLong()} on ${APTOS_NETWORK}`,
+  );
+}
+
+// Register Concordium scheme if private key + address are provided (recommended).
+// This matches how every other mechanism reads a private key from an env var.
+if (ccdFacilitatorPrivateKey && ccdFacilitatorAddress) {
+  const [host, port] = parseGrpcUrl(getConcordiumGrpcUrl(CCD_NETWORK));
+
+  const signer = toConcordiumFacilitatorSigner(
+    ccdFacilitatorAddress,
+    ccdFacilitatorPrivateKey,
+    { host, port, useTls: true },
+  );
+
+  facilitator.register(CCD_NETWORK, new ExactConcordiumScheme({ signer }));
+  console.info(
+    `CCD Facilitator account: ${ccdFacilitatorAddress} on ${CCD_NETWORK}`,
+  );
 }
 
 // Register EVM scheme if private key is provided
@@ -202,7 +288,8 @@ if (hederaAccountId && hederaPrivateKey) {
       buildHederaClient,
       hederaKey,
     ),
-    preflightTransfer: createHederaPreflightTransfer(buildHederaClient),
+    verifyPayerSignature: createHederaVerifyPayerSignature(),
+    preflightTransfer: createHederaPreflightTransfer(),
   });
   facilitator.register(HEDERA_NETWORK, new ExactHederaScheme(hederaSigner));
   console.info(`Hedera Facilitator account: ${hederaAccountId}`);
@@ -223,6 +310,20 @@ if (keetaMnemonic) {
   facilitator.register(
     KEETA_NETWORK,
     new ExactKeetaScheme(keetaSigner, console),
+  );
+}
+
+// Register NEAR scheme if relayer account and private key are provided
+if (nearRelayerAccountId && nearRelayerPrivateKey) {
+  const nearSigner = createFacilitatorNearSigner({
+    relayers: [
+      { accountId: nearRelayerAccountId, secretKey: nearRelayerPrivateKey },
+    ],
+    rpcUrls: nearRpcUrl ? { [NEAR_NETWORK]: nearRpcUrl } : undefined,
+  });
+  facilitator.register(NEAR_NETWORK, new ExactNearScheme(nearSigner));
+  console.info(
+    `NEAR Facilitator relayer account: ${nearRelayerAccountId} on ${NEAR_NETWORK}`,
   );
 }
 
@@ -271,6 +372,23 @@ if (tvmPrivateKey) {
   );
 
   facilitator.register(TVM_NETWORK, new ExactTvmScheme(tvmSigner));
+}
+
+// Register XRPL scheme if XRPL_NETWORK is set. XRPL is keyless: the payer
+// signs and pays transaction fees; the facilitator only reads ledger state
+// and submits the payer-signed transaction.
+if (process.env.XRPL_NETWORK) {
+  facilitator.register(
+    XRPL_NETWORK,
+    new ExactXrplScheme(
+      xrplWsUrl
+        ? { wsUrlByNetwork: { [XRPL_NETWORK as `xrpl:${number}`]: xrplWsUrl } }
+        : {},
+    ),
+  );
+  console.info(
+    `XRPL facilitator enabled on ${XRPL_NETWORK} (payer-signed transactions; no facilitator signer)`,
+  );
 }
 
 // Initialize Express app

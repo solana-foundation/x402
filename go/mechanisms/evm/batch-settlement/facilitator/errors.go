@@ -7,7 +7,10 @@
 // carry no policy/business semantics.
 package facilitator
 
-import batchsettlement "github.com/x402-foundation/x402/go/v2/mechanisms/evm/batch-settlement"
+import (
+	"github.com/x402-foundation/x402/go/v2/mechanisms/evm"
+	batchsettlement "github.com/x402-foundation/x402/go/v2/mechanisms/evm/batch-settlement"
+)
 
 const (
 	// Payload parsing errors
@@ -88,7 +91,9 @@ const (
 	ErrSettleTransactionFailed  = "invalid_batch_settlement_evm_settle_transaction_failed"
 	ErrRefundTransactionFailed  = "invalid_batch_settlement_evm_refund_transaction_failed"
 	ErrTransactionReverted      = "invalid_batch_settlement_evm_transaction_reverted"
-	ErrWaitForReceipt           = "invalid_batch_settlement_evm_wait_for_receipt_failed"
+	// Reserved wire value; do not reassign.
+	ErrWaitForReceipt    = "invalid_batch_settlement_evm_wait_for_receipt_failed"
+	ErrSettlementPending = evm.ErrSettlementPending
 
 	// Simulation errors
 	ErrDepositSimulationFailed = "invalid_batch_settlement_evm_deposit_simulation_failed"
@@ -96,8 +101,19 @@ const (
 	ErrSettleSimulationFailed  = "invalid_batch_settlement_evm_settle_simulation_failed"
 	ErrRefundSimulationFailed  = "invalid_batch_settlement_evm_refund_simulation_failed"
 
+	// ERC-6492 counterfactual deployment errors (ERC-3009 deposit path). Wire values keep the
+	// scheme prefix to match the rest of this package's contract.
+	//
+	// ErrFactoryNotAllowed is returned when a counterfactual deposit references a factory
+	// that is not in the facilitator's EIP6492AllowedFactories allowlist.
+	ErrFactoryNotAllowed = "invalid_batch_settlement_evm_eip6492_factory_not_allowed"
+	// ErrSmartWalletDeploymentFailed is returned when the ERC-6492 factory deployment
+	// transaction itself fails or reverts.
+	ErrSmartWalletDeploymentFailed = "invalid_batch_settlement_evm_smart_wallet_deployment_failed"
+
 	// Authorizer errors
 	ErrAuthorizerAddressMismatch = "invalid_batch_settlement_evm_authorizer_address_mismatch"
+	ErrAuthorizerNotConfigured   = "invalid_batch_settlement_evm_authorizer_not_configured"
 
 	// Settle action errors
 	ErrUnknownSettleAction = "invalid_batch_settlement_evm_unknown_settle_action"

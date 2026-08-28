@@ -13,11 +13,14 @@ import { parseArgs, printHelp } from './src/cli/args';
 import { runInteractiveMode } from './src/cli/interactive';
 import { filterScenarios, TestFilters, shouldShowExtensionOutput } from './src/cli/filters';
 import { minimizeScenarios } from './src/sampling';
-import { getNetworkSet, NetworkMode, getNetworkModeDescription, resolveEvmPermit2Asset } from './src/networks/networks';
+import { getNetworkSet, NetworkMode, NetworkConfig, getNetworkModeDescription, resolveEvmPermit2Asset, PROTOCOL_FAMILIES, requiredEnvForFamily, requiredRpcEnvForFamily, protocolFamilyForCredentialKey } from './src/networks/networks';
+import { injectNetworkEnv } from './src/env';
+import { FACILITATOR_ENV_PREFLIGHT_ALLOWLIST } from './src/mechanisms';
 import { GenericServerProxy } from './src/servers/generic-server';
 import { Semaphore, ResourceLock } from './src/concurrency';
 import { FacilitatorManager } from './src/facilitators/facilitator-manager';
 import { waitForHealth } from './src/health';
+import { probeMcpReady } from './src/mcpHealth';
 import { createPortAllocator } from './src/ports';
 
 /**
@@ -32,11 +35,46 @@ function generateChannelSalt(): `0x${string}` {
   return toHex(bytes);
 }
 
+// ── Transient on-chain failure resilience ───────────────────────────────────
+// EVM Permit2 / gas-sponsoring / coldstart flows depend on testnet RPC state
+// (Permit2 allowance + account nonce) being visible across load-balanced nodes.
+// When that state hasn't propagated yet, the resource server's local pre-check
+// rejects the payment with a transient 402 before it ever reaches the
+// facilitator. These failures are non-deterministic (a different subset fails
+// each run) and clear on a short retry once state settles. eip3009 and non-EVM
+// flows don't exhibit this, so retries are scoped to EVM Permit2 scenarios.
+const EVM_PAYMENT_MAX_ATTEMPTS = 3;
+const EVM_PAYMENT_RETRY_DELAY_MS = 4000;
+
+/**
+ * Heuristic for whether a failed EVM payment is a transient on-chain/RPC issue
+ * worth retrying (vs a deterministic structural failure that would just repeat).
+ */
+function isTransientPaymentFailure(error?: string): boolean {
+  if (!error) return false;
+  const e = error.toLowerCase();
+  return (
+    e.includes('402') ||
+    e.includes('payment required') ||
+    e.includes('payment failed') ||
+    e.includes('nonce') ||
+    e.includes('replacement transaction') ||
+    e.includes('underpriced') ||
+    e.includes('insufficient allowance') ||
+    e.includes('timeout') ||
+    e.includes('timed out') ||
+    e.includes('econnreset') ||
+    e.includes('econnrefused') ||
+    e.includes('fetch failed') ||
+    e.includes('socket hang up')
+  );
+}
+
 /**
  * Approve Permit2 so that the standard/direct settle path can be exercised.
  * Grants unlimited Permit2 allowance for the given token (permit2-approval script default if omitted).
  */
-async function approvePermit2Approval(tokenAddress?: string): Promise<boolean> {
+async function approvePermit2Approval(evm: NetworkConfig, tokenAddress?: string): Promise<boolean> {
   return new Promise((resolve) => {
     const label = tokenAddress ? `token ${tokenAddress}` : '(script default token)';
     verboseLog(`  🔓 Approving Permit2 for ${label}...`);
@@ -49,6 +87,7 @@ async function approvePermit2Approval(tokenAddress?: string): Promise<boolean> {
       cwd: process.cwd(),
       stdio: 'pipe',
       shell: true,
+      env: { ...process.env, EVM_NETWORK: evm.caip2, EVM_RPC_URL: evm.rpcUrl },
     });
 
     let stderr = '';
@@ -86,7 +125,7 @@ async function approvePermit2Approval(tokenAddress?: string): Promise<boolean> {
  * Revoke Permit2 approval so that gas sponsoring extensions are exercised.
  * Sets the Permit2 allowance to 0 for the given token (permit2-approval script default if omitted).
  */
-async function revokePermit2Approval(tokenAddress?: string): Promise<boolean> {
+async function revokePermit2Approval(evm: NetworkConfig, tokenAddress?: string): Promise<boolean> {
   return new Promise((resolve) => {
     const label = tokenAddress ? `token ${tokenAddress}` : '(script default token)';
     verboseLog(`  🔓 Revoking Permit2 approval for ${label}...`);
@@ -99,6 +138,7 @@ async function revokePermit2Approval(tokenAddress?: string): Promise<boolean> {
       cwd: process.cwd(),
       stdio: 'pipe',
       shell: true,
+      env: { ...process.env, EVM_NETWORK: evm.caip2, EVM_RPC_URL: evm.rpcUrl },
     });
 
     let stderr = '';
@@ -130,6 +170,11 @@ async function revokePermit2Approval(tokenAddress?: string): Promise<boolean> {
       resolve(false);
     });
   });
+}
+
+/** True when a client declares Swig setup env (svm-smart-wallet overlay). */
+function clientRequiresSwigSetup(client: { config: { environment?: { required?: string[] } } }): boolean {
+  return (client.config.environment?.required ?? []).includes('SWIG_ACCOUNT_ADDRESS');
 }
 
 /**
@@ -208,13 +253,13 @@ async function setupSwigWallet(svmRpcUrl: string): Promise<boolean> {
 
 /**
  * Shared EVM clients for the ETH sandwich helpers.
- * Lazily initialised on first use so that missing env vars don't blow up
- * non-EVM test runs.
+ * Fed from the resolved NetworkSet (not the parent process env) so cold-start
+ * approve/revoke honor `--mainnet`/`--testnet` instead of silently reading
+ * whatever `EVM_RPC_URL` happens to be set to on the harness process.
  */
-function getEvmClients() {
-  const evmNetwork = process.env.EVM_NETWORK || 'eip155:84532';
-  const evmRpcUrl = process.env.EVM_RPC_URL;
-  const evmChain = evmNetwork === 'eip155:8453' ? base : baseSepolia;
+function getEvmClients(evm: NetworkConfig) {
+  const evmChain = evm.caip2 === 'eip155:8453' ? base : baseSepolia;
+  const evmRpcUrl = evm.rpcUrl;
 
   const facilitatorKey = process.env.FACILITATOR_EVM_PRIVATE_KEY;
   const clientKey = process.env.CLIENT_EVM_PRIVATE_KEY;
@@ -290,8 +335,8 @@ const REVOKE_FUND_AMOUNT = parseEther('0.001');
  * Send a small amount of ETH from the facilitator wallet to the client wallet
  * so the client can pay gas for Permit2 revocation transactions.
  */
-async function fundClientForRevoke(): Promise<boolean> {
-  const { publicClient, facilitatorWallet, facilitatorAccount, clientAccount } = getEvmClients();
+async function fundClientForRevoke(evm: NetworkConfig): Promise<boolean> {
+  const { publicClient, facilitatorWallet, facilitatorAccount, clientAccount } = getEvmClients(evm);
 
   const clientBalance = await publicClient.getBalance({ address: clientAccount.address });
   if (clientBalance >= REVOKE_FUND_AMOUNT) {
@@ -342,9 +387,9 @@ async function fundClientForRevoke(): Promise<boolean> {
  * leaving the client with ~0 ETH so the gas sponsoring funding step is
  * exercised during the test.
  */
-async function drainClientETH(): Promise<boolean> {
+async function drainClientETH(evm: NetworkConfig): Promise<boolean> {
   try {
-    const { publicClient, clientWallet, facilitatorAccount, clientAccount } = getEvmClients();
+    const { publicClient, clientWallet, facilitatorAccount, clientAccount } = getEvmClients(evm);
 
     // Use pending balance so we see any in-flight fund transaction that hasn't confirmed yet.
     const balance = await publicClient.getBalance({ address: clientAccount.address, blockTag: 'pending' });
@@ -404,14 +449,39 @@ const parsedArgs = parseArgs();
 
 async function startServer(
   server: any,
-  serverConfig: ServerConfig
+  serverConfig: ServerConfig,
+  options?: { transport?: string },
 ): Promise<boolean> {
   verboseLog(`  🚀 Starting server on port ${serverConfig.port}...`);
   await server.start(serverConfig);
 
-  return waitForHealth(
+  const healthy = await waitForHealth(
     () => server.health(),
     { initialDelayMs: 250, label: 'Server' },
+  );
+
+  if (!healthy) {
+    return false;
+  }
+
+  if (options?.transport !== 'mcp') {
+    if (typeof server.verifyPaidRoutes === 'function') {
+      const { ok, problems } = await server.verifyPaidRoutes(serverConfig.enabledFamilies);
+      if (!ok) {
+        errorLog(
+          `  ❌ Server does not mount every paid route it declares in the mechanisms catalog:\n     ${problems.join('\n     ')}`,
+        );
+        return false;
+      }
+    }
+    return true;
+  }
+
+  // Probe the real protocol (SSE connect + initialize handshake) before handing off to the first real test
+  // request, to avoid racing a freshly booted server's session warm-up.
+  return waitForHealth(
+    async () => ({ success: await probeMcpReady(server.getUrl()) }),
+    { intervalMs: 500, maxAttempts: 10, label: 'MCP session' },
   );
 }
 
@@ -446,7 +516,7 @@ function maskPrivateKeys<T>(value: T): T {
     const masked: Record<string, unknown> = {};
     for (const [key, entry] of Object.entries(value)) {
       masked[key] =
-        /privateKey/i.test(key) && typeof entry === 'string' && entry.length > 0
+        /(privateKey|seed)$/i.test(key) && typeof entry === 'string' && entry.length > 0
           ? maskSecret(entry)
           : maskPrivateKeys(entry);
     }
@@ -608,6 +678,51 @@ function envFlagDefaultTrue(value: string | undefined): boolean {
   return !['0', 'false', 'no', 'off'].includes(value.toLowerCase());
 }
 
+function waitForChildProcess(child: ChildProcess, timeoutMs: number): Promise<boolean> {
+  if (child.exitCode !== null || child.signalCode !== null) {
+    return Promise.resolve(true);
+  }
+
+  return new Promise(resolve => {
+    const onClose = () => {
+      clearTimeout(timeout);
+      resolve(true);
+    };
+    const timeout = setTimeout(() => {
+      child.removeListener('close', onClose);
+      resolve(false);
+    }, timeoutMs);
+
+    child.once('close', onClose);
+  });
+}
+
+async function stopMockFacilitator(child: ChildProcess, url: string): Promise<void> {
+  try {
+    const response = await fetch(`${url}/close`, {
+      method: 'POST',
+      signal: AbortSignal.timeout(2_000),
+    });
+    await response.text();
+  } catch (error) {
+    verboseLog(`Mock facilitator graceful shutdown failed: ${String(error)}`);
+  }
+
+  if (await waitForChildProcess(child, 3_000)) {
+    return;
+  }
+
+  child.kill('SIGTERM');
+  if (await waitForChildProcess(child, 3_000)) {
+    return;
+  }
+
+  child.kill('SIGKILL');
+  await waitForChildProcess(child, 2_000);
+  child.stdout?.destroy();
+  child.stderr?.destroy();
+}
+
 async function runTest() {
   // Show help if requested
   if (parsedArgs.showHelp) {
@@ -623,37 +738,15 @@ async function runTest() {
   log('🚀 Starting X402 E2E Test Suite');
   log('===============================');
 
-  // Load configuration from environment
-  const serverEvmAddress = process.env.SERVER_EVM_ADDRESS;
-  const serverSvmAddress = process.env.SERVER_SVM_ADDRESS;
-  const serverAvmAddress = process.env.SERVER_AVM_ADDRESS;
-  const serverAptosAddress = process.env.SERVER_APTOS_ADDRESS;
-  const serverHederaAddress = process.env.SERVER_HEDERA_ADDRESS;
-  const serverKeetaAddress = process.env.SERVER_KEETA_ADDRESS;
-  const serverStellarAddress = process.env.SERVER_STELLAR_ADDRESS;
-  const serverTvmAddress = process.env.SERVER_TVM_ADDRESS;
+  // Env keys used below (preflight + funding use catalog/process.env directly)
   const clientEvmPrivateKey = process.env.CLIENT_EVM_PRIVATE_KEY;
-  const clientSvmPrivateKey = process.env.CLIENT_SVM_PRIVATE_KEY;
-  const clientAvmPrivateKey = process.env.CLIENT_AVM_PRIVATE_KEY;
-  const clientAptosPrivateKey = process.env.CLIENT_APTOS_PRIVATE_KEY;
-  const clientHederaAccountId = process.env.CLIENT_HEDERA_ACCOUNT_ID;
-  const clientHederaPrivateKey = process.env.CLIENT_HEDERA_PRIVATE_KEY;
-  const clientKeetaMnemonic = process.env.CLIENT_KEETA_MNEMONIC;
-  const clientStellarPrivateKey = process.env.CLIENT_STELLAR_PRIVATE_KEY;
-  const clientTvmPrivateKey = process.env.CLIENT_TVM_PRIVATE_KEY;
   const facilitatorEvmPrivateKey = process.env.FACILITATOR_EVM_PRIVATE_KEY;
-  const facilitatorSvmPrivateKey = process.env.FACILITATOR_SVM_PRIVATE_KEY;
-  const facilitatorAvmPrivateKey = process.env.FACILITATOR_AVM_PRIVATE_KEY;
-  const facilitatorAptosPrivateKey = process.env.FACILITATOR_APTOS_PRIVATE_KEY;
   const facilitatorHederaAccountId = process.env.FACILITATOR_HEDERA_ACCOUNT_ID;
   const facilitatorHederaPrivateKey = process.env.FACILITATOR_HEDERA_PRIVATE_KEY;
-  const facilitatorKeetaMnemonic = process.env.FACILITATOR_KEETA_MNEMONIC;
-  const facilitatorStellarPrivateKey = process.env.FACILITATOR_STELLAR_PRIVATE_KEY;
-  const facilitatorTvmPrivateKey = process.env.FACILITATOR_TVM_PRIVATE_KEY;
-  const batchSettlementRecovery = envFlagDefaultTrue(process.env.BATCH_SETTLEMENT_RECOVERY);
+  const batchSettlementRecovery = envFlagDefaultTrue(process.env.EVM_BATCH_SETTLEMENT_RECOVERY);
 
   // Discover all servers, clients, and facilitators (always include legacy)
-  const discovery = new TestDiscovery('.', true); // Always discover legacy
+  const discovery = new TestDiscovery('.');
 
   const allClients = discovery.discoverClients();
   const allServers = discovery.discoverServers();
@@ -726,14 +819,13 @@ async function runTest() {
       : 'unset';
 
   log(`\n🌐 Network Mode: ${networkMode.toUpperCase()}`);
-  log(`   EVM: ${networks.evm.name} (${networks.evm.caip2})`);
-  log(`   EVM Permit2 asset: ${evmPermit2Asset || '(missing)'} (${permit2AssetSource})`);
-  log(`   SVM: ${networks.svm.name} (${networks.svm.caip2})`);
-  log(`   APTOS: ${networks.aptos.name} (${networks.aptos.caip2})`);
-  log(`   HEDERA: ${networks.hedera.name} (${networks.hedera.caip2})`);
-  log(`   KEETA: ${networks.keeta.name} (${networks.keeta.caip2})`);
-  log(`   STELLAR: ${networks.stellar.name} (${networks.stellar.caip2})`);
-  log(`   TVM: ${networks.tvm.name} (${networks.tvm.caip2})`);
+  for (const family of PROTOCOL_FAMILIES) {
+    const net = networks[family];
+    log(`   ${family.toUpperCase()}: ${net.name} (${net.caip2})`);
+    if (family === 'evm') {
+      log(`   EVM Permit2 asset: ${evmPermit2Asset || '(missing)'} (${permit2AssetSource})`);
+    }
+  }
 
   if (networkMode === 'mainnet') {
     log('\n⚠️  WARNING: Running on MAINNET - real funds will be used!');
@@ -749,49 +841,15 @@ async function runTest() {
     return;
   }
 
-  const requiredEnvByFamily: Record<string, Array<[string, string | undefined]>> = {
-    evm: [
-      ['SERVER_EVM_ADDRESS', serverEvmAddress],
-      ['CLIENT_EVM_PRIVATE_KEY', clientEvmPrivateKey],
-      ['FACILITATOR_EVM_PRIVATE_KEY', facilitatorEvmPrivateKey],
-    ],
-    svm: [
-      ['SERVER_SVM_ADDRESS', serverSvmAddress],
-      ['CLIENT_SVM_PRIVATE_KEY', clientSvmPrivateKey],
-      ['FACILITATOR_SVM_PRIVATE_KEY', facilitatorSvmPrivateKey],
-    ],
-    aptos: [
-      ['SERVER_APTOS_ADDRESS', serverAptosAddress],
-      ['CLIENT_APTOS_PRIVATE_KEY', clientAptosPrivateKey],
-      ['FACILITATOR_APTOS_PRIVATE_KEY', facilitatorAptosPrivateKey],
-    ],
-    avm: [
-      ['SERVER_AVM_ADDRESS', serverAvmAddress],
-      ['CLIENT_AVM_PRIVATE_KEY', clientAvmPrivateKey],
-      ['FACILITATOR_AVM_PRIVATE_KEY', facilitatorAvmPrivateKey],
-    ],
-    hedera: [
-      ['SERVER_HEDERA_ADDRESS', serverHederaAddress],
-      ['CLIENT_HEDERA_ACCOUNT_ID', clientHederaAccountId],
-      ['CLIENT_HEDERA_PRIVATE_KEY', clientHederaPrivateKey],
-      ['FACILITATOR_HEDERA_ACCOUNT_ID', facilitatorHederaAccountId],
-      ['FACILITATOR_HEDERA_PRIVATE_KEY', facilitatorHederaPrivateKey],
-    ],
-    stellar: [
-      ['SERVER_STELLAR_ADDRESS', serverStellarAddress],
-      ['CLIENT_STELLAR_PRIVATE_KEY', clientStellarPrivateKey],
-      ['FACILITATOR_STELLAR_PRIVATE_KEY', facilitatorStellarPrivateKey],
-    ],
-    tvm: [
-      ['SERVER_TVM_ADDRESS', serverTvmAddress],
-      ['CLIENT_TVM_PRIVATE_KEY', clientTvmPrivateKey],
-      ['FACILITATOR_TVM_PRIVATE_KEY', facilitatorTvmPrivateKey],
-    ],
-  };
+  const requiredEnvByFamily: Record<string, Array<[string, string | undefined]>> = {};
+  for (const family of PROTOCOL_FAMILIES) {
+    const keys = [...requiredEnvForFamily(family), ...requiredRpcEnvForFamily(family, networkMode)];
+    requiredEnvByFamily[family] = keys.map(key => [key, process.env[key]]);
+  }
 
   // Apply coverage-based minimization if --min flag is set
   if (parsedArgs.minimize) {
-    filteredScenarios = minimizeScenarios(filteredScenarios);
+    filteredScenarios = minimizeScenarios(filteredScenarios, parsedArgs.seed);
 
     if (filteredScenarios.length === 0) {
       log('❌ All scenarios are already covered');
@@ -930,9 +988,7 @@ async function runTest() {
     }
   }
 
-  const hasSwigSmartWalletScenarios = filteredScenarios.some(
-    s => s.client.name === 'svm-smart-wallet',
-  );
+  const hasSwigSmartWalletScenarios = filteredScenarios.some(s => clientRequiresSwigSetup(s.client));
 
   if (hasSwigSmartWalletScenarios) {
     log('🔧 Swig smart-wallet scenarios detected — swig-setup runs before each endpoint when balance is low');
@@ -954,43 +1010,19 @@ async function runTest() {
   log('\n🔍 Validating facilitator environment variables...\n');
   const missingEnvVars: { facilitatorName: string; missingVars: string[] }[] = [];
 
-  // Environment variables managed by the test framework (don't require user to set)
-  const systemManagedVars = new Set([
-    'PORT',
-    'EVM_PRIVATE_KEY',
-    'SVM_PRIVATE_KEY',
-    'APTOS_PRIVATE_KEY',
-    'HEDERA_ACCOUNT_ID',
-    'HEDERA_PRIVATE_KEY',
-    'KEETA_FACILITATOR_MNEMONIC',
-    'STELLAR_PRIVATE_KEY',
-    'TVM_PRIVATE_KEY',
-    'EVM_NETWORK',
-    'SVM_NETWORK',
-    'APTOS_NETWORK',
-    'HEDERA_NETWORK',
-    'KEETA_NETWORK',
-    'STELLAR_NETWORK',
-    'TVM_NETWORK',
-    'EVM_RPC_URL',
-    'SVM_RPC_URL',
-    'SWIG_ACCOUNT_ADDRESS',
-    'APTOS_RPC_URL',
-    'HEDERA_NODE_URL',
-    'STELLAR_RPC_URL',
-    'TONCENTER_BASE_URL',
-    'TVM_PROVIDER',
-    'TONAPI_API_KEY',
-    'TONAPI_BASE_URL',
-  ]);
-
   for (const [facilitatorName, facilitator] of uniqueFacilitators) {
     const requiredVars = facilitator.config.environment?.required || [];
     const missing: string[] = [];
 
     for (const envVar of requiredVars) {
-      // Skip variables managed by the test framework
-      if (systemManagedVars.has(envVar)) {
+      // Skip env keys the harness assigns itself (e.g. PORT), never operator-supplied
+      if (FACILITATOR_ENV_PREFLIGHT_ALLOWLIST.has(envVar)) {
+        continue;
+      }
+      // Skip credentials for families not in this run (catalog marks all wallet
+      // keys required per family; only selected families need them present).
+      const family = protocolFamilyForCredentialKey(envVar);
+      if (family && !selectedProtocolFamilies.has(family)) {
         continue;
       }
 
@@ -1070,14 +1102,27 @@ async function runTest() {
     comboMap.get(key)!.push(scenario);
   }
 
-  // Convert map to array of combos, assigning a unique port to each
+  // Convert map to array of combos, assigning a unique port to each.
+  // Within each combo, sort scenarios so permit2Direct tests run before
+  // coldstart tests. The coldstart flow drains the shared client wallet's
+  // ETH; if it ran first, a subsequent permit2Direct test would have no
+  // gas for its Permit2 approve transaction.
+  const schemeOptionsPriority = (scenario: TestScenario): number => {
+    if (scenario.endpoint.schemeOptions?.permit2Direct === true) return 0;
+    // No special schemeOptions (plain warmup, eip3009, etc.) — middle
+    if (!scenario.endpoint.schemeOptions?.coldstart) return 1;
+    // coldstart drains ETH — always last
+    return 2;
+  };
+
   let comboIndex = 0;
   for (const [, scenarios] of comboMap) {
-    const firstScenario = scenarios[0];
+    const sorted = [...scenarios].sort((a, b) => schemeOptionsPriority(a) - schemeOptionsPriority(b));
+    const firstScenario = sorted[0];
     serverFacilitatorCombos.push({
       serverName: firstScenario.server.name,
       facilitatorName: firstScenario.facilitator?.name,
-      scenarios,
+      scenarios: sorted,
       comboIndex,
       port: allocatePort(),
     });
@@ -1116,18 +1161,13 @@ async function runTest() {
   const mockFacilitatorPort = allocatePort();
   log(`\n🎭 Starting mock facilitator on port ${mockFacilitatorPort}...`);
   const mockFacilitatorProcess: ChildProcess = spawn(
-    'npx', ['tsx', 'index.ts'],
+    process.execPath, ['--import', 'tsx', 'index.ts'],
     {
       cwd: join(process.cwd(), 'mock-facilitator'),
       env: {
         ...process.env,
         PORT: mockFacilitatorPort.toString(),
-        EVM_NETWORK: networks.evm.caip2,
-        SVM_NETWORK: networks.svm.caip2,
-        APTOS_NETWORK: networks.aptos.caip2,
-        KEETA_NETWORK: networks.keeta.caip2,
-        STELLAR_NETWORK: networks.stellar.caip2,
-        TVM_NETWORK: networks.tvm.caip2,
+        ...injectNetworkEnv(networks),
       },
       stdio: 'pipe',
     },
@@ -1153,7 +1193,7 @@ async function runTest() {
   );
   if (!mockHealthy) {
     log('❌ Failed to start mock facilitator');
-    mockFacilitatorProcess.kill();
+    await stopMockFacilitator(mockFacilitatorProcess, mockFacilitatorUrl);
     process.exit(1);
   }
   log(`  ✅ Mock facilitator ready at ${mockFacilitatorUrl}`);
@@ -1183,28 +1223,11 @@ async function runTest() {
     const testName = `${scenario.client.name} → ${scenario.server.name} → ${scenario.endpoint.path}${facilitatorLabel}`;
 
     const isBatchSettlement = endpointUsesBatchSettlement(scenario.endpoint);
-    const voucherSignerPrivateKey = process.env.CLIENT_EVM_VOUCHER_SIGNER_PRIVATE_KEY;
+    const voucherSignerPrivateKey = process.env.CLIENT_EVM_BATCH_SETTLEMENT_VOUCHER_SIGNER_PRIVATE_KEY;
     const baseClientConfig: ClientConfig = {
-      evmPrivateKey: clientEvmPrivateKey!,
-      svmPrivateKey: clientSvmPrivateKey!,
-      avmPrivateKey: clientAvmPrivateKey || '',
-      aptosPrivateKey: clientAptosPrivateKey || '',
-      hederaAccountId: clientHederaAccountId || '',
-      hederaPrivateKey: clientHederaPrivateKey || '',
-      keetaClientMnemonic: clientKeetaMnemonic || '',
-      stellarPrivateKey: clientStellarPrivateKey || '',
-      tvmPrivateKey: clientTvmPrivateKey || '',
       serverUrl: `http://localhost:${port}`,
       endpointPath: scenario.endpoint.path,
-      evmNetwork: networks.evm.caip2,
-      evmRpcUrl: networks.evm.rpcUrl,
-      svmNetwork: networks.svm.caip2,
-      svmRpcUrl: networks.svm.rpcUrl,
-      hederaNetwork: networks.hedera.caip2,
-      hederaNodeUrl: networks.hedera.rpcUrl,
-      keetaNetwork: networks.keeta.caip2,
-      tvmNetwork: networks.tvm.caip2,
-      tvmRpcUrl: networks.tvm.rpcUrl,
+      networks,
     };
 
     try {
@@ -1430,48 +1453,30 @@ async function runTest() {
     cLog.log(`🚀 Starting server: ${serverName} (port ${port}) with facilitator: ${facilitatorName || 'none'}`);
 
     const facilitatorConfig = facilitatorName ? uniqueFacilitators.get(facilitatorName)?.config : undefined;
-    const facilitatorSupportsAvm = facilitatorConfig?.protocolFamilies?.includes('avm') ?? false;
-    const facilitatorSupportsAptos = facilitatorConfig?.protocolFamilies?.includes('aptos') ?? false;
-    const facilitatorSupportsHedera = facilitatorConfig?.protocolFamilies?.includes('hedera') ?? false;
-    const facilitatorSupportsKeeta = facilitatorConfig?.protocolFamilies?.includes('keeta') ?? false;
-    const facilitatorSupportsStellar = facilitatorConfig?.protocolFamilies?.includes('stellar') ?? false;
-    const facilitatorSupportsTvm = facilitatorConfig?.protocolFamilies?.includes('tvm') ?? false;
 
+    const enabledFamilies: import('./src/types').ProtocolFamily[] = ['evm', 'svm'];
+    for (const family of PROTOCOL_FAMILIES) {
+      if (family === 'evm' || family === 'svm') continue;
+      if (!(facilitatorConfig?.protocolFamilies?.includes(family) ?? false)) continue;
+      if (family === 'hedera' && (!facilitatorHederaAccountId || !facilitatorHederaPrivateKey)) {
+        continue;
+      }
+      enabledFamilies.push(family);
+    }
+
+    // Optional SERVER_EVM_RECEIVER_AUTHORIZER_PRIVATE_KEY (server role only) opts
+    // into self-managed batch-settlement claim/refund signing; omit to delegate
+    // to the facilitator's /supported receiverAuthorizer.
     const serverConfig: ServerConfig = {
       port,
-      evmPayTo: serverEvmAddress!,
-      svmPayTo: serverSvmAddress!,
-      avmPayTo: facilitatorSupportsAvm ? (serverAvmAddress || '') : '',
-      aptosPayTo: facilitatorSupportsAptos ? (serverAptosAddress || '') : '',
-      hederaPayTo:
-        facilitatorSupportsHedera &&
-          facilitatorHederaAccountId &&
-          facilitatorHederaPrivateKey
-          ? (serverHederaAddress || '')
-          : '',
-      hederaAsset: process.env.HEDERA_ASSET,
-      hederaAmount: process.env.HEDERA_AMOUNT,
-      keetaPayTo: facilitatorSupportsKeeta ? (serverKeetaAddress || '') : '',
-      stellarPayTo: facilitatorSupportsStellar ? (serverStellarAddress || '') : '',
-      tvmPayTo: facilitatorSupportsTvm ? (serverTvmAddress || '') : '',
       networks,
+      enabledFamilies,
       facilitatorUrl,
       mockFacilitatorUrl,
-      // Forward the optional receiver-authorizer EOA key so the server can
-      // self-manage batch-settlement claim/refund signatures when set.
-      ...(process.env.SERVER_EVM_RECEIVER_AUTHORIZER_PRIVATE_KEY
-        ? {
-          batchSettlement: {
-            receiverAuthorizerPrivateKey:
-              process.env.SERVER_EVM_RECEIVER_AUTHORIZER_PRIVATE_KEY,
-          },
-        }
-        : {}),
     };
 
-    const started = await startServer(serverProxy, serverConfig);
-    if (!started) {
-      cLog.log(`❌ Failed to start server ${serverName}`);
+    const serverStartFailures = (error: string) => {
+      cLog.log(`❌ Failed to start server ${serverName}${error ? `: ${error}` : ''}`);
       return scenarios.map(scenario => ({
         testNumber: nextTestNumber(),
         client: scenario.client.name,
@@ -1482,6 +1487,16 @@ async function runTest() {
         passed: false,
         error: 'Server failed to start',
       }));
+    };
+
+    let started = false;
+    try {
+      started = await startServer(serverProxy, serverConfig, { transport: server.config.transport });
+    } catch (error) {
+      return serverStartFailures(error instanceof Error ? error.message : String(error));
+    }
+    if (!started) {
+      return serverStartFailures('');
     }
     cLog.log(`  ✅ Server ${serverName} ready`);
 
@@ -1509,12 +1524,15 @@ async function runTest() {
             error,
           });
 
-          if (scenario.client.name === 'svm-smart-wallet') {
-            await setupSwigWallet(networks.svm.rpcUrl);
+          if (clientRequiresSwigSetup(scenario.client)) {
+            const swigReady = await setupSwigWallet(networks.svm.rpcUrl);
+            if (!swigReady) {
+              return setupFailure('Swig wallet setup failed');
+            }
           }
 
           if (scenario.endpoint.schemeOptions?.permit2Direct === true) {
-            const approved = await approvePermit2Approval(evmPermit2Asset);
+            const approved = await approvePermit2Approval(networks.evm, evmPermit2Asset);
             if (!approved) {
               return setupFailure('Permit2 approval setup failed');
             }
@@ -1525,13 +1543,13 @@ async function runTest() {
             // whatever wallet state the first client left behind.
             const endpointKey = `${scenario.client.name}::${scenario.endpoint.path}`;
             if (!coldStartedEndpoints.has(endpointKey)) {
-              const funded = await fundClientForRevoke();
+              const funded = await fundClientForRevoke(networks.evm);
               if (!funded) {
                 return setupFailure('Client gas funding setup failed');
               }
               // Give fund tx 1s to propagate before submitting revoke (from client wallet)
               await new Promise(resolve => setTimeout(resolve, 1000));
-              const revoked = await revokePermit2Approval(evmPermit2Asset);
+              const revoked = await revokePermit2Approval(networks.evm, evmPermit2Asset);
               if (!revoked) {
                 return setupFailure('Permit2 revoke setup failed');
               }
@@ -1540,7 +1558,7 @@ async function runTest() {
               // immediately after the revoke submission, causing the drain to
               // collide with the revoke's nonce ("replacement transaction underpriced").
               await new Promise(resolve => setTimeout(resolve, 2000));
-              const drained = await drainClientETH();
+              const drained = await drainClientETH(networks.evm);
               if (!drained) {
                 return setupFailure('Client ETH drain setup failed');
               }
@@ -1551,7 +1569,25 @@ async function runTest() {
             }
           }
 
-          const result = await runSingleTest(scenario, port, tn, cLog);
+          // Bounded retry for EVM Permit2 flows: transient 402s here are
+          // almost always stale on-chain state (allowance/nonce not yet
+          // propagated across load-balanced RPC nodes). Retry with a delay so
+          // state can settle; eip3009 and non-EVM flows run once (maxAttempts=1).
+          const isPermit2 = endpointAssetTransferMethod(scenario.endpoint) === 'permit2';
+          const maxAttempts = isEvm && isPermit2 ? EVM_PAYMENT_MAX_ATTEMPTS : 1;
+          let result = await runSingleTest(scenario, port, tn, cLog);
+          for (
+            let attempt = 1;
+            attempt < maxAttempts && !result.passed && isTransientPaymentFailure(result.error);
+            attempt++
+          ) {
+            cLog.log(
+              `  🔁 Test #${tn} transient failure (attempt ${attempt}/${maxAttempts}): ${result.error}. ` +
+              `Retrying in ${EVM_PAYMENT_RETRY_DELAY_MS}ms to let on-chain state settle...`
+            );
+            await new Promise(resolve => setTimeout(resolve, EVM_PAYMENT_RETRY_DELAY_MS));
+            result = await runSingleTest(scenario, port, tn, cLog);
+          }
 
           if (isEvm && resourceLock) {
             await new Promise(resolve => setTimeout(resolve, 1000));
@@ -1680,8 +1716,10 @@ async function runTest() {
     facilitatorStopPromises.push(manager.stop());
   }
   log('  🛑 Stopping mock facilitator');
-  mockFacilitatorProcess.kill();
-  await Promise.all(facilitatorStopPromises);
+  await Promise.all([
+    stopMockFacilitator(mockFacilitatorProcess, mockFacilitatorUrl),
+    ...facilitatorStopPromises,
+  ]);
 
   // Calculate totals
   const passed = testResults.filter(r => r.passed).length;
@@ -1844,12 +1882,13 @@ async function runTest() {
   }
 
   // Close logger
-  closeLogger();
-
-  if (failed > 0 || discoveryFailed) {
-    process.exit(1);
-  }
+  await closeLogger();
+  process.exit(failed > 0 || discoveryFailed ? 1 : 0);
 }
 
 // Run the test
-runTest().catch(error => errorLog(error));
+runTest().catch(async error => {
+  errorLog(String(error));
+  await closeLogger();
+  process.exit(1);
+});

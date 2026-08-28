@@ -1,6 +1,6 @@
 # Advanced x402 Client Examples
 
-Advanced patterns for x402 TypeScript clients demonstrating builder pattern registration, payment lifecycle hooks, and network preferences.
+Advanced patterns for x402 TypeScript clients demonstrating builder pattern registration, payment lifecycle hooks, network preferences, and spend controls.
 
 ```typescript
 import { x402Client, wrapFetchWithPayment } from "@x402/fetch";
@@ -38,6 +38,9 @@ cp .env-local .env
 
 and fill required environment variables:
 
+- `APTOS_PRIVATE_KEY` - Aptos Ed25519 private key for Aptos payments (optional; `all-networks`)
+- `CCD_PRIVATE_KEY` - Concordium Ed25519 private key for Concordium payments (optional; `all-networks`)
+- `CCD_ADDRESS` - Concordium account address for Concordium payments (optional; `all-networks`)
 - `EVM_PRIVATE_KEY` - Ethereum private key for EVM payments
 - `SVM_PRIVATE_KEY` - Solana private key for SVM payments
 - `STELLAR_PRIVATE_KEY` - Stellar secret key (starts with `S`) for signing Stellar payments
@@ -45,6 +48,9 @@ and fill required environment variables:
 - `HEDERA_PRIVATE_KEY` - Hedera **ECDSA** private key (0x-prefixed or DER-encoded) for Hedera payments (optional)
 - `HEDERA_NETWORK` - Hedera network (optional, defaults to `hedera:testnet`)
 - `KEETA_MNEMONIC` - Keeta mnemonic for Keeta payments
+- `XRPL_SEED` - XRPL family seed (starts with `s`) for XRPL payments (optional; `all-networks`)
+- `XRPL_NETWORK` - XRPL network CAIP-2 (optional, defaults to `xrpl:1` XRPL Testnet)
+- `XRPL_WS_URL` - Custom XRPL WebSocket endpoint (optional, defaults to the public endpoint for `XRPL_NETWORK`)
 
 2. Install and build all packages from the typescript examples root:
 
@@ -78,6 +84,36 @@ To create a Keeta Testnet wallet:
 2. Use the [Keeta Testnet Faucet](https://faucet.test.keeta.com/) to send Testnet KTA to your wallet.
 3. To get Testnet USDC on Keeta, go to the "Receive" page in the wallet, click on "Any token from Keeta Testnet", select "USDC from Base (Sepolia) Testnet" and copy the deposit address (starting with `0x`). Then go the [Circle Faucet](https://faucet.circle.com/), select Base network and enter your Base deposit address.
 
+#### Aptos Testnet
+
+For testing on Aptos testnet, you can obtain test tokens from these faucets:
+
+- **Test APT**: https://aptos.dev/network/faucet or through an account on [geomi.dev](https://geomi.dev/manage/faucet)
+- **Test USDC**: https://faucet.circle.com/
+
+#### Concordium Testnet
+
+To get test CCD:
+
+1. Set up [Concordium Wallet for Web](https://wallet.testnet.concordium.com/) on **Testnet**.
+2. Open the account in the wallet.
+3. Go to **Activity**.
+4. Click **Request CCD**.
+5. Wait for the test CCD transfer to arrive. Official guide: [Request CCD](https://docs.concordium.com/en/mainnet/docs/plt/setup-guide/request-ccd.html).
+
+To get test PLT, there is no universal public faucet for arbitrary PLT symbols. Either:
+
+1. Use a token issuer's own test distribution for the symbol you want to use, or
+2. Request your own PLT issuance on testnet, then mint/distribute balances from the nominated governance account. Official guide: [Request PLT](https://docs.concordium.com/en/mainnet/tutorials/plt/request-plt.html).
+
+#### XRPL Testnet
+
+To create and fund an XRPL Testnet payer account:
+
+1. Use the [XRPL Testnet faucet](https://xrpl.org/resources/dev-tools/xrp-faucets) to generate a funded account, and copy its family seed (starts with `s`) into `XRPL_SEED`.
+2. Keep the [base reserve](https://xrpl.org/docs/concepts/accounts/reserves) funded (currently 1 XRP; the faucet funding is more than enough). The `all-networks` example pays in XRP drops, so no further setup is needed.
+3. For issued-currency (IOU) payments, the payer needs a sufficient issued-currency balance, and the receiving account must hold a [trust line](https://xrpl.org/docs/concepts/tokens/fungible-tokens) to the issuer.
+
 ## Available Examples
 
 Each example demonstrates a specific advanced pattern:
@@ -88,6 +124,7 @@ Each example demonstrates a specific advanced pattern:
 | `builder-pattern` | `pnpm dev:builder-pattern` | Fine-grained network registration |
 | `hooks` | `pnpm dev:hooks` | Payment lifecycle hooks |
 | `preferred-network` | `pnpm dev:preferred-network` | Client-side network preferences |
+| `spend-controls` | `pnpm dev:spend-controls` | Default `$1` USD cap, `allowedAssets`, and per-asset caps |
 
 ## Testing the Examples
 
@@ -222,6 +259,41 @@ const response = await fetchWithPayment("http://localhost:4021/weather");
 
 - Prefer payments on specific chains
 - User preference settings in wallet UIs
+
+## Example: Spend Controls
+
+By default the client caps recognized pegged assets at `$1` and rejects everything else. Use `spendControls` to raise the cap or opt into non-default tokens (native XRP/CCD, custom ERC-20s).
+
+```typescript
+const client = x402Client.fromConfig({
+  schemes: [{ network: "eip155:*", client: new ExactEvmScheme(evmSigner) }],
+  spendControls: {
+    maxAmountPerPayment: "$1", // default USD cap on recognized pegged assets
+    allowedAssets: [
+      // opt-in non-default with atomic cap
+      { network: "eip155:*", asset: "0xCustomToken", maxAmountPerPayment: "2000000" },
+      // opt-in non-default uncapped
+      { network: "eip155:*", asset: "0xOtherToken" },
+      // override USD cap for a default asset by ticker (or on-chain id)
+      { network: "eip155:*", asset: "USDC", maxAmountPerPayment: "1000000" },
+    ],
+  },
+});
+```
+
+| Control | Purpose |
+| --- | --- |
+| `maxAmountPerPayment` | USD ceiling on recognized pegged assets (default `$1`). Set `false` to remove. |
+| `allowedAssets` | Opt-in for non-default tokens. List of `{ network, asset }` with optional atomic `maxAmountPerPayment`, or `true` to allow any asset. |
+| `spendControls: false` | Disable all spend controls. Use only for UI-confirmed flows (paywall). |
+
+Native assets (XRP, CCD, KTA, ETH, SOL, HBAR) are not in `DEFAULT_ASSETS`. The `all-networks` example opts into XRP and CCD via `allowedAssets` so those paths still run.
+
+**Use case:**
+
+- Bound spend against a malicious 402 or unbounded custom token
+- Allow a specific custom token without disabling the USD cap on stables
+- Override the cap for one ticker (e.g. PYUSD) without raising it globally
 
 ## Hook Best Practices
 

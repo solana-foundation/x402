@@ -159,6 +159,44 @@ class TestX402AsyncTransport:
         assert mock_transport.handle_async_request.call_count == 2
 
     @pytest.mark.asyncio
+    async def test_streaming_body_is_replayed_on_payment_retry(self):
+        """Streaming request bodies are identical on the initial send and retry."""
+        mock_client = MockX402Client()
+        payment_required = PaymentRequired(
+            x402_version=2,
+            accepts=[make_payment_requirements()],
+        )
+        encoded = encode_payment_required_header(payment_required)
+        sent_bodies = []
+
+        async def handle_request(request):
+            sent_bodies.append(await request.aread())
+            if len(sent_bodies) == 1:
+                return httpx.Response(
+                    402,
+                    headers={"PAYMENT-REQUIRED": encoded},
+                    request=request,
+                )
+            return httpx.Response(200, request=request)
+
+        mock_transport = AsyncMock()
+        mock_transport.handle_async_request = handle_request
+        transport = x402AsyncTransport(mock_client, mock_transport)
+
+        async def stream_body():
+            yield b'{"tool":"paid"}'
+
+        request = httpx.Request(
+            "POST",
+            "https://example.com/mcp",
+            content=stream_body(),
+        )
+        response = await transport.handle_async_request(request)
+
+        assert response.status_code == 200
+        assert sent_bodies == [b'{"tool":"paid"}', b'{"tool":"paid"}']
+
+    @pytest.mark.asyncio
     async def test_retry_request_has_payment_headers(self):
         """Test that retry request includes payment headers."""
         mock_client = MockX402Client()
@@ -290,6 +328,43 @@ class TestX402AsyncTransport:
         assert response == mock_200
         assert len(mock_client.create_calls) == 0
         assert mock_transport.handle_async_request.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_hook_uses_request_url_when_response_has_no_request(self):
+        """Transport-level 402 responses often lack request; fall back to request.url."""
+        mock_client = MockX402Client()
+        http_client = x402HTTPClient(mock_client)
+        received: list[str] = []
+
+        def capture_url(ctx):
+            received.append(ctx.request_url)
+            return PaymentRequiredHeadersResult(headers={"Authorization": "Bearer x"})
+
+        http_client.on_payment_required(capture_url)
+
+        payment_required = PaymentRequired(
+            x402_version=2,
+            accepts=[make_payment_requirements()],
+        )
+        encoded = encode_payment_required_header(payment_required)
+        response_402 = httpx.Response(
+            402,
+            headers={"PAYMENT-REQUIRED": encoded},
+            content=b"{}",
+        )
+        response_200 = httpx.Response(200, content=b"{}")
+
+        mock_transport = AsyncMock()
+        mock_transport.handle_async_request = AsyncMock(side_effect=[response_402, response_200])
+
+        transport = x402AsyncTransport(http_client, mock_transport)
+        response = await transport.handle_async_request(
+            httpx.Request("GET", "https://example.com/api")
+        )
+
+        assert response is response_200
+        assert received == ["https://example.com/api"]
+        assert len(mock_client.create_calls) == 0
 
     @pytest.mark.asyncio
     async def test_recovery_calls_create_payment_payload_twice(self):

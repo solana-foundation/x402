@@ -17,6 +17,15 @@ import (
 
 var zeroAddress = "0x0000000000000000000000000000000000000000"
 
+// channelStatePollDeadline / channelStatePollInterval bound the post-transaction
+// polling loops in refund.go and deposit.go, which re-read onchain channel state
+// until it reflects a just-confirmed change (e.g. a pending-withdrawal cancellation
+// or a deposit balance increase). Shared so both call sites stay in lockstep.
+const (
+	channelStatePollDeadline = 2 * time.Second
+	channelStatePollInterval = 150 * time.Millisecond
+)
+
 // ContractChannelConfigTuple is the concrete struct shape passed to BatchSettlement
 // contract calls (deposit, refund, claim). Field names and ordering match the
 // Solidity ChannelConfig struct so go-ethereum's ABI packer can map them by reflection.
@@ -230,10 +239,11 @@ func VerifyBatchedVoucherTypedData(
 		"maxClaimableAmount": maxClaimable,
 	}
 
-	// If payerAuthorizer is non-zero, verify via ECDSA against payerAuthorizer
+	// If payerAuthorizer is non-zero, verify via pure ECDSA against payerAuthorizer.
+	// On-chain x402BatchSettlement uses ECDSA.recoverCalldata for the payerAuthorizer
+	// path regardless of code at that address — mirror that exactly.
 	if payerAuthorizer != zeroAddress && payerAuthorizer != "" {
-		return signer.VerifyTypedData(
-			ctx,
+		return evm.VerifyEOATypedData(
 			payerAuthorizer,
 			domain,
 			batchsettlement.VoucherTypes,
@@ -243,9 +253,11 @@ func VerifyBatchedVoucherTypedData(
 		)
 	}
 
-	// Otherwise, verify via ERC-1271 against payer (smart wallet)
-	return signer.VerifyTypedData(
+	// payerAuthorizer == 0: on-chain uses OZ SignatureChecker.isValidSignatureNow(payer, …)
+	// which is code-routed. Use the strict primitive to match that.
+	return evm.VerifyTypedDataStrict(
 		ctx,
+		signer,
 		payer,
 		domain,
 		batchsettlement.VoucherTypes,

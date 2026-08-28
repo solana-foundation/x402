@@ -52,7 +52,7 @@ from x402.mechanisms.evm.batch_settlement.client import (
     RefundOptions,
     compute_channel_id,
     has_channel,
-    process_settle_response,
+    update_channel_from_settle,
 )
 from x402.mechanisms.evm.batch_settlement.client import (
     BatchSettlementEvmScheme as BatchSettlementClientScheme,
@@ -83,7 +83,12 @@ from x402.schemas import (
     VerifyResponse,
 )
 
-CLIENT_PRIVATE_KEY = os.environ.get("EVM_CLIENT_PRIVATE_KEY")
+# Prefer EVM_CLIENT_EOA_PRIVATE_KEY (a plain EOA, not ERC-7702 delegated) so that
+# strict verify_typed_data_strict routing (code-length-based) does not cause the
+# facilitator to try EIP-1271 on an address that has been delegated for 7702 tests.
+CLIENT_PRIVATE_KEY = os.environ.get("EVM_CLIENT_EOA_PRIVATE_KEY") or os.environ.get(
+    "EVM_CLIENT_PRIVATE_KEY"
+)
 FACILITATOR_PRIVATE_KEY = os.environ.get("EVM_FACILITATOR_PRIVATE_KEY")
 RECEIVER_AUTHORIZER_PRIVATE_KEY = os.environ.get(
     "EVM_RECEIVER_AUTHORIZER_PRIVATE_KEY", FACILITATOR_PRIVATE_KEY
@@ -95,8 +100,8 @@ USDC_ADDRESS = "0x036CbD53842c5426634e7929541eC2318f3dCF7e"
 pytestmark = pytest.mark.skipif(
     not CLIENT_PRIVATE_KEY or not FACILITATOR_PRIVATE_KEY,
     reason=(
-        "EVM_CLIENT_PRIVATE_KEY and EVM_FACILITATOR_PRIVATE_KEY environment "
-        "variables required for batch-settlement integration tests"
+        "EVM_CLIENT_EOA_PRIVATE_KEY (or EVM_CLIENT_PRIVATE_KEY) and EVM_FACILITATOR_PRIVATE_KEY "
+        "environment variables required for batch-settlement integration tests"
     ),
 )
 
@@ -280,7 +285,7 @@ class _Pipeline:
     # ---------- Direct-API helpers (no HTTP) ----------
 
     def direct_pay(self, amount: str) -> SettleResponse:
-        """One direct-API paid request: verify + settle + process_settle_response."""
+        """One direct-API paid request: verify + settle + update_channel_from_settle."""
         accepts = [self.requirements(amount)]
         payment_required = self.x402_server.create_payment_required_response(accepts, _resource())
         payload = self.x402_client.create_payment_payload(payment_required)
@@ -292,7 +297,18 @@ class _Pipeline:
         settle = self.x402_server.settle_payment(payload, accepted)
         if not settle.success:
             pytest.fail(f"settle failed: {settle.error_reason}: {settle.error_message}")
-        process_settle_response(self.client_storage, settle)
+        extra = settle.extra or {}
+        local: dict[str, str] = {
+            "channel_id": payload.payload["voucher"]["channelId"],
+            "request_amount": accepted.amount,
+        }
+        deposit = payload.payload.get("deposit")
+        if isinstance(deposit, dict) and deposit.get("amount") is not None:
+            local["deposit_amount"] = deposit["amount"]
+        server: dict[str, str] = {}
+        if extra.get("chargedAmount") is not None:
+            server["charged_amount"] = extra["chargedAmount"]
+        update_channel_from_settle(self.client_storage, {"server": server, "local": local})
         return settle
 
 

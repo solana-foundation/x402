@@ -10,13 +10,15 @@ except ImportError as e:
     ) from e
 
 from .....schemas import PaymentRequirements, SettleResponse
-from ...constants import TX_STATUS_SUCCESS
+from ...settle_receipt import wait_for_receipt_and_build_response
 from ...signer import FacilitatorEvmSigner
+from ...utils import truncate_error_message
 from ..abi import BATCH_SETTLEMENT_ABI
 from ..authorizer_signer import sign_claim_batch
 from ..constants import BATCH_SETTLEMENT_ADDRESS
 from ..errors import (
     ERR_AUTHORIZER_ADDRESS_MISMATCH,
+    ERR_AUTHORIZER_NOT_CONFIGURED,
     ERR_CLAIM_SIMULATION_FAILED,
     ERR_CLAIM_TRANSACTION_FAILED,
 )
@@ -43,7 +45,8 @@ def execute_claim_with_signature(
     signer: FacilitatorEvmSigner,
     payload: ClaimPayload,
     requirements: PaymentRequirements,
-    authorizer_signer: AuthorizerSigner,
+    authorizer_signer: AuthorizerSigner | None,
+    data_suffix: str | None = None,
 ) -> SettleResponse:
     """Submit a batch claim via claimWithSignature()."""
     network = str(requirements.network)
@@ -51,6 +54,13 @@ def execute_claim_with_signature(
 
     sig_hex = payload.claim_authorizer_signature
     if not sig_hex:
+        if authorizer_signer is None:
+            return SettleResponse(
+                success=False,
+                error_reason=ERR_AUTHORIZER_NOT_CONFIGURED,
+                transaction="",
+                network=network,
+            )
         for claim in payload.claims:
             if to_checksum_address(claim.channel.receiver_authorizer) != to_checksum_address(
                 authorizer_signer.address
@@ -74,38 +84,36 @@ def execute_claim_with_signature(
         return SettleResponse(
             success=False,
             error_reason=ERR_CLAIM_SIMULATION_FAILED,
-            error_message=str(e)[:500],
+            error_message=truncate_error_message(str(e)),
             transaction="",
             network=network,
         )
 
     try:
         tx = signer.write_contract(
-            target, BATCH_SETTLEMENT_ABI, "claimWithSignature", claim_args, sig_bytes
-        )
-        receipt = signer.wait_for_transaction_receipt(tx)
-        if receipt.status != TX_STATUS_SUCCESS:
-            return SettleResponse(
-                success=False,
-                error_reason=ERR_CLAIM_TRANSACTION_FAILED,
-                error_message=f"transaction reverted (receipt status {receipt.status})",
-                transaction=tx,
-                network=network,
-            )
-        return SettleResponse(
-            success=True,
-            transaction=tx,
-            network=network,
-            amount="",
+            target,
+            BATCH_SETTLEMENT_ABI,
+            "claimWithSignature",
+            claim_args,
+            sig_bytes,
+            data_suffix=data_suffix,
         )
     except Exception as e:
         return SettleResponse(
             success=False,
             error_reason=ERR_CLAIM_TRANSACTION_FAILED,
-            error_message=str(e)[:500],
+            error_message=truncate_error_message(str(e)),
             transaction="",
             network=network,
         )
+
+    return wait_for_receipt_and_build_response(
+        signer,
+        tx,
+        network,
+        None,
+        failed_reason=ERR_CLAIM_TRANSACTION_FAILED,
+    )
 
 
 __all__ = ["build_voucher_claim_args", "execute_claim_with_signature"]

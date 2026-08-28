@@ -4,11 +4,13 @@ from collections.abc import Awaitable
 from typing import Any, Protocol
 
 from .hooks import (
+    AbortResult,
     ProtectedRequestHookResult,
     ServerPaymentRequiredContext,
     SettleContext,
     SettleFailureContext,
     SettleResultContext,
+    SkipHandlerResult,
     VerifiedPaymentCanceledContext,
     VerifyContext,
     VerifyFailureContext,
@@ -46,7 +48,9 @@ class ResourceServerExtensionHooks(Protocol):
         self,
         declaration: Any,
         context: VerifyResultContext,
-    ) -> None | Awaitable[None]: ...
+    ) -> (
+        None | AbortResult | SkipHandlerResult | Awaitable[None | AbortResult | SkipHandlerResult]
+    ): ...
 
     def on_verify_failure(
         self,
@@ -133,6 +137,16 @@ class ResourceServerExtension(Protocol):
         """Transport-specific hooks scoped to declared extension keys."""
         ...
 
+    @property
+    def dynamic_info_fields(self) -> list[str] | None:
+        """Info fields regenerated per response, skipped during echo validation.
+
+        Fields listed here (e.g. per-response nonces or timestamps) are dropped
+        from both the advertised and echoed ``info`` before comparison, so fresh
+        server values do not falsely reject a valid client echo.
+        """
+        ...
+
 
 class HTTPClientExtensionHooks(Protocol):
     """HTTP transport hooks for client extensions."""
@@ -191,7 +205,11 @@ class ClientExtension(Protocol):
         payment_payload: Any,
         payment_required: Any,
     ) -> Any | Awaitable[Any]:
-        """Enrich payload when the extension key is present on the 402 response."""
+        """Enrich payload after creation for every registered extension.
+
+        Extensions that require a server declaration must no-op when the server
+        did not advertise them.
+        """
         ...
 
     @property

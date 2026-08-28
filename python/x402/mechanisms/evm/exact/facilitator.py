@@ -1,9 +1,11 @@
 """EVM facilitator implementation for the Exact payment scheme (V2)."""
 
+import logging
 import time
 from dataclasses import dataclass, field
 from typing import Any
 
+from ....pending_settlement_store import InMemoryPendingSettlementStore, PendingSettlementStore
 from ....schemas import (
     Network,
     PaymentPayload,
@@ -23,6 +25,8 @@ from ..constants import (
     ERR_RECIPIENT_MISMATCH,
     ERR_SMART_WALLET_DEPLOYMENT_FAILED,
     ERR_TRANSACTION_FAILED,
+    ERR_TRANSACTION_SIMULATION_FAILED,
+    ERR_TRANSFER_EVENT_MISMATCH,
     ERR_UNDEPLOYED_SMART_WALLET,
     ERR_UNSUPPORTED_SCHEME,
     ERR_VALID_AFTER_FUTURE,
@@ -30,19 +34,36 @@ from ..constants import (
     SCHEME_EXACT,
     TX_STATUS_SUCCESS,
 )
+from ..data_suffix import resolve_data_suffix
 from ..erc6492 import has_deployment_info, parse_erc6492_signature
 from ..exact.eip3009_utils import (
+    ParsedEIP3009Authorization,
     classify_eip3009_signature,
     diagnose_eip3009_simulation_failure,
     execute_transfer_with_authorization,
     parse_eip3009_authorization,
     parse_eip3009_transfer_error,
-    simulate_eip3009_transfer,
+    simulate_eip3009_transfer_result,
+    verify_eip3009_transfer_event,
 )
 from ..exact.permit2_utils import settle_permit2, verify_permit2
+from ..settle_receipt import wait_for_receipt_and_build_response
 from ..signer import FacilitatorEvmSigner
-from ..types import ERC6492SignatureData, ExactEIP3009Payload, is_permit2_payload
-from ..utils import bytes_to_hex, get_evm_chain_id, hex_to_bytes, normalize_address
+from ..types import (
+    ERC6492SignatureData,
+    ExactEIP3009Payload,
+    TransactionReceipt,
+    is_permit2_payload,
+)
+from ..utils import (
+    bytes_to_hex,
+    get_evm_chain_id,
+    hex_to_bytes,
+    is_contract_revert,
+    normalize_address,
+)
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -80,15 +101,23 @@ class ExactEvmScheme:
         self,
         signer: FacilitatorEvmSigner,
         config: ExactEvmSchemeConfig | None = None,
+        pending_store: PendingSettlementStore | None = None,
     ):
         """Create ExactEvmScheme facilitator.
 
         Args:
             signer: EVM signer for verification and settlement.
             config: Optional configuration.
+            pending_store: Optional store letting a retried settle for the same payload
+                reconcile against an already-broadcast transaction instead of
+                re-verifying and re-broadcasting (see settlement_pending). Defaults to a
+                fresh in-memory store when omitted.
         """
         self._signer = signer
         self._config = config or ExactEvmSchemeConfig()
+        self._pending_store: PendingSettlementStore = (
+            pending_store or InMemoryPendingSettlementStore()
+        )
 
     def get_extra(self, network: Network) -> dict[str, Any] | None:
         """Get mechanism-specific extra data. EVM: None.
@@ -244,6 +273,21 @@ class ExactEvmScheme:
                 payer=payer,
             )
 
+        # Counterfactual ERC-6492 wallet (undeployed + carries factory deployment info):
+        # settle will deploy via the factory, which is gated by the allowlist. Enforce the
+        # same gate here so verify does not pass for a payment settle will reject.
+        if (
+            not classification.valid
+            and classification.is_undeployed
+            and has_deployment_info(classification.sig_data)
+        ):
+            factory_addr = bytes_to_hex(classification.sig_data.factory).lower()
+            allowed = {f.strip().lower() for f in self._config.eip6492_allowed_factories}
+            if factory_addr not in allowed:
+                return VerifyResponse(
+                    is_valid=False, invalid_reason=ERR_FACTORY_NOT_ALLOWED, payer=payer
+                )
+
         code = self._signer.get_code(token_address)
         if len(code) == 0:
             return VerifyResponse(
@@ -263,22 +307,43 @@ class ExactEvmScheme:
                 payer=payer,
             )
 
-        if not simulate_eip3009_transfer(
+        sim_ok, sim_error = simulate_eip3009_transfer_result(
             self._signer,
             token_address,
             parsed_authorization,
             classification.sig_data,
-        ):
-            return VerifyResponse(
-                is_valid=False,
-                invalid_reason=diagnose_eip3009_simulation_failure(
+        )
+        if not sim_ok:
+            # Prefer the concrete on-chain revert reason the simulation surfaced (e.g.
+            # insufficient balance / used nonce) over the opaque generic code. Fall back
+            # to a diagnostic probe only when the revert could not be classified.
+            reason = ERR_TRANSACTION_SIMULATION_FAILED
+            if is_contract_revert(sim_error):
+                mapped = parse_eip3009_transfer_error(sim_error)
+                if mapped != ERR_TRANSACTION_FAILED:
+                    reason = mapped
+            if reason == ERR_TRANSACTION_SIMULATION_FAILED:
+                reason = diagnose_eip3009_simulation_failure(
                     self._signer,
                     token_address,
                     evm_payload.authorization,
                     int(requirements.amount),
                     extra["name"],
                     extra["version"],
-                ),
+                )
+            # Log the concrete on-chain revert before returning. The HTTP response only
+            # carries the mapped reason code (and the resource server drops invalid_message
+            # entirely), so without this the actual revert is invisible to operators.
+            logger.warning(
+                "exact verify: transfer simulation failed payer=%s reason=%s revert=%s",
+                payer,
+                reason,
+                sim_error,
+            )
+            return VerifyResponse(
+                is_valid=False,
+                invalid_reason=reason,
+                invalid_message=str(sim_error) if sim_error is not None else None,
                 payer=payer,
             )
 
@@ -307,7 +372,30 @@ class ExactEvmScheme:
             SettleResponse with success, transaction, and payer.
         """
         if is_permit2_payload(payload.payload):
-            return settle_permit2(self._signer, payload, requirements, context)
+            return settle_permit2(
+                self._signer, payload, requirements, context, pending_store=self._pending_store
+            )
+
+        network = str(requirements.network)
+
+        # Fast path: a prior settle attempt for this exact payload already broadcast a
+        # transaction whose receipt wait failed (settlement_pending). The resource server's
+        # single automatic retry resends the identical payload, so check the
+        # pending-settlement store before re-verifying/re-broadcasting — reconcile against
+        # the already-broadcast transaction instead of creating a second one.
+        fast_path_payload = ExactEIP3009Payload.from_dict(payload.payload)
+        if fast_path_payload.signature:
+            cached_tx_hash = self._pending_store.get(fast_path_payload.signature)
+            if cached_tx_hash is not None:
+                # Remove before reconciling (rather than after) so a concurrent
+                # retry of the same payload misses here instead of also
+                # reconciling: it falls through to the normal broadcast path,
+                # which independently rejects it as an on-chain replay (nonce
+                # already consumed).
+                self._pending_store.delete(fast_path_payload.signature)
+                return self._reconcile_pending_eip3009(
+                    fast_path_payload, requirements, network, cached_tx_hash
+                )
 
         # First verify
         verify_result = self._verify(
@@ -326,7 +414,6 @@ class ExactEvmScheme:
 
         evm_payload = ExactEIP3009Payload.from_dict(payload.payload)
         payer = evm_payload.authorization.from_address
-        network = str(requirements.network)
         token_address = normalize_address(requirements.asset)
 
         try:
@@ -370,31 +457,43 @@ class ExactEvmScheme:
                         transaction="",
                     )
 
+                # Do NOT re-simulate the transfer here. The single authoritative pre-check is
+                # the atomic deploy+transfer simulation that runs in verify (one eth_call via
+                # Multicall3, state carried across both sub-calls). A second standalone
+                # eth_call after the real deploy tx is unreliable — the read can race the
+                # deploy's state propagation across load-balanced RPC nodes — and was
+                # producing false inner-signature-unsupported rejections
+                # for valid wallets (e.g. Coinbase Smart Wallet). The on-chain
+                # transferWithAuthorization below is the definitive signature check; a
+                # genuinely unsupported inner signature reverts there and is classified by
+                # parse_eip3009_transfer_error.
+
         try:
+            data_suffix = resolve_data_suffix(context, payload, requirements)
             tx_hash = execute_transfer_with_authorization(
                 self._signer,
                 token_address,
                 parsed_authorization,
                 sig_data,
+                data_suffix=data_suffix,
             )
-            receipt = self._signer.wait_for_transaction_receipt(tx_hash)
-            if receipt.status != TX_STATUS_SUCCESS:
-                return SettleResponse(
-                    success=False,
-                    error_reason=ERR_TRANSACTION_FAILED,
-                    transaction=tx_hash,
-                    network=network,
-                    payer=payer,
-                )
 
-            return SettleResponse(
-                success=True,
-                transaction=tx_hash,
-                network=network,
-                payer=payer,
+            return self._await_eip3009_settlement(
+                evm_payload.signature,
+                token_address,
+                parsed_authorization,
+                network,
+                payer,
+                tx_hash,
             )
 
         except Exception as e:
+            logger.warning(
+                "exact settle: transferWithAuthorization failed payer=%s reason=%s revert=%s",
+                payer,
+                parse_eip3009_transfer_error(e),
+                e,
+            )
             return SettleResponse(
                 success=False,
                 error_reason=parse_eip3009_transfer_error(e),
@@ -403,6 +502,80 @@ class ExactEvmScheme:
                 payer=payer,
                 transaction="",
             )
+
+    def _reconcile_pending_eip3009(
+        self,
+        evm_payload: ExactEIP3009Payload,
+        requirements: PaymentRequirements,
+        network: str,
+        tx_hash: str,
+    ) -> SettleResponse:
+        """Handle a pending-settlement store hit.
+
+        Skips verify and broadcast entirely (the payer is taken directly from the payload,
+        exactly as the original attempt did) and awaits the previously broadcast transaction.
+        """
+        token_address = normalize_address(requirements.asset)
+        payer = evm_payload.authorization.from_address
+        try:
+            parsed_authorization = parse_eip3009_authorization(evm_payload.authorization)
+        except Exception as e:
+            return SettleResponse(
+                success=False,
+                error_reason=ERR_TRANSACTION_FAILED,
+                error_message=str(e),
+                network=network,
+                payer=payer,
+                transaction="",
+            )
+        return self._await_eip3009_settlement(
+            evm_payload.signature, token_address, parsed_authorization, network, payer, tx_hash
+        )
+
+    def _await_eip3009_settlement(
+        self,
+        pending_key: str | None,
+        token_address: str,
+        parsed_authorization: ParsedEIP3009Authorization,
+        network: str,
+        payer: str,
+        tx_hash: str,
+    ) -> SettleResponse:
+        """Wait for the broadcast transaction's receipt and verify its Transfer event.
+
+        Shared by both the normal broadcast path and the pending-settlement reconciliation
+        path above. On a receipt-wait failure, the broadcast hash is recorded in the
+        pending-settlement store, keyed by the EIP-3009 signature, so a subsequent settle
+        attempt for the same payload can reconcile against it instead of broadcasting again.
+        """
+
+        def _validate_transfer(receipt: TransactionReceipt) -> SettleResponse | None:
+            if receipt.logs is not None and not verify_eip3009_transfer_event(
+                receipt.logs,
+                token_address,
+                from_address=parsed_authorization.from_address,
+                to=parsed_authorization.to,
+                value=parsed_authorization.value,
+            ):
+                return SettleResponse(
+                    success=False,
+                    error_reason=ERR_TRANSFER_EVENT_MISMATCH,
+                    transaction=tx_hash,
+                    network=network,
+                    payer=payer,
+                )
+            return None
+
+        return wait_for_receipt_and_build_response(
+            self._signer,
+            tx_hash,
+            network,
+            payer,
+            failed_reason=ERR_TRANSACTION_FAILED,
+            validate_receipt=_validate_transfer,
+            pending_store=self._pending_store,
+            pending_key=pending_key,
+        )
 
     def _deploy_smart_wallet(self, sig_data: ERC6492SignatureData) -> None:
         """Deploy ERC-4337 smart wallet via ERC-6492 factory.

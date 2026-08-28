@@ -7,6 +7,7 @@ from typing import Any
 
 from ....schemas import PaymentRequirements
 from ..constants import ERC20_ALLOWANCE_ABI, PERMIT2_ADDRESS, SCHEME_EXACT
+from ..default_assets import find_default_asset
 from ..eip712 import build_typed_data_for_signing
 from ..signer import (
     ClientEvmSigner,
@@ -24,11 +25,11 @@ from .permit2_utils import create_permit2_payload
 
 
 def _wrap_if_local_account(signer: Any) -> ClientEvmSigner:
-    """Auto-wrap eth_account LocalAccount in EthAccountSigner if needed."""
+    """Auto-wrap an eth_account-compatible signer (any BaseAccount) in EthAccountSigner."""
     try:
-        from eth_account.signers.local import LocalAccount
+        from eth_account.signers.base import BaseAccount
 
-        if isinstance(signer, LocalAccount):
+        if isinstance(signer, BaseAccount):
             from ..signers import EthAccountSigner
 
             return EthAccountSigner(signer)
@@ -52,6 +53,7 @@ class ExactEvmScheme:
     """
 
     scheme = SCHEME_EXACT
+    find_default_asset = staticmethod(find_default_asset)
 
     def __init__(self, signer: ClientEvmSigner):
         """Create ExactEvmScheme.

@@ -28,14 +28,16 @@ import {
 } from "../../constants";
 import type { ClientSvmConfig, ClientSvmSigner } from "../../signer";
 import type { ExactSvmPayloadV2 } from "../../types";
-import { createRpcClient } from "../../utils";
+import { createRpcClient, resolveBlockhash } from "../../utils";
 import { getCachedMintMetadata, type MintMetadataCache } from "../../mint-cache";
+import { findDefaultAsset } from "../../defaultAssets";
 
 /**
  * SVM client implementation for the Exact payment scheme.
  */
 export class ExactSvmScheme implements SchemeNetworkClient {
   readonly scheme = "exact";
+  findDefaultAsset = findDefaultAsset;
   private readonly mintCache: MintMetadataCache = new Map();
 
   /**
@@ -108,7 +110,7 @@ export class ExactSvmScheme implements SchemeNetworkClient {
       throw new Error("feePayer is required in paymentRequirements.extra for SVM transactions");
     }
 
-    const { value: latestBlockhash } = await rpc.getLatestBlockhash().send();
+    const latestBlockhash = await resolveBlockhash(rpc, paymentRequirements);
 
     const sellerMemo = paymentRequirements.extra?.memo as string | undefined;
     let memoData: Uint8Array;

@@ -10,7 +10,11 @@ from urllib.parse import urlparse
 
 from x402.http.types import HTTPRequestContext, PaymentOption, RouteConfig
 from x402.schemas.extensions import ClientExtension
-from x402.schemas.hooks import GrantAccessResult, PaymentRequiredHeadersResult
+from x402.schemas.hooks import (
+    GrantAccessResult,
+    PaymentRequiredContext,
+    PaymentRequiredHeadersResult,
+)
 
 from .client import create_siwx_payload
 from .encode import encode_siwx_header
@@ -23,13 +27,43 @@ from .verify import verify_siwx_signature
 SIWxHookEvent = dict[str, Any]
 
 
-@dataclass
-class CreateSIWxHookOptions:
-    """Options for creating server-side SIWX hooks."""
+def normalize_configured_origin(origin: str) -> str:
+    """Normalize and validate a configured SIWX origin."""
+    parsed = urlparse(origin)
+
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        if parsed.scheme and parsed.scheme not in ("http", "https"):
+            raise ValueError(f'Invalid SIWX origin: "{origin}" must use http: or https:')
+        raise ValueError(f'Invalid SIWX origin: "{origin}" is not a valid URL')
+
+    if parsed.username or parsed.password:
+        raise ValueError(f'Invalid SIWX origin: "{origin}" must not include credentials')
+
+    if parsed.path not in ("", "/") or parsed.query or parsed.fragment:
+        raise ValueError(
+            f'Invalid SIWX origin: "{origin}" must not include a path, query, or fragment'
+        )
+
+    return f"{parsed.scheme}://{parsed.netloc}"
+
+
+@dataclass(kw_only=True)
+class CreateSIWxSettleHookOptions:
+    """Options for creating the SIWX settle hook."""
 
     storage: Any
-    verify_options: SIWxVerifyOptions | None = None
     on_event: Callable[[SIWxHookEvent], None] | None = None
+
+
+@dataclass(kw_only=True)
+class CreateSIWxRequestHookOptions(CreateSIWxSettleHookOptions):
+    """Options for creating the SIWX request hook and resource server extension."""
+
+    origin: str
+    verify_options: SIWxVerifyOptions | None = None
+
+
+CreateSIWxHookOptions = CreateSIWxRequestHookOptions
 
 
 @dataclass
@@ -39,7 +73,7 @@ class CreateSIWxClientExtensionOptions:
     signers: list[Any]
 
 
-def create_siwx_settle_hook(options: CreateSIWxHookOptions):
+def create_siwx_settle_hook(options: CreateSIWxSettleHookOptions):
     """Create an onAfterSettle hook that records payments for SIWX."""
 
     async def hook(ctx: Any) -> None:
@@ -63,8 +97,9 @@ def create_siwx_settle_hook(options: CreateSIWxHookOptions):
     return hook
 
 
-def create_siwx_request_hook(options: CreateSIWxHookOptions):
+def create_siwx_request_hook(options: CreateSIWxRequestHookOptions):
     """Create an onProtectedRequest hook that validates SIWX auth."""
+    configured_origin = normalize_configured_origin(options.origin)
     storage = options.storage
     has_used_nonce = callable(getattr(storage, "has_used_nonce", None))
     has_record_nonce = callable(getattr(storage, "has_record_nonce", None))
@@ -85,27 +120,26 @@ def create_siwx_request_hook(options: CreateSIWxHookOptions):
 
         try:
             payload = parse_siwx_header(header)
-            resource_uri = adapter.get_url()
-            validation = await validate_siwx_message(payload, resource_uri)
-            if not validation.valid:
+            validation = await validate_siwx_message(payload, configured_origin)
+            if not validation.is_valid:
                 if options.on_event:
                     options.on_event(
                         {
                             "type": "validation_failed",
                             "resource": context.path,
-                            "error": validation.error,
+                            "error": validation.invalid_message,
                         }
                     )
                 return None
 
             verification = await verify_siwx_signature(payload, options.verify_options)
-            if not verification.valid or not verification.address:
+            if not verification.is_valid or not verification.payer:
                 if options.on_event:
                     options.on_event(
                         {
                             "type": "validation_failed",
                             "resource": context.path,
-                            "error": verification.error,
+                            "error": verification.invalid_message,
                         }
                     )
                 return None
@@ -132,7 +166,7 @@ def create_siwx_request_hook(options: CreateSIWxHookOptions):
                 accept_list = list(accepts or [])
             is_auth_only = isinstance(accept_list, list) and len(accept_list) == 0
 
-            has_paid = storage.has_paid(context.path, verification.address)
+            has_paid = storage.has_paid(context.path, verification.payer)
             if inspect.isawaitable(has_paid):
                 has_paid = await has_paid
             should_grant = is_auth_only or has_paid
@@ -146,7 +180,7 @@ def create_siwx_request_hook(options: CreateSIWxHookOptions):
                         {
                             "type": "access_granted",
                             "resource": context.path,
-                            "address": verification.address,
+                            "address": verification.payer,
                         }
                     )
                 return GrantAccessResult()
@@ -169,7 +203,7 @@ def create_siwx_client_hook(signer: Any):
     signer_is_solana = is_solana_signer(signer)
     expected_signature_type: SignatureType = "ed25519" if signer_is_solana else "eip191"
 
-    async def hook(context: Any) -> PaymentRequiredHeadersResult | None:
+    async def hook(context: PaymentRequiredContext) -> PaymentRequiredHeadersResult | None:
         extensions = context.payment_required.extensions or {}
         siwx_extension = extensions.get(SIGN_IN_WITH_X)
         if not siwx_extension:
@@ -199,7 +233,7 @@ def create_siwx_client_hook(signer: Any):
             chain_id = matching["chainId"] if isinstance(matching, dict) else matching.chain_id
             sig_type = matching["type"] if isinstance(matching, dict) else matching.type
             complete_info = {**info, "chainId": chain_id, "type": sig_type}
-            payload = await create_siwx_payload(complete_info, signer)
+            payload = await create_siwx_payload(complete_info, signer, context.request_url)
             header = encode_siwx_header(payload)
             return PaymentRequiredHeadersResult(headers={SIGN_IN_WITH_X: header})
         except Exception:

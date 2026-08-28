@@ -31,7 +31,7 @@ typescript/
 │   │   └── paywall/       # @x402/paywall - Browser paywall UI
 │   ├── extensions/        # @x402/extensions - Bazaar, Sign-in-with-x
 │   └── legacy/            # Legacy v1 packages (deprecated)
-├── site/                  # x402.org marketing site
+├── site/                 # x402.org site and testnet facilitator service
 ├── turbo.json
 └── pnpm-workspace.yaml
 ```
@@ -52,8 +52,8 @@ The core package provides transport-agnostic primitives. Mechanism packages (`ev
 
 ### Prerequisites
 
-- Node.js >= 18.0.0
-- pnpm >= 10.7.0
+- Node.js >= 22.0.0
+- pnpm >= 11.1.1
 
 ### Installation
 

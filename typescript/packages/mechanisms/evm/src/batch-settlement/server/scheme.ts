@@ -1,21 +1,23 @@
 import {
   AssetAmount,
   Network,
+  PaymentFlowConfig,
   PaymentPayload,
   PaymentRequirements,
   Price,
   SchemeNetworkServer,
   SchemeServerHooks,
   MoneyParser,
+  SupportedKind,
 } from "@x402/core/types";
 import type { DeepReadonly } from "@x402/core/types";
 import type { SettleContext, SettleResultContext } from "@x402/core/server";
-import { convertToTokenAmount, numberToDecimalString, parseMoneyString } from "@x402/core/utils";
+import { convertToTokenAmount, parseMoney } from "@x402/core/utils";
 import type { FacilitatorClient } from "@x402/core/server";
 import { getAddress } from "viem";
 import { BatchSettlementChannelManager } from "./channelManager";
-import { getDefaultAsset } from "../../shared/defaultAssets";
-import type { AuthorizerSigner } from "../types";
+import { findDefaultAsset, getDefaultAsset } from "../../defaultAssets";
+import type { AuthorizerSigner, BatchSettlementAssetTransferMethod } from "../types";
 import { BATCH_SETTLEMENT_SCHEME, MIN_WITHDRAW_DELAY } from "../constants";
 import { InMemoryChannelStorage, ChannelStorage, type Channel } from "./storage";
 import {
@@ -45,6 +47,7 @@ export interface BatchSettlementRequestContext {
   pendingId?: string;
   channelSnapshot?: Channel;
   localVerify?: boolean;
+  reservationCommitted?: boolean;
 }
 
 /**
@@ -52,6 +55,11 @@ export interface BatchSettlementRequestContext {
  */
 export class BatchSettlementEvmScheme implements SchemeNetworkServer {
   readonly scheme = BATCH_SETTLEMENT_SCHEME;
+  readonly defaultAssetTransferMethod: BatchSettlementAssetTransferMethod = "eip3009";
+  readonly paymentFlows = {
+    eip3009: { supported: ["authorization"], default: "authorization" },
+    permit2: { supported: ["authorization"], default: "authorization" },
+  } as const satisfies Record<BatchSettlementAssetTransferMethod, PaymentFlowConfig>;
   readonly schemeHooks: SchemeServerHooks;
 
   private readonly requestContexts = new WeakMap<
@@ -189,7 +197,7 @@ export class BatchSettlementEvmScheme implements SchemeNetworkServer {
    */
   async clearPendingRequest(payload: DeepReadonly<PaymentPayload>): Promise<void> {
     const context = this.takeRequestContext(payload);
-    if (!context?.channelId || !context.pendingId) {
+    if (!context?.reservationCommitted || !context.channelId || !context.pendingId) {
       return;
     }
 
@@ -239,7 +247,7 @@ export class BatchSettlementEvmScheme implements SchemeNetworkServer {
       };
     }
 
-    const amount = this.parseMoneyToDecimal(price);
+    const { amount, symbol } = parseMoney(price);
 
     for (const parser of this.moneyParsers) {
       const result = await parser(amount, network);
@@ -248,12 +256,26 @@ export class BatchSettlementEvmScheme implements SchemeNetworkServer {
       }
     }
 
-    return this.defaultMoneyConversion(amount, network);
+    return this.defaultMoneyConversion(amount, network, symbol);
+  }
+
+  /**
+   * Decimals for a known default asset, or undefined.
+   *
+   * @param asset - Asset address or symbol
+   * @param network - Target network
+   * @returns Decimals when the asset is a known default; otherwise undefined
+   */
+  getAssetDecimals(asset: string, network: Network): number | undefined {
+    return findDefaultAsset(asset, network)?.decimals;
   }
 
   /**
    * Injects batched-specific fields into the payment requirements returned to
-   * the client (receiverAuthorizer, withdrawDelay, EIP-712 domain info).
+   * the client (receiverAuthorizer, withdrawDelay). Asset metadata (name,
+   * version, assetTransferMethod) is left untouched — it is already set by
+   * `parsePrice` or supplied explicitly by the caller, and is not re-derived
+   * from the default-asset registry here so unlisted networks keep working.
    *
    * @param paymentRequirements - Base payment requirements from the middleware.
    * @param supportedKind - Matched scheme/network kind (extra may contain overrides).
@@ -276,8 +298,6 @@ export class BatchSettlementEvmScheme implements SchemeNetworkServer {
   ): Promise<PaymentRequirements> {
     void _extensionKeys;
 
-    const assetInfo = getDefaultAsset(paymentRequirements.network as Network);
-
     const receiverAuthorizer =
       this.receiverAuthorizerSigner?.address ??
       (typeof supportedKind.extra?.receiverAuthorizer === "string"
@@ -297,12 +317,38 @@ export class BatchSettlementEvmScheme implements SchemeNetworkServer {
         ...paymentRequirements.extra,
         receiverAuthorizer: getAddress(receiverAuthorizer),
         withdrawDelay: this.withdrawDelay,
-        name: assetInfo.name,
-        version: assetInfo.version,
-        assetTransferMethod:
-          paymentRequirements.extra?.assetTransferMethod ?? assetInfo.assetTransferMethod,
       },
     };
+  }
+
+  /**
+   * Fails server startup when this scheme delegates the receiver-authorizer role
+   * but the facilitator does not advertise a usable `receiverAuthorizer`.
+   *
+   * @param network - The network identifier being validated.
+   * @param supportedKind - The facilitator's advertised kind for this scheme/network.
+   * @param _ - Extensions advertised by the facilitator (unused).
+   * @returns A problem message when delegation is impossible, or void when valid.
+   */
+  validateFacilitatorSupport(
+    network: Network,
+    supportedKind: SupportedKind,
+    _: string[],
+  ): string | void {
+    if (this.receiverAuthorizerSigner) return;
+
+    const advertised = supportedKind.extra?.receiverAuthorizer;
+    const hasValid =
+      typeof advertised === "string" &&
+      getAddress(advertised) !== "0x0000000000000000000000000000000000000000";
+
+    if (!hasValid) {
+      return (
+        `no receiverAuthorizerSigner is configured and the facilitator does not advertise a ` +
+        `receiverAuthorizer on ${network}. Configure a receiverAuthorizerSigner or use a ` +
+        `facilitator that advertises one.`
+      );
+    }
   }
 
   /**
@@ -352,22 +398,25 @@ export class BatchSettlementEvmScheme implements SchemeNetworkServer {
 
   /**
    * Creates a {@link BatchSettlementChannelManager} pre-configured with this scheme's
-   * receiver, default token for the given network, and the provided facilitator.
+   * receiver, a token for the given network, and the provided facilitator.
    *
    * @param facilitator - Facilitator client for submitting onchain claims/settlements.
    * @param network - CAIP-2 network identifier (e.g. `"eip155:84532"`).
+   * @param token - Explicit token address to use. Falls back to the network's
+   *   default asset (from the registry) when omitted.
    * @returns A ready-to-use channel manager.
    */
   createChannelManager(
     facilitator: FacilitatorClient,
     network: Network,
+    token?: `0x${string}`,
   ): BatchSettlementChannelManager {
-    const token = getDefaultAsset(network).address as `0x${string}`;
+    const resolvedToken = token ?? (getDefaultAsset(network).asset as `0x${string}`);
     return new BatchSettlementChannelManager({
       scheme: this,
       facilitator,
       receiver: this.receiverAddress,
-      token,
+      token: resolvedToken,
       network,
     });
   }
@@ -378,31 +427,35 @@ export class BatchSettlementEvmScheme implements SchemeNetworkServer {
    * @param money - Money string (may include `$`) or numeric amount.
    * @returns Parsed finite number.
    */
-  private parseMoneyToDecimal(money: string | number): number {
-    if (typeof money === "number") {
-      return money;
-    }
-
-    return parseMoneyString(money);
-  }
-
   /**
    * Converts a decimal dollar amount to the network's default token amount.
    *
    * @param amount - Decimal amount in display units.
    * @param network - Target chain/network for default asset resolution.
+   * @param symbol - Optional ticker from a suffixed price
    * @returns {@link AssetAmount} with integer token amount, contract address, and metadata.
    */
-  private defaultMoneyConversion(amount: number, network: Network): AssetAmount {
-    const assetInfo = getDefaultAsset(network);
-    const tokenAmount = convertToTokenAmount(numberToDecimalString(amount), assetInfo.decimals);
+  private defaultMoneyConversion(amount: string, network: Network, symbol?: string): AssetAmount {
+    const assetInfo = getDefaultAsset(network, symbol);
+    const tokenAmount = convertToTokenAmount(amount, assetInfo.decimals);
+
+    // EIP-3009 tokens always need name/version for their transferWithAuthorization domain.
+    // Permit2 tokens only need them if the token supports EIP-2612 (for gasless permit signing).
+    // Omitting name/version for permit2 tokens signals the client to skip EIP-2612 and use
+    // ERC-20 approval gas sponsoring instead.
+    const includeEip712Domain = !assetInfo.assetTransferMethod || assetInfo.supportsEip2612;
 
     return {
       amount: tokenAmount,
-      asset: assetInfo.address,
+      asset: assetInfo.asset,
       extra: {
-        name: assetInfo.name,
-        version: assetInfo.version,
+        ...(includeEip712Domain && {
+          name: assetInfo.name,
+          version: assetInfo.version,
+        }),
+        ...(assetInfo.assetTransferMethod && {
+          assetTransferMethod: assetInfo.assetTransferMethod,
+        }),
       },
     };
   }

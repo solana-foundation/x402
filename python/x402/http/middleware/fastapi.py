@@ -6,6 +6,7 @@ Provides payment-gated route protection for FastAPI applications.
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any
 
@@ -19,7 +20,7 @@ except ImportError as e:
         "FastAPI middleware requires fastapi and starlette. Install with: uv add x402[fastapi]"
     ) from e
 
-from ...schemas import VerifiedPaymentCancelOptions
+from ...schemas import SettleResponse, VerifiedPaymentCancelOptions
 from ..constants import SETTLEMENT_OVERRIDES_HEADER
 from ..facilitator_client_base import FacilitatorResponseError
 from ..types import (
@@ -30,6 +31,7 @@ from ..types import (
     RoutesConfig,
 )
 from ..x402_http_server import PaywallProvider, x402HTTPResourceServer
+from ..x402_http_server_base import PAYMENT_REQUIRED_CACHE_CONTROL, with_private_cache_control
 
 if TYPE_CHECKING:
     from ...server import x402ResourceServer
@@ -48,6 +50,8 @@ from ._bazaar_utils import (
 from ._bazaar_utils import (
     validate_bazaar_extensions as _validate_bazaar_extensions,
 )
+
+logger = logging.getLogger(__name__)
 
 # ============================================================================
 # FastAPI Adapter
@@ -234,9 +238,12 @@ def payment_middleware(
 
         # Create adapter and context
         adapter = FastAPIAdapter(request)
+        # Routers dispatch on the escaped path, so route matching must use the
+        # raw request path rather than the decoded URL path.
+        raw_path = request.scope["raw_path"].decode("ascii").split("?")[0]
         context = HTTPRequestContext(
             adapter=adapter,
-            path=request.url.path,
+            path=raw_path,
             method=request.method,
             payment_header=(
                 adapter.get_header("payment-signature") or adapter.get_header("x-payment")
@@ -262,6 +269,12 @@ def payment_middleware(
             result = await http_server.process_http_request(context, paywall_config)
         except FacilitatorResponseError as error:
             return _facilitator_error_response(error)
+        except Exception:
+            logger.exception("x402: unexpected error while processing an HTTP payment request")
+            return JSONResponse(
+                content={"error": "Internal Server Error"},
+                status_code=500,
+            )
 
         if result.type == "no-payment-required":
             return await call_next(request)
@@ -298,21 +311,43 @@ def payment_middleware(
             try:
                 response = await call_next(request)
             except Exception as error:
+                cancel_settlement = None
                 if dispatcher is not None:
-                    await dispatcher.cancel(
+                    cancel_settlement = await dispatcher.cancel(
                         VerifiedPaymentCancelOptions(reason="handler_threw", error=error)
                     )
-                raise
+                failure_headers = http_server.create_failure_path_settlement_headers(
+                    cancel_settlement,
+                    result.before_handler_settlement,
+                    result.payment_payload,
+                )
+                if not isinstance(failure_headers, dict) or not failure_headers:
+                    raise
+                return JSONResponse(
+                    content={"error": "Internal Server Error"},
+                    status_code=500,
+                    headers=failure_headers,
+                )
 
             # Don't settle on error responses
             if response.status_code >= 400:
+                cancel_settlement = None
                 if dispatcher is not None:
-                    await dispatcher.cancel(
+                    cancel_settlement = await dispatcher.cancel(
                         VerifiedPaymentCancelOptions(
                             reason="handler_failed",
                             response_status=response.status_code,
                         )
                     )
+                failure_headers = http_server.create_failure_path_settlement_headers(
+                    cancel_settlement,
+                    result.before_handler_settlement,
+                    result.payment_payload,
+                    response.headers.get("Cache-Control"),
+                )
+                if isinstance(failure_headers, dict):
+                    for key, value in failure_headers.items():
+                        response.headers[key] = value
                 return response
 
             # Read response body for potential buffering
@@ -340,6 +375,7 @@ def payment_middleware(
                     settlement_overrides=overrides,
                     declared_extensions=result.declared_extensions,
                     transport_context=transport_context,
+                    before_handler_settlement=result.before_handler_settlement,
                 )
 
                 if not settle_result.success:
@@ -364,6 +400,7 @@ def payment_middleware(
                 # Add settlement headers
                 headers = dict(response.headers)
                 headers.update(settle_result.headers)
+                headers["Cache-Control"] = with_private_cache_control(headers.get("Cache-Control"))
 
                 return Response(
                     content=body,
@@ -375,7 +412,32 @@ def payment_middleware(
             except FacilitatorResponseError as error:
                 return _facilitator_error_response(error)
             except Exception:
-                return JSONResponse(content={}, status_code=402)
+                # An unexpected error here (RPC failure, bug, ...) is a
+                # server-side failure, not a payment problem. Log it so
+                # operators get a signal (the module otherwise logs nothing),
+                # and surface it as a settle failure (402 + PAYMENT-RESPONSE,
+                # success=False) - consistent with the not-settle_result.success
+                # path and distinguishable from a genuine "payment required".
+                logger.exception("x402: unexpected error while settling a verified payment")
+                settle_response = SettleResponse(
+                    success=False,
+                    error_reason="unexpected_settle_error",
+                    error_message="unexpected error while settling the verified payment",
+                    transaction="",
+                    network=result.payment_requirements.network,
+                )
+                settle_headers = http_server._create_settlement_headers(
+                    settle_response, result.payment_requirements
+                )
+                return JSONResponse(
+                    content={},
+                    status_code=402,
+                    headers={
+                        "Content-Type": "application/json",
+                        "Cache-Control": PAYMENT_REQUIRED_CACHE_CONTROL,
+                        **settle_headers,
+                    },
+                )
 
         # Fallthrough - should not happen
         return await call_next(request)
