@@ -485,6 +485,10 @@ export class PaymentChannelRentCleanupManager {
           status === ChannelStatus.Sealed
         ) {
           if (status === ChannelStatus.Open) {
+            // Batch-settlement vouchers use expiresAt = 0, which means
+            // non-expiring. Such channels are not abandonment candidates
+            // solely because their recorded expiry predates the Unix epoch.
+            if (record.expiresAt === 0) continue;
             const readyAt = record.expiresAt + abandonGraceSecs;
             if (nowSecs < readyAt) continue;
           } else if (
