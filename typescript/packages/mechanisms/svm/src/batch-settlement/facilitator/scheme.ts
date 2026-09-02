@@ -864,14 +864,22 @@ export function calculateDistributionAmount(
   }, 0n);
 }
 
-function snapshotChannel(channelId: string, channel: Channel): BatchChannelState {
-  return {
-    balance: channel.deposit.toString(),
+function snapshotChannel(
+  channelId: string,
+  channel: Channel,
+  chargedCumulativeAmount?: bigint,
+): BatchChannelState {
+  const snapshot: BatchChannelState = {
     channelId,
+    balance: channel.deposit.toString(),
     totalClaimed: channel.settlement.settled.toString(),
     withdrawRequestedAt:
       channel.status === ChannelStatus.Closing ? Number(channel.closureStartedAt) : 0,
   };
+  if (chargedCumulativeAmount !== undefined) {
+    snapshot.chargedCumulativeAmount = chargedCumulativeAmount.toString();
+  }
+  return snapshot;
 }
 
 function depositResponse(
@@ -881,11 +889,11 @@ function depositResponse(
   transaction: string,
 ): SettleResponse {
   return {
-    amount: channel.deposit.toString(),
-    network,
-    payer: channel.payer,
     success: true,
+    payer: channel.payer,
     transaction,
+    network,
+    amount: channel.deposit.toString(),
     extra: {
       channelState: snapshotChannel(channelId, channel),
     },
@@ -899,10 +907,10 @@ function refundResponse(
   transaction: string,
 ): SettleResponse {
   return {
-    network,
-    payer: channel.payer,
     success: true,
+    payer: channel.payer,
     transaction,
+    network,
     extra: { channelState: snapshotChannel(channelId, channel) },
   };
 }
