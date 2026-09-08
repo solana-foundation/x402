@@ -168,9 +168,10 @@ export class BatchSvmScheme implements SchemeNetworkFacilitator {
    * @returns Canonical channels sponsored by any configured fee payer
    */
   async discoverChannels(network: Network): Promise<DiscoveredChannel[]> {
-    const rpc = createRpcClient(network, this.config.rpcUrl);
     const channels = await Promise.all(
-      this.signer.getAddresses().map(rentPayer => discoverChannelsByRentPayer(rpc, rentPayer)),
+      this.signer
+        .getAddresses()
+        .map(rentPayer => discoverChannelsByRentPayer(this.signer, network, rentPayer)),
     );
     return [...new Map(channels.flat().map(item => [item.channelId, item])).values()];
   }

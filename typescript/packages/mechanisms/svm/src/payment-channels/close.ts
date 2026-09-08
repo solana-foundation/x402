@@ -106,6 +106,9 @@ export interface VerifyRequestCloseExpected {
  * Verify the complete sponsor-bound transaction envelope for `request_close`.
  * The sponsor may authorize only the fee for one canonical close instruction.
  */
+// The validation is intentionally exhaustive and linear so every permitted
+// instruction, account, signer, and privilege remains visible in one audit path.
+// eslint-disable-next-line complexity, sonarjs/cognitive-complexity
 export async function verifyRequestCloseTransaction(
   transactionBase64: string,
   expected: VerifyRequestCloseExpected,

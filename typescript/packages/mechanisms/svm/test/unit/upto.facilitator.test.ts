@@ -10,9 +10,9 @@ const channelMocks = vi.hoisted(() => ({
   submitSettle: vi.fn(),
 }));
 
-vi.mock("../../src/payment-channels/facilitator", async () => {
-  const actual = await vi.importActual<typeof import("../../src/payment-channels/facilitator")>(
-    "../../src/payment-channels/facilitator",
+vi.mock("../../src/upto/facilitator/channel", async () => {
+  const actual = await vi.importActual<typeof import("../../src/upto/facilitator/channel")>(
+    "../../src/upto/facilitator/channel",
   );
   return {
     ...actual,
@@ -73,9 +73,9 @@ import { ErrSettlementPending } from "../../src/exact/facilitator/errors";
 import {
   SettlementConfirmationTimeoutError,
   SettlementSimulationError,
-} from "../../src/payment-channels/facilitator";
-import type { PaymentChannelStorage as UptoChannelStorage } from "../../src/payment-channels/storage";
-import { PaymentChannelRentCleanupManager as UptoSvmRentCleanupManager } from "../../src/payment-channels/rentCleanup";
+} from "../../src/upto/facilitator/channel";
+import type { UptoChannelStorage } from "../../src/upto/facilitator/channelStorage";
+import { UptoSvmRentCleanupManager } from "../../src/upto/facilitator/rentCleanupManager";
 import type { UptoSvmPayloadV2 } from "../../src/types";
 import { challengeExpiresAt, MAX_TIMEOUT_SECONDS } from "./upto.testUtils";
 

@@ -24,13 +24,10 @@ export {
   DEFAULT_CHANNEL_READ_MAX_ATTEMPTS,
   SettlementConfirmationTimeoutError,
   SettlementSimulationError,
-} from "../../payment-channels/facilitator";
-export type { PaymentChannelSvmSigner as UptoSvmSigner } from "../../payment-channels/facilitator";
-export { InMemoryPaymentChannelStorage as InMemoryUptoChannelStorage } from "../../payment-channels/storage";
-export type {
-  PaymentChannelRecord as UptoChannelRecord,
-  PaymentChannelStorage as UptoChannelStorage,
-} from "../../payment-channels/storage";
+} from "./channel";
+export type { UptoSvmSigner } from "./channel";
+export { InMemoryUptoChannelStorage } from "./channelStorage";
+export type { UptoChannelRecord, UptoChannelStorage } from "./channelStorage";
 export {
   InMemoryUptoDelegatedAuthStore,
   UptoDelegatedAuthIdentityConflictError,
@@ -43,14 +40,14 @@ export {
   DEFAULT_MAX_TXS_PER_RUN,
   DEFAULT_MAX_TXS_PER_SIGNER,
   MAX_SAFE_RECLAIMS_PER_TX,
-  PaymentChannelRentCleanupManager as UptoSvmRentCleanupManager,
-} from "../../payment-channels/rentCleanup";
+  UptoSvmRentCleanupManager,
+} from "./rentCleanupManager";
 export type {
-  PaymentChannelRentCleanupManagerConfig as UptoSvmRentCleanupManagerConfig,
   RentCleanupCloseResult,
   RentCleanupOptions,
   RentCleanupReclaimResult,
   RentCleanupStartConfig,
   RentDiscoveryOptions,
   RentDiscoveryResult,
-} from "../../payment-channels/rentCleanup";
+  UptoSvmRentCleanupManagerConfig,
+} from "./rentCleanupManager";

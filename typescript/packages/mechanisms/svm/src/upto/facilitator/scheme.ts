@@ -52,16 +52,16 @@ import {
   simulateOpenSettleDistribute,
   submitSettle,
   type ChannelReadPolicy,
-  type PaymentChannelSvmSigner as UptoSvmSigner,
-} from "../../payment-channels/facilitator";
+  type UptoSvmSigner,
+} from "./channel";
 import {
-  InMemoryPaymentChannelStorage as InMemoryUptoChannelStorage,
-  type PaymentChannelRecord as UptoChannelRecord,
-  type PaymentChannelStorage as UptoChannelStorage,
-} from "../../payment-channels/storage";
+  InMemoryUptoChannelStorage,
+  type UptoChannelRecord,
+  type UptoChannelStorage,
+} from "./channelStorage";
 import { InMemoryUptoDelegatedAuthStore, type UptoDelegatedAuthStore } from "./delegatedAuthStore";
 import { assertUptoFacilitatorSigner, type UptoFacilitatorSigner } from "./signer";
-import { PaymentChannelRentCleanupManager as UptoSvmRentCleanupManager } from "../../payment-channels/rentCleanup";
+import { UptoSvmRentCleanupManager } from "./rentCleanupManager";
 
 /** Scheme-specific error returned when the settlement amount exceeds the ceiling. */
 export const ERR_SETTLEMENT_EXCEEDS_AMOUNT = "invalid_upto_svm_payload_settlement_exceeds_amount";

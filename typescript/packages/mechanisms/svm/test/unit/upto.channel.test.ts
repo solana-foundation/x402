@@ -28,7 +28,7 @@ import {
   getChannelDistributionHash,
   resolveChannelReadPolicy,
   type ExpectedOpenChannel,
-} from "../../src/payment-channels/facilitator";
+} from "../../src/upto/facilitator/channel";
 import { SOLANA_DEVNET_CAIP2 } from "../../src/constants";
 import type { UptoFacilitatorSigner } from "../../src/upto/facilitator/signer";
 
