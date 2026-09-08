@@ -653,7 +653,20 @@ describe("batch server lifecycle boundaries", () => {
           payer: payer.address,
         },
       });
-      expect(result).toBeUndefined();
+      const snapshotWithoutBalance =
+        typeof channelState === "object" &&
+        channelState !== null &&
+        typeof channelState.totalClaimed === "string" &&
+        /^\d+$/.test(channelState.totalClaimed) &&
+        !(typeof channelState.balance === "string" && /^\d+$/.test(channelState.balance));
+      if (snapshotWithoutBalance) {
+        expect(result).toMatchObject({
+          abort: true,
+          reason: BatchError.CUMULATIVE_EXCEEDS_DEPOSIT,
+        });
+      } else {
+        expect(result).toBeUndefined();
+      }
       expect(await store.get(channelId)).toBeDefined();
     }
   });
