@@ -28,6 +28,10 @@ export interface ChannelState {
   tokenProgram: string;
   /** Voucher signer = the client (base58). */
   payerAuthorizer: string;
+  /** Reusable payer proof bound at open for server-signed channels. */
+  authorizationSignature?: string | undefined;
+  /** Server-mode request keys and the cumulative voucher each committed. */
+  authorizationRecords?: Record<string, string> | undefined;
   /** Optional server close authorizer from the challenge. */
   receiverAuthorizer?: string | undefined;
   /** Forced-close grace period. */

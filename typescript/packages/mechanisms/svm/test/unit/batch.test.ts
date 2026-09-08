@@ -4,6 +4,11 @@ import { beforeAll, describe, expect, it } from "vitest";
 
 import { BatchError } from "../../src/batch-settlement/errors";
 import {
+  encodeBatchAuthorizationMessage,
+  signBatchAuthorization,
+  verifyBatchAuthorization,
+} from "../../src/batch-settlement/authorization";
+import {
   BatchChannelTracker,
   buildDepositPayload,
   buildRefundPayload,
@@ -213,6 +218,25 @@ describe("batch-settlement SVM", () => {
       ).resolves.toMatchObject({
         abort: true,
         reason: BatchError.DEPOSIT_BELOW_MIN_DEPOSIT,
+      });
+    });
+
+    it("publishes the configured operator voucher signer", async () => {
+      const operator = await generateKeyPairSigner();
+      const server = new BatchServerScheme({ operator });
+      const enhanced = await server.enhancePaymentRequirements(
+        requirements(),
+        {
+          extra: { feePayer: feePayer.address },
+          network: SOLANA_DEVNET_CAIP2,
+          scheme: "batch-settlement",
+          x402Version: 2,
+        },
+        [],
+      );
+      expect(enhanced.extra).toMatchObject({
+        operator: operator.address,
+        voucherSigner: "server",
       });
     });
 
@@ -1034,7 +1058,51 @@ describe("batch-settlement SVM", () => {
         token: MINT,
         withdrawDelay: WITHDRAW_DELAY,
       });
-      expect(built.payload.voucher.maxClaimableAmount).toBe("1000");
+      expect(built.payload.voucher!.maxClaimableAmount).toBe("1000");
+    });
+
+    it("builds an operator channel with a reusable payer proof", async () => {
+      const operator = await generateKeyPairSigner();
+      const built = await buildDepositPayload({
+        blockhash: { blockhash: DUMMY_BLOCKHASH, lastValidBlockHeight: 1n },
+        depositAmount: 10_000n,
+        feePayer: feePayer.address,
+        firstCharge: 1_000n,
+        mint: MINT,
+        openSlot: OPEN_SLOT,
+        operator: operator.address,
+        payer,
+        receiver: RECEIVER,
+        tokenProgram: TOKEN_PROGRAM_ADDRESS,
+        voucherSigner: "server",
+        withdrawDelay: WITHDRAW_DELAY,
+      });
+      expect(built.payload).toMatchObject({
+        maxClaimableAmount: "1000",
+        channelConfig: {
+          payerAuthorizer: operator.address,
+          voucherSigner: "server",
+        },
+      });
+      expect(built.payload.voucher).toBeUndefined();
+      expect(built.payload.idempotencyKey).toBeTruthy();
+      expect(await verifyBatchAuthorization(built.payload.authorization!, operator.address)).toBe(
+        true,
+      );
+      const stranger = await generateKeyPairSigner();
+      expect(await verifyBatchAuthorization(built.payload.authorization!, stranger.address)).toBe(
+        false,
+      );
+      expect(
+        encodeBatchAuthorizationMessage({
+          channelId: built.channelId,
+          operator: operator.address,
+          payer: payer.address,
+        }),
+      ).toHaveLength(123);
+      expect(await signBatchAuthorization(payer, built.channelId, operator.address)).toEqual(
+        built.payload.authorization,
+      );
     });
 
     it("builds and verifies the payer-signed forced-close transaction", async () => {

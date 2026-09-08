@@ -39,7 +39,7 @@ interface OpenChannel {
 }
 
 type PendingPayment = {
-  payload: Extract<BatchPayload, { type: "deposit" | "voucher" }>;
+  payload: Extract<BatchPayload, { type: "authorization" | "deposit" | "voucher" }>;
   x402Version: number;
 };
 type PendingChannel = OpenChannel & {
@@ -139,11 +139,24 @@ export class BatchSvmScheme implements SchemeNetworkClient {
     }
     if (existing) {
       const cumulative = existing.tracker.cumulative + charge;
-      const voucher = await existing.tracker.previewVoucher(charge);
       if (cumulative <= existing.deposit) {
+        const payload: Extract<BatchPayload, { type: "authorization" | "voucher" }> =
+          terms.voucherSigner === "server"
+            ? {
+                authorization: await existing.tracker.authorization(),
+                channelConfig: existing.tracker.channelConfig,
+                idempotencyKey: crypto.randomUUID(),
+                maxClaimableAmount: cumulative.toString(),
+                type: "authorization",
+              }
+            : {
+                channelConfig: existing.tracker.channelConfig,
+                type: "voucher",
+                voucher: await existing.tracker.previewVoucher(charge),
+              };
         const payment: PendingPayment = {
           x402Version,
-          payload: { channelConfig: existing.tracker.channelConfig, type: "voucher", voucher },
+          payload,
         };
         const next = {
           ...existing,
@@ -181,7 +194,13 @@ export class BatchSvmScheme implements SchemeNetworkClient {
           channelConfig: existing.tracker.channelConfig,
           deposit: { amount: topUpAmount.toString(), transaction: topUp.transaction },
           type: "deposit",
-          voucher,
+          ...(terms.voucherSigner === "server"
+            ? {
+                authorization: await existing.tracker.authorization(),
+                idempotencyKey: crypto.randomUUID(),
+                maxClaimableAmount: cumulative.toString(),
+              }
+            : { voucher: await existing.tracker.previewVoucher(charge) }),
         },
       };
       const next = {
@@ -237,6 +256,8 @@ export class BatchSvmScheme implements SchemeNetworkClient {
       salt: this.salt(),
       tokenProgram: terms.tokenProgram,
       withdrawDelay: terms.withdrawDelay,
+      voucherSigner: terms.voucherSigner,
+      ...(terms.operator ? { operator: terms.operator } : {}),
     });
     const payment: PendingPayment = { payload: built.payload, x402Version };
     const next = {
@@ -351,6 +372,8 @@ export class BatchSvmScheme implements SchemeNetworkClient {
    * @param terms.withdrawDelay
    * @param terms.tokenProgram
    * @param terms.receiverAuthorizer
+   * @param terms.voucherSigner
+   * @param terms.operator
    */
   private async discoverChannel(
     requirements: PaymentRequirements,
@@ -359,6 +382,8 @@ export class BatchSvmScheme implements SchemeNetworkClient {
       withdrawDelay: number;
       tokenProgram: string;
       receiverAuthorizer?: string | undefined;
+      voucherSigner: "client" | "server";
+      operator?: string | undefined;
     },
   ): Promise<OpenChannel | undefined> {
     if (this.config.discoverChannels === false) return undefined;
@@ -386,7 +411,7 @@ export class BatchSvmScheme implements SchemeNetworkClient {
         candidate.channel.closureStartedAt === 0n &&
         candidate.channel.payee === terms.feePayer &&
         candidate.channel.mint === requirements.asset &&
-        candidate.channel.authorizedSigner === this.signer.address &&
+        candidate.channel.authorizedSigner === (terms.operator ?? this.signer.address) &&
         candidate.channel.gracePeriod === terms.withdrawDelay &&
         candidate.channel.salt === salt,
     );
@@ -408,6 +433,7 @@ export class BatchSvmScheme implements SchemeNetworkClient {
           salt: channel.channel.salt.toString(),
           token: channel.channel.mint,
           withdrawDelay: channel.channel.gracePeriod,
+          ...(terms.voucherSigner === "server" ? { voucherSigner: "server" as const } : {}),
         },
         this.signer,
         channel.channel.settlement.settled,
@@ -468,11 +494,20 @@ export class BatchSvmScheme implements SchemeNetworkClient {
    */
   private async handlePaymentResponse(ctx: PaymentResponseContext): Promise<boolean> {
     const payload = ctx.paymentPayload.payload;
-    if (!isBatchPayload(payload) || (payload.type !== "voucher" && payload.type !== "deposit")) {
+    if (
+      !isBatchPayload(payload) ||
+      (payload.type !== "authorization" && payload.type !== "voucher" && payload.type !== "deposit")
+    ) {
       return false;
     }
     const pending = [...this.pending.values()].find(
-      candidate => candidate.tracker.channelId === payload.voucher.channelId,
+      candidate =>
+        candidate.tracker.channelId ===
+        (payload.type === "voucher"
+          ? payload.voucher.channelId
+          : payload.type === "authorization"
+            ? payload.authorization.channelId
+            : (payload.voucher?.channelId ?? payload.authorization?.channelId)),
     );
     if (!pending) return false;
     this.pending.delete(pending.key);
@@ -507,7 +542,7 @@ export class BatchSvmScheme implements SchemeNetworkClient {
     const confirmedCumulative = (pending.confirmed?.tracker.cumulative ?? 0n) + charged;
     const reported = extra?.channelState?.chargedCumulativeAmount;
     if (
-      extra?.commitmentId !== `${payload.voucher.channelId}:${pending.cumulative}` ||
+      extra?.commitmentId !== `${pending.tracker.channelId}:${pending.cumulative}` ||
       confirmedCumulative !== pending.cumulative ||
       (typeof reported === "string" && reported !== confirmedCumulative.toString())
     ) {
@@ -643,6 +678,8 @@ export class BatchSvmScheme implements SchemeNetworkClient {
       feePayer,
       withdrawDelay,
       requirements.extra?.receiverAuthorizer ?? "",
+      requirements.extra?.voucherSigner ?? "client",
+      requirements.extra?.operator ?? "",
     ].join(":");
   }
 
@@ -652,6 +689,8 @@ export class BatchSvmScheme implements SchemeNetworkClient {
     tokenProgram: string;
     withdrawDelay: number;
     memo?: string | undefined;
+    voucherSigner: "client" | "server";
+    operator?: string | undefined;
   }> {
     const extra = requirements.extra;
     if (!extra) throw new Error("requirements.extra is required");
@@ -689,12 +728,25 @@ export class BatchSvmScheme implements SchemeNetworkClient {
     if (memo !== undefined && typeof memo !== "string") {
       throw new Error("extra.memo must be a string when present");
     }
+    const voucherSigner = extra.voucherSigner ?? "client";
+    if (voucherSigner !== "client" && voucherSigner !== "server") {
+      throw new Error('extra.voucherSigner must be "client" or "server"');
+    }
+    const operator = extra.operator;
+    if (voucherSigner === "server" && (typeof operator !== "string" || operator.length === 0)) {
+      throw new Error("extra.operator is required for operator voucher signing");
+    }
+    if (voucherSigner === "client" && operator !== undefined) {
+      throw new Error("extra.operator is only valid for operator voucher signing");
+    }
     return {
       feePayer,
       ...(memo !== undefined ? { memo } : {}),
       ...(receiverAuthorizer !== undefined ? { receiverAuthorizer } : {}),
       tokenProgram,
       withdrawDelay,
+      voucherSigner,
+      ...(typeof operator === "string" ? { operator } : {}),
     };
   }
 }
