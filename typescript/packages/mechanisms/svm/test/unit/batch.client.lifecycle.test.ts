@@ -1,0 +1,480 @@
+import { generateKeyPairSigner } from "@solana/kit";
+import { fetchMint } from "@solana-program/token-2022";
+import type { PaymentRequirements } from "@x402/core/types";
+import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+
+import { BatchChannelTracker } from "../../src/batch-settlement/client/channel";
+import {
+  BatchSvmScheme,
+  type BatchClientChannelRecord,
+  type BatchClientChannelStorage,
+} from "../../src/batch-settlement/client/scheme";
+import type { BatchChannelConfig } from "../../src/batch-settlement/types";
+import { SOLANA_DEVNET_CAIP2, TOKEN_PROGRAM_ADDRESS } from "../../src/constants";
+import { USDC_DEVNET_ADDRESS, USDC_MAINNET_ADDRESS } from "../../src/defaultAssets";
+import { createRpcClient, resolveBlockhash, resolveOpenSlot } from "../../src/utils";
+
+vi.mock("@solana-program/token-2022", async importOriginal => ({
+  ...(await importOriginal<typeof import("@solana-program/token-2022")>()),
+  fetchMint: vi.fn(),
+}));
+
+vi.mock("../../src/utils", async importOriginal => ({
+  ...(await importOriginal<typeof import("../../src/utils")>()),
+  createRpcClient: vi.fn(() => ({
+    getProgramAccounts: vi.fn(() => ({ send: vi.fn().mockResolvedValue([]) })),
+  })),
+  resolveBlockhash: vi.fn(),
+  resolveOpenSlot: vi.fn(),
+}));
+
+const NETWORK = SOLANA_DEVNET_CAIP2;
+const MINT = USDC_DEVNET_ADDRESS;
+const RECEIVER = USDC_MAINNET_ADDRESS;
+const BLOCKHASH = USDC_MAINNET_ADDRESS;
+
+let payer: Awaited<ReturnType<typeof generateKeyPairSigner>>;
+let feePayer: Awaited<ReturnType<typeof generateKeyPairSigner>>;
+
+beforeAll(async () => {
+  payer = await generateKeyPairSigner();
+  feePayer = await generateKeyPairSigner();
+});
+
+beforeEach(() => {
+  vi.mocked(fetchMint).mockResolvedValue({ programAddress: TOKEN_PROGRAM_ADDRESS } as never);
+  vi.mocked(resolveBlockhash).mockResolvedValue({
+    blockhash: BLOCKHASH,
+    lastValidBlockHeight: 10n,
+  });
+  vi.mocked(resolveOpenSlot).mockResolvedValue(123n);
+  vi.mocked(createRpcClient).mockReturnValue({
+    getProgramAccounts: vi.fn(() => ({ send: vi.fn().mockResolvedValue([]) })),
+  } as never);
+});
+
+function requirements(overrides: Partial<PaymentRequirements> = {}): PaymentRequirements {
+  return {
+    amount: "1000",
+    asset: MINT,
+    extra: {
+      feePayer: feePayer.address,
+      tokenProgram: TOKEN_PROGRAM_ADDRESS,
+      withdrawDelay: 900,
+    },
+    maxTimeoutSeconds: 300,
+    network: NETWORK,
+    payTo: RECEIVER,
+    scheme: "batch-settlement",
+    ...overrides,
+  };
+}
+
+function memoryStorage() {
+  const records = new Map<string, BatchClientChannelRecord>();
+  const storage: BatchClientChannelStorage = {
+    delete: vi.fn(async key => void records.delete(key)),
+    get: vi.fn(async key => records.get(key)),
+    set: vi.fn(async (key, record) => void records.set(key, record)),
+  };
+  return { records, storage };
+}
+
+type ClientInternals = {
+  channels: Map<string, { tracker: BatchChannelTracker; deposit: bigint }>;
+  pending: Map<string, unknown>;
+  channelKey(requirements: PaymentRequirements, feePayer: string, withdrawDelay: number): string;
+  resolveTerms(requirements: PaymentRequirements): Promise<unknown>;
+  discoverChannel(requirements: PaymentRequirements, terms: unknown): Promise<unknown>;
+  loadChannel(key: string): Promise<unknown>;
+};
+
+function internals(client: BatchSvmScheme): ClientInternals {
+  return client as unknown as ClientInternals;
+}
+
+describe("batch client lifecycle", () => {
+  it("opens, replays, confirms, and advances a persisted channel", async () => {
+    const { records, storage } = memoryStorage();
+    const client = new BatchSvmScheme(payer, {
+      channelStorage: storage,
+      depositAmount: 3_000n,
+      discoverChannels: false,
+    });
+    const opened = await client.createPaymentPayload(2, requirements());
+    expect(opened.payload).toMatchObject({
+      type: "deposit",
+      deposit: { amount: "3000" },
+      voucher: { maxClaimableAmount: "1000" },
+    });
+
+    await expect(client.createPaymentPayload(2, requirements())).resolves.toEqual(opened);
+    await expect(client.createPaymentPayload(2, requirements({ amount: "2000" }))).rejects.toThrow(
+      /pending allocation for a different amount/,
+    );
+
+    await client.schemeHooks.onPaymentResponse!({
+      paymentPayload: { accepted: requirements(), ...opened },
+      requirements: requirements(),
+      settleResponse: {
+        extra: {
+          chargedAmount: "1000",
+          channelState: { chargedCumulativeAmount: "1000" },
+          commitmentId: `${opened.payload.voucher.channelId}:1000`,
+        },
+        success: true,
+      },
+    } as never);
+    expect([...records.values()][0]).toMatchObject({
+      chargedCumulativeAmount: "1000",
+      deposit: "3000",
+    });
+
+    const next = await client.createPaymentPayload(2, requirements());
+    expect(next.payload).toMatchObject({
+      type: "voucher",
+      voucher: { maxClaimableAmount: "2000" },
+    });
+    await client.schemeHooks.onPaymentResponse!({
+      paymentPayload: { accepted: requirements(), ...next },
+      requirements: requirements(),
+      settleResponse: {
+        extra: {
+          chargedAmount: "1000",
+          commitmentId: `${next.payload.voucher.channelId}:2000`,
+        },
+        success: true,
+      },
+    } as never);
+    expect([...records.values()][0]).toMatchObject({
+      chargedCumulativeAmount: "2000",
+      deposit: "3000",
+    });
+
+    const invalidResponse = await client.createPaymentPayload(2, requirements());
+    await expect(
+      client.schemeHooks.onPaymentResponse!({
+        paymentPayload: { accepted: requirements(), ...invalidResponse },
+        requirements: requirements(),
+        settleResponse: { extra: { chargedAmount: "bad" }, success: true },
+      } as never),
+    ).rejects.toThrow(/charged more than/);
+  });
+
+  it("tops up an exhausted channel and commits only the signed deposit", async () => {
+    const { records, storage } = memoryStorage();
+    const client = new BatchSvmScheme(payer, {
+      channelStorage: storage,
+      depositAmount: 1_500n,
+      discoverChannels: false,
+    });
+    const api = internals(client);
+    const config: BatchChannelConfig = {
+      openSlot: 123,
+      payer: payer.address,
+      payerAuthorizer: payer.address,
+      receiver: RECEIVER,
+      salt: "0",
+      token: MINT,
+      withdrawDelay: 900,
+    };
+    const key = api.channelKey(requirements(), feePayer.address, 900);
+    const tracker = new BatchChannelTracker(RECEIVER, config, payer, 1_000n);
+    api.channels.set(key, { deposit: 1_000n, tracker });
+
+    const topUp = await client.createPaymentPayload(2, requirements());
+    expect(topUp.payload).toMatchObject({
+      type: "deposit",
+      deposit: { amount: "1500" },
+      voucher: { maxClaimableAmount: "2000" },
+    });
+    await client.schemeHooks.onPaymentResponse!({
+      paymentPayload: { accepted: requirements(), ...topUp },
+      requirements: requirements(),
+      settleResponse: {
+        extra: {
+          chargedAmount: "1000",
+          channelState: { balance: "999999", chargedCumulativeAmount: "2000" },
+          commitmentId: `${RECEIVER}:2000`,
+        },
+        success: true,
+      },
+    } as never);
+    expect(records.get(key)).toMatchObject({ chargedCumulativeAmount: "2000", deposit: "2500" });
+  });
+
+  it("tops up by the exact shortfall when the configured increment is smaller", async () => {
+    const client = new BatchSvmScheme(payer, {
+      depositAmount: 500n,
+      discoverChannels: false,
+    });
+    const api = internals(client);
+    const config: BatchChannelConfig = {
+      openSlot: 123,
+      payer: payer.address,
+      payerAuthorizer: payer.address,
+      receiver: RECEIVER,
+      salt: "0",
+      token: MINT,
+      withdrawDelay: 900,
+    };
+    const key = api.channelKey(requirements(), feePayer.address, 900);
+    api.channels.set(key, {
+      deposit: 1_000n,
+      tracker: new BatchChannelTracker(RECEIVER, config, payer, 1_000n),
+    });
+    await expect(client.createPaymentPayload(2, requirements())).resolves.toMatchObject({
+      payload: { deposit: { amount: "1000" }, type: "deposit" },
+    });
+  });
+
+  it("uses the request charge as the default top-up increment", async () => {
+    const client = new BatchSvmScheme(payer, { discoverChannels: false });
+    const api = internals(client);
+    const config: BatchChannelConfig = {
+      openSlot: 123,
+      payer: payer.address,
+      payerAuthorizer: payer.address,
+      receiver: RECEIVER,
+      salt: "0",
+      token: MINT,
+      withdrawDelay: 900,
+    };
+    api.channels.set(api.channelKey(requirements(), feePayer.address, 900), {
+      deposit: 1_000n,
+      tracker: new BatchChannelTracker(RECEIVER, config, payer, 1_000n),
+    });
+    await expect(client.createPaymentPayload(2, requirements())).resolves.toMatchObject({
+      payload: { deposit: { amount: "1000" }, type: "deposit" },
+    });
+  });
+
+  it("treats empty and failed discovery scans as cache misses", async () => {
+    const client = new BatchSvmScheme(payer);
+    const api = internals(client);
+    const terms = {
+      feePayer: feePayer.address,
+      tokenProgram: TOKEN_PROGRAM_ADDRESS,
+      withdrawDelay: 900,
+    };
+    await expect(api.discoverChannel(requirements(), terms)).resolves.toBeUndefined();
+    vi.mocked(createRpcClient).mockReturnValue({
+      getProgramAccounts: vi.fn(() => ({ send: vi.fn().mockRejectedValue(new Error("rpc")) })),
+    } as never);
+    await expect(api.discoverChannel(requirements(), terms)).resolves.toBeUndefined();
+  });
+
+  it("adopts a discovered channel before allocating a voucher", async () => {
+    const { records, storage } = memoryStorage();
+    const client = new BatchSvmScheme(payer, { channelStorage: storage });
+    const api = internals(client);
+    const config: BatchChannelConfig = {
+      openSlot: 123,
+      payer: payer.address,
+      payerAuthorizer: payer.address,
+      receiver: RECEIVER,
+      salt: "0",
+      token: MINT,
+      withdrawDelay: 900,
+    };
+    api.discoverChannel = vi.fn().mockResolvedValue({
+      deposit: 5_000n,
+      tracker: new BatchChannelTracker(RECEIVER, config, payer, 1_000n),
+    });
+    await expect(client.createPaymentPayload(2, requirements())).resolves.toMatchObject({
+      payload: { type: "voucher", voucher: { maxClaimableAmount: "2000" } },
+    });
+    expect([...records.values()][0]).toMatchObject({ chargedCumulativeAmount: "1000" });
+  });
+
+  it("restores confirmed state after a failed request", async () => {
+    const { records, storage } = memoryStorage();
+    const client = new BatchSvmScheme(payer, { channelStorage: storage });
+    const api = internals(client);
+    const config: BatchChannelConfig = {
+      openSlot: 123,
+      payer: payer.address,
+      payerAuthorizer: payer.address,
+      receiver: RECEIVER,
+      salt: "0",
+      token: MINT,
+      withdrawDelay: 900,
+    };
+    const key = api.channelKey(requirements(), feePayer.address, 900);
+    api.channels.set(key, {
+      deposit: 5_000n,
+      tracker: new BatchChannelTracker(RECEIVER, config, payer, 1_000n),
+    });
+    const payment = await client.createPaymentPayload(2, requirements());
+    await client.schemeHooks.onPaymentResponse!({
+      paymentPayload: { accepted: requirements(), ...payment },
+      requirements: requirements(),
+      settleResponse: { success: false },
+    } as never);
+    expect(records.get(key)).toMatchObject({ chargedCumulativeAmount: "1000", deposit: "5000" });
+  });
+
+  it("rejects corrective responses without the required trustworthy state", async () => {
+    const corrections = [
+      { accepts: [requirements()], error: "other" },
+      {
+        accepts: [requirements()],
+        error: "invalid_batch_settlement_svm_cumulative_amount_mismatch",
+      },
+      {
+        accepts: [
+          requirements({
+            extra: {
+              ...requirements().extra,
+              channelState: {
+                balance: "10000",
+                channelId: RECEIVER,
+                chargedCumulativeAmount: "1",
+                totalClaimed: "2",
+                withdrawRequestedAt: 0,
+              },
+            },
+          }),
+        ],
+        error: "invalid_batch_settlement_svm_cumulative_amount_mismatch",
+      },
+    ];
+    for (const paymentRequired of corrections) {
+      const client = new BatchSvmScheme(payer, { discoverChannels: false });
+      const payment = await client.createPaymentPayload(2, requirements());
+      await expect(
+        client.schemeHooks.onPaymentResponse!({
+          paymentPayload: { accepted: requirements(), ...payment },
+          paymentRequired: { ...paymentRequired, x402Version: 2 },
+          requirements: requirements(),
+          settleResponse: { success: false },
+        } as never),
+      ).resolves.toBeUndefined();
+    }
+  });
+
+  it("hydrates confirmed and pending records and ignores unrelated responses", async () => {
+    const { records, storage } = memoryStorage();
+    const config: BatchChannelConfig = {
+      openSlot: 123,
+      payer: payer.address,
+      payerAuthorizer: payer.address,
+      receiver: RECEIVER,
+      salt: "0",
+      token: MINT,
+      withdrawDelay: 900,
+    };
+    records.set("confirmed", {
+      channelConfig: config,
+      channelId: RECEIVER,
+      chargedCumulativeAmount: "1000",
+      deposit: "5000",
+    });
+    const client = new BatchSvmScheme(payer, { channelStorage: storage });
+    await expect(internals(client).loadChannel("confirmed")).resolves.toMatchObject({
+      deposit: 5_000n,
+    });
+    expect(await internals(client).loadChannel("confirmed")).toBeDefined();
+    await expect(internals(client).loadChannel("missing")).resolves.toBeUndefined();
+    await expect(
+      client.schemeHooks.onPaymentResponse!({
+        paymentPayload: {
+          accepted: requirements(),
+          payload: { type: "not-batch" },
+          x402Version: 2,
+        },
+        requirements: requirements(),
+      } as never),
+    ).resolves.toBeUndefined();
+    const voucher = await new BatchChannelTracker(RECEIVER, config, payer).previewVoucher(1_000n);
+    await expect(
+      client.schemeHooks.onPaymentResponse!({
+        paymentPayload: {
+          accepted: requirements(),
+          payload: { channelConfig: config, type: "voucher", voucher },
+          x402Version: 2,
+        },
+        requirements: requirements(),
+        settleResponse: { success: false },
+      } as never),
+    ).resolves.toBeUndefined();
+  });
+
+  it("validates client terms and configuration boundaries", async () => {
+    const client = new BatchSvmScheme(payer);
+    const resolve = (value: PaymentRequirements) => internals(client).resolveTerms(value);
+    await expect(resolve(requirements())).resolves.toMatchObject({
+      feePayer: feePayer.address,
+      tokenProgram: TOKEN_PROGRAM_ADDRESS,
+      withdrawDelay: 900,
+    });
+    await expect(
+      resolve(
+        requirements({
+          extra: {
+            ...requirements().extra,
+            memo: "invoice",
+            receiverAuthorizer: payer.address,
+          },
+        }),
+      ),
+    ).resolves.toMatchObject({ memo: "invoice", receiverAuthorizer: payer.address });
+    const invalid = [
+      requirements({ extra: undefined }),
+      requirements({ extra: { ...requirements().extra, paymentFlow: "upfront" } }),
+      requirements({ extra: { ...requirements().extra, feePayer: "" } }),
+      requirements({ extra: { ...requirements().extra, withdrawDelay: 899 } }),
+      requirements({ extra: { ...requirements().extra, tokenProgram: payer.address } }),
+      requirements({ extra: { ...requirements().extra, receiverAuthorizer: 1 } }),
+      requirements({ extra: { ...requirements().extra, memo: 1 } }),
+    ];
+    for (const value of invalid) await expect(resolve(value)).rejects.toThrow();
+
+    vi.mocked(fetchMint).mockResolvedValueOnce({ programAddress: payer.address } as never);
+    await expect(resolve(requirements())).rejects.toThrow(/does not own/);
+    await expect(
+      new BatchSvmScheme(payer, { salt: "bad" }).createPaymentPayload(2, requirements()),
+    ).rejects.toThrow();
+    await expect(
+      new BatchSvmScheme(payer, {
+        depositAmount: 999n,
+        discoverChannels: false,
+      }).createPaymentPayload(2, requirements()),
+    ).rejects.toThrow(/must cover/);
+    await expect(
+      new BatchSvmScheme(payer).createPaymentPayload(2, requirements({ amount: "0" })),
+    ).rejects.toThrow(/must be positive/);
+    await expect(
+      new BatchSvmScheme(payer, { discoverChannels: false }).createPaymentPayload(
+        2,
+        requirements(),
+      ),
+    ).resolves.toMatchObject({ payload: { deposit: { amount: "1000" }, type: "deposit" } });
+  });
+
+  it("builds a refund from a cached channel and rejects a missing one", async () => {
+    const client = new BatchSvmScheme(payer, { discoverChannels: false });
+    const api = internals(client);
+    const config: BatchChannelConfig = {
+      openSlot: 123,
+      payer: payer.address,
+      payerAuthorizer: payer.address,
+      receiver: RECEIVER,
+      salt: "0",
+      token: MINT,
+      withdrawDelay: 900,
+    };
+    const key = api.channelKey(requirements(), feePayer.address, 900);
+    api.channels.set(key, {
+      deposit: 5_000n,
+      tracker: new BatchChannelTracker(RECEIVER, config, payer, 1_000n),
+    });
+    await expect(client.createRefundPayload(2, requirements())).resolves.toMatchObject({
+      x402Version: 2,
+      payload: { type: "refund" },
+    });
+    await expect(
+      new BatchSvmScheme(payer, { discoverChannels: false }).createRefundPayload(2, requirements()),
+    ).rejects.toThrow(/no batch-settlement channel/);
+  });
+});
