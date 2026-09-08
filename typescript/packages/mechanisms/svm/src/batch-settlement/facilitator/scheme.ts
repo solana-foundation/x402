@@ -16,6 +16,7 @@ import {
   type DiscoveredChannel,
 } from "../../payment-channels/discovery";
 import { getChannelDecoder, type Channel } from "../../payment-channels/generated/accounts/channel";
+import { AccountDiscriminator } from "../../payment-channels/generated/types/accountDiscriminator";
 import {
   buildDistributeInstruction,
   buildSettleInstructions,
@@ -71,6 +72,7 @@ const MIN_WITHDRAW_DELAY = 900;
 const MAX_WITHDRAW_DELAY = 2_592_000;
 const CHANNEL_READ_ATTEMPTS = 5;
 const CHANNEL_READ_INITIAL_BACKOFF_MS = 200;
+const CHANNEL_BUSY = "duplicate_settlement";
 
 /** Four Ed25519+settle pairs fit under Solana's transaction packet limit. */
 export const MAX_CHANNELS_PER_SETTLE_TX = 4;
@@ -521,9 +523,12 @@ export class BatchSvmScheme implements SchemeNetworkFacilitator {
   ): Promise<SettleResponse> {
     const validated = await this.validateDeposit(payload, requirements);
     const { channelId, terms } = validated;
-    // A channel can be opened once and topped up many times. Deduplicate only
-    // an identical signed setup transaction, never all deposits for a channel.
-    const key = `batch:deposit:${requirements.network}:${payload.deposit.transaction}`;
+    // Serialize opens by channel so two distinct signed setup transactions
+    // cannot race for the same PDA. Top-ups remain transaction-scoped because
+    // a channel can legitimately receive several of them within the cache TTL.
+    const key = validated.isTopUp
+      ? `batch:topup:${requirements.network}:${payload.deposit.transaction}`
+      : `batch:deposit:${requirements.network}:${channelId}`;
     if ((await this.readChannel(requirements.network, channelId)) && !validated.isTopUp) {
       const existing = await this.fetchChannel(requirements.network, channelId);
       this.assertDepositChannel(existing, validated, requirements);
@@ -532,40 +537,52 @@ export class BatchSvmScheme implements SchemeNetworkFacilitator {
     if (this.settlementCache.isDuplicate(key)) {
       return this.settleFailure(payment, "duplicate_settlement", payload.channelConfig.payer);
     }
-    if (validated.isTopUp) {
-      // Simulated unsigned: `sigVerify` is off, so the fee payer's signature
-      // adds nothing here, and not asking for it keeps simulation portable
-      // across signer backends that will not sign the same bytes twice.
-      await this.signer.simulateTransaction(payload.deposit.transaction, requirements.network);
-    } else {
-      // The only read still on its own client: this shared helper simulates
-      // the open/settle/distribute chain through an rpc of its own, and is
-      // used by `upto` too.
-      await simulateOpenSettleDistribute(
-        terms.feePayerSigner,
-        createRpcClient(requirements.network, this.config.rpcUrl),
-        {
-          channel: {
-            channelId,
-            mint: requirements.asset,
-            network: requirements.network,
-            payee: terms.feePayer,
-            payer: payload.channelConfig.payer,
-            rentPayer: terms.feePayer,
-            splits: [{ bps: 10_000, recipient: requirements.payTo }],
-            tokenProgram: terms.tokenProgram,
+    try {
+      if (validated.isTopUp) {
+        // Simulated unsigned: `sigVerify` is off, so the fee payer's signature
+        // adds nothing here, and not asking for it keeps simulation portable
+        // across signer backends that will not sign the same bytes twice.
+        await this.signer.simulateTransaction(payload.deposit.transaction, requirements.network);
+      } else {
+        // The only read still on its own client: this shared helper simulates
+        // the open/settle/distribute chain through an rpc of its own, and is
+        // used by `upto` too.
+        await simulateOpenSettleDistribute(
+          terms.feePayerSigner,
+          createRpcClient(requirements.network, this.config.rpcUrl),
+          {
+            channel: {
+              channelId,
+              mint: requirements.asset,
+              network: requirements.network,
+              payee: terms.feePayer,
+              payer: payload.channelConfig.payer,
+              rentPayer: terms.feePayer,
+              splits: [{ bps: 10_000, recipient: requirements.payTo }],
+              tokenProgram: terms.tokenProgram,
+            },
+            openTransactionBase64: payload.deposit.transaction,
           },
-          openTransactionBase64: payload.deposit.transaction,
-        },
-      );
+        );
+      }
+    } catch (error) {
+      this.settlementCache.delete(key);
+      throw new Error(`${BatchError.SETTLEMENT_SIMULATION}: ${String(error)}`);
     }
-    await this.trackChannel({
-      channelId,
-      expiresAt: payload.voucher.expiresAt,
-      network: requirements.network,
-      payTo: requirements.payTo,
-      tokenProgram: terms.tokenProgram,
-    });
+    try {
+      await this.trackChannel({
+        channelId,
+        expiresAt: payload.voucher.expiresAt,
+        network: requirements.network,
+        payTo: requirements.payTo,
+        tokenProgram: terms.tokenProgram,
+      });
+    } catch (error) {
+      // No transaction has been broadcast. Release the channel lock so a
+      // caller can safely retry once durable indexing is healthy again.
+      this.settlementCache.delete(key);
+      throw error;
+    }
     const broadcast = await this.broadcastDurably(
       key,
       requirements.network,
@@ -1039,6 +1056,7 @@ export class BatchSvmScheme implements SchemeNetworkFacilitator {
       { bps: 10_000, recipient: requirements.payTo },
     ]);
     if (
+      channel.discriminator !== AccountDiscriminator.Channel ||
       !allowedStatuses.includes(channel.status as ChannelStatus) ||
       channel.payer !== config.payer ||
       channel.payee !== terms.feePayer ||
@@ -1180,6 +1198,7 @@ function refundResponse(
 
 function classifyError(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
+  if (message.includes(CHANNEL_BUSY)) return CHANNEL_BUSY;
   const known = Object.values(BatchError).find(value => message.includes(value));
   return known ?? "transaction_failed";
 }

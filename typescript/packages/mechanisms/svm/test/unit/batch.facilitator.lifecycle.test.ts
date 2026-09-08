@@ -172,6 +172,10 @@ type FacilitatorInternals = {
   assertExpiry(expiresAt: number): void;
   assertClaimChannel: ReturnType<typeof vi.fn>;
   readChannel: ReturnType<typeof vi.fn>;
+  settlementCache: {
+    delete: ReturnType<typeof vi.fn>;
+    isDuplicate: ReturnType<typeof vi.fn>;
+  };
 };
 
 function internals(scheme: BatchSvmScheme): FacilitatorInternals {
@@ -306,6 +310,7 @@ describe("batch facilitator lifecycle", () => {
         allowed,
       );
     const mutations: Channel[] = [
+      channel({ discriminator: 0 }),
       channel({ status: ChannelStatus.Closing }),
       channel({ payer: address(feePayer.address) }),
       channel({ payee: address(payer.address) }),
@@ -556,6 +561,21 @@ describe("batch facilitator lifecycle", () => {
       errorReason: BatchError.VOUCHER_SIGNATURE,
       errorMessage: BatchError.VOUCHER_SIGNATURE,
     });
+    api.settleVoucher = vi.fn().mockRejectedValue(new Error("duplicate_settlement: channel busy"));
+    await expect(
+      scheme.settle(
+        {
+          accepted: requirements(),
+          payload: {
+            channelConfig,
+            type: "voucher",
+            voucher: { channelId, expiresAt: 0, maxClaimableAmount: "1", signature: "x" },
+          },
+          x402Version: 2,
+        } as never,
+        requirements(),
+      ),
+    ).resolves.toMatchObject({ success: false, errorReason: "duplicate_settlement" });
     await expect(
       scheme.settle(
         { accepted: requirements(), payload: { type: "bad" }, x402Version: 2 } as never,
@@ -667,6 +687,101 @@ describe("batch facilitator lifecycle", () => {
         requirements(),
       ),
     ).resolves.toMatchObject({ success: true, transaction: SIGNATURE });
+  });
+
+  it("serializes opens by channel and releases the lock before broadcast failures", async () => {
+    const facilitatorSigner = signer();
+    const scheme = new BatchSvmScheme(facilitatorSigner as never);
+    const api = internals(scheme);
+    const terms = {
+      feePayer: feePayer.address,
+      feePayerSigner: feePayer,
+      tokenProgram: TOKEN_PROGRAM_ADDRESS,
+      withdrawDelay: 900,
+    };
+    const deposit = {
+      channelConfig,
+      deposit: { amount: "1000", transaction: "open-a" },
+      type: "deposit" as const,
+      voucher: await signBatchVoucher(payer, {
+        channelId,
+        expiresAt: 0,
+        maxClaimableAmount: 1_000n,
+      }),
+    };
+    api.validateDeposit = vi.fn().mockResolvedValue({
+      channelId,
+      deposit: 1_000n,
+      expectedDeposit: 1_000n,
+      isTopUp: false,
+      payload: deposit,
+      terms,
+    });
+    api.readChannel = vi.fn().mockResolvedValue(undefined);
+    const isDuplicate = vi.fn().mockReturnValue(true);
+    api.settlementCache = { delete: vi.fn(), isDuplicate };
+
+    for (const transaction of ["open-a", "open-b"]) {
+      await expect(
+        api.settleDeposit(
+          { accepted: requirements(), payload: deposit, x402Version: 2 },
+          { ...deposit, deposit: { amount: "1000", transaction } },
+          requirements(),
+        ),
+      ).resolves.toMatchObject({ errorReason: "duplicate_settlement", success: false });
+    }
+    expect(isDuplicate.mock.calls.map(([key]) => key)).toEqual([
+      `batch:deposit:${NETWORK}:${channelId}`,
+      `batch:deposit:${NETWORK}:${channelId}`,
+    ]);
+
+    const simulation = new BatchSvmScheme(
+      signer({
+        simulateTransaction: vi.fn().mockRejectedValue(new Error("bad simulation")),
+      }) as never,
+    );
+    const simulationApi = internals(simulation);
+    simulationApi.validateDeposit = vi.fn().mockResolvedValue({
+      channelId,
+      deposit: 1_000n,
+      expectedDeposit: 11_000n,
+      isTopUp: true,
+      payload: deposit,
+      terms,
+    });
+    simulationApi.readChannel = vi.fn().mockResolvedValue(undefined);
+    const simulationDelete = vi.fn();
+    simulationApi.settlementCache = {
+      delete: simulationDelete,
+      isDuplicate: vi.fn().mockReturnValue(false),
+    };
+    await expect(
+      simulationApi.settleDeposit(
+        { accepted: requirements(), payload: deposit, x402Version: 2 },
+        deposit,
+        requirements(),
+      ),
+    ).rejects.toThrow(BatchError.SETTLEMENT_SIMULATION);
+    expect(simulationDelete).toHaveBeenCalledWith(`batch:topup:${NETWORK}:open-a`);
+
+    const indexing = new BatchSvmScheme(signer() as never);
+    const indexingApi = internals(indexing);
+    indexingApi.validateDeposit = simulationApi.validateDeposit;
+    indexingApi.readChannel = vi.fn().mockResolvedValue(undefined);
+    indexingApi.trackChannel = vi.fn().mockRejectedValue(new Error("storage unavailable"));
+    const indexingDelete = vi.fn();
+    indexingApi.settlementCache = {
+      delete: indexingDelete,
+      isDuplicate: vi.fn().mockReturnValue(false),
+    };
+    await expect(
+      indexingApi.settleDeposit(
+        { accepted: requirements(), payload: deposit, x402Version: 2 },
+        deposit,
+        requirements(),
+      ),
+    ).rejects.toThrow("storage unavailable");
+    expect(indexingDelete).toHaveBeenCalledWith(`batch:topup:${NETWORK}:open-a`);
   });
 
   it("prepares and confirms a voucher claim batch", async () => {

@@ -468,7 +468,7 @@ describe("batch server lifecycle boundaries", () => {
     ).resolves.toMatchObject({ abort: true, reason: BatchError.CUMULATIVE_AMOUNT_MISMATCH });
   });
 
-  it("serves an exact replay only from the configured response cache", async () => {
+  it("rejects an exact replay before the resource handler", async () => {
     const replayState = state({
       chargedCumulativeAmount: 1_000n,
       highestVoucherSignature: depositPayload.voucher.signature,
@@ -483,49 +483,17 @@ describe("batch server lifecycle boundaries", () => {
       },
       x402Version: 2,
     });
-    const missingStore = new MemoryChannelStore();
-    await missingStore.put(replayState);
-    const missing = new BatchSvmScheme({ store: missingStore });
+    const store = new MemoryChannelStore();
+    await store.put(replayState);
+    const server = new BatchSvmScheme({ store });
     const payment = makePayment();
-    const ctx = { declaredExtensions: {}, paymentPayload: payment, requirements: requirements() };
-    const before = await missing.schemeHooks.onBeforeVerify!(ctx);
-    expect(before).toMatchObject({ skip: true });
-    missingStore.get = async () => undefined;
     await expect(
-      missing.schemeHooks.onAfterVerify!({
-        ...ctx,
-        result: { isValid: true, payer: payer.address },
-      }),
-    ).resolves.toMatchObject({ abort: true, reason: BatchError.CHANNEL_STATE });
-
-    const noCacheStore = new MemoryChannelStore();
-    await noCacheStore.put(replayState);
-    const noCache = new BatchSvmScheme({ store: noCacheStore });
-    const payment2 = makePayment();
-    const ctx2 = { ...ctx, paymentPayload: payment2 };
-    await noCache.schemeHooks.onBeforeVerify!(ctx2);
-    await expect(
-      noCache.schemeHooks.onAfterVerify!({
-        ...ctx2,
-        result: { isValid: true, payer: payer.address },
+      server.schemeHooks.onBeforeVerify!({
+        declaredExtensions: {},
+        paymentPayload: payment,
+        requirements: requirements(),
       }),
     ).resolves.toMatchObject({ abort: true, reason: "duplicate_settlement" });
-
-    const cacheStore = new MemoryChannelStore();
-    await cacheStore.put(replayState);
-    const cached = new BatchSvmScheme({
-      getReplayResponse: async () => ({ body: { replayed: true }, status: 200 }),
-      store: cacheStore,
-    });
-    const payment3 = makePayment();
-    const ctx3 = { ...ctx, paymentPayload: payment3 };
-    await cached.schemeHooks.onBeforeVerify!(ctx3);
-    await expect(
-      cached.schemeHooks.onAfterVerify!({
-        ...ctx3,
-        result: { isValid: true, payer: payer.address },
-      }),
-    ).resolves.toMatchObject({ skipHandler: true, response: { body: { replayed: true } } });
   });
 
   it("rejects busy, closing, and mismatched stored channel reservations", async () => {

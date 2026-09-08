@@ -43,7 +43,6 @@ type SvmStablecoinSymbol = "USDC" | "USDT" | "USDG" | "PYUSD" | "CASH";
 type RequestContext = {
   channelId: string;
   pendingId?: string;
-  replay?: boolean;
   /**
    * Set when this server held no record for the channel, so the cumulative
    * rule could not be applied before the facilitator confirmed onchain state.
@@ -61,13 +60,6 @@ export interface BatchSvmServerConfig {
   withdrawDelay?: number | undefined;
   receiverAuthorizer?: string | undefined;
   store?: ChannelStore | undefined;
-  /** Resolve the application response cached under a replayed commitment. */
-  getReplayResponse?:
-    | ((commitment: {
-        channelId: string;
-        commitmentId: string;
-      }) => Promise<SkipHandlerDirective | undefined>)
-    | undefined;
 }
 
 /**
@@ -250,10 +242,11 @@ export class BatchSvmScheme implements SchemeNetworkServer {
           state !== undefined &&
           submitted === state.chargedCumulativeAmount &&
           raw.voucher.signature === state.highestVoucherSignature;
+        if (replay) throw new Error(CHANNEL_BUSY);
         if (!replay && submitted !== expected) {
           throw new Error(BatchError.CUMULATIVE_AMOUNT_MISMATCH);
         }
-        this.requestContexts.set(ctx.paymentPayload, { channelId, replay });
+        this.requestContexts.set(ctx.paymentPayload, { channelId });
       } else {
         if (!state) throw new Error(BatchError.CHANNEL_STATE);
         this.requestContexts.set(ctx.paymentPayload, { channelId });
@@ -282,26 +275,6 @@ export class BatchSvmScheme implements SchemeNetworkServer {
     if (!ctx.result.isValid || !isBatchPayload(raw)) return;
     const request = this.requestContexts.get(ctx.paymentPayload);
     if (!request) return this.abort(BatchError.CHANNEL_STATE, "missing request state");
-    if (request.replay) {
-      const state = await this.store.get(request.channelId);
-      if (!state) return this.abort(BatchError.CHANNEL_STATE, "missing replay state");
-      const commitmentId = `${state.channelId}:${state.signedMaxClaimable}`;
-      const response = await this.config.getReplayResponse?.({
-        channelId: state.channelId,
-        commitmentId,
-      });
-      if (!response) {
-        return this.abort(
-          CHANNEL_BUSY,
-          `cached application response unavailable for ${commitmentId}`,
-        );
-      }
-      return {
-        skipHandler: true,
-        response,
-      };
-    }
-
     // The facilitator has now confirmed this payload against onchain state and
     // returned the channel snapshot. Persisting it is what lets a server with
     // no record of a live channel serve it, and what keeps `deposit`, `settled`
@@ -378,12 +351,6 @@ export class BatchSvmScheme implements SchemeNetworkServer {
     if (!isBatchPayload(raw) || raw.type === "refund") return;
 
     const request = this.requestContexts.get(ctx.paymentPayload);
-    if (request?.replay) {
-      const state = await this.store.get(request.channelId);
-      this.requestContexts.delete(ctx.paymentPayload);
-      if (!state) return this.abort(BatchError.CHANNEL_STATE, "missing replay state");
-      return { skip: true, result: acceptedResponse(state, ctx.requirements) };
-    }
     if (!request?.pendingId) return this.abort(CHANNEL_BUSY, "missing reservation");
     const state = await this.store.get(request.channelId);
     if (!state || state.pendingRequest?.id !== request.pendingId) {
@@ -737,10 +704,7 @@ function acceptedResponse(state: ChannelState, requirements: PaymentRequirements
     amount: "",
     extra: {
       channelState: snapshot(state),
-      // The fixed per-request price, on a fresh acceptance and on a replay
-      // alike: a replay answers an authorization that was already charged this
-      // amount, so reporting zero would tell the client it paid nothing for a
-      // request it did pay for.
+      // The fixed per-request price charged by this acceptance.
       chargedAmount: requirements.amount,
       commitmentId: `${state.channelId}:${state.pendingRequest?.maxClaimableAmount ?? state.signedMaxClaimable}`,
     },
@@ -843,5 +807,6 @@ function confirmedDeposit(current: bigint, confirmed: string | undefined): bigin
 
 function classifyError(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
+  if (message.includes(CHANNEL_BUSY)) return CHANNEL_BUSY;
   return Object.values(BatchError).find(value => message.includes(value)) ?? "transaction_failed";
 }

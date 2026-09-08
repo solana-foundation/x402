@@ -528,7 +528,7 @@ describe("batch-settlement SVM", () => {
       expect(enriched?.[0]?.extra?.voucherState).toBeUndefined();
     });
 
-    it("reports the real charged amount when settling a replay", async () => {
+    it("rejects an exact replay before the resource handler", async () => {
       const store = new MemoryChannelStore();
       const voucher = await signedVoucher(1_000n);
       await store.put(
@@ -549,61 +549,9 @@ describe("batch-settlement SVM", () => {
         },
         requirements: requirements(),
       };
-      await server.schemeHooks.onBeforeVerify!(context);
-
-      const settled = await server.schemeHooks.onBeforeSettle!({
-        ...context,
-        phase: "after-handler",
-      });
-      // The replayed authorization was charged the request price. Reporting
-      // zero would tell the client it paid nothing for a request it paid for.
-      expect(settled).toMatchObject({
-        result: {
-          extra: { chargedAmount: "1000", commitmentId: `${channelId}:1000` },
-          success: true,
-        },
-        skip: true,
-      });
-    });
-
-    it("re-serves an exact replay only through the application response cache", async () => {
-      const store = new MemoryChannelStore();
-      const voucher = await signedVoucher(1_000n);
-      await store.put(
-        serverState({
-          chargedCumulativeAmount: 1_000n,
-          highestVoucherExpiresAt: voucher.expiresAt,
-          highestVoucherSignature: voucher.signature,
-          signedMaxClaimable: 1_000n,
-        }),
-      );
-      const server = new BatchServerScheme({
-        getReplayResponse: async commitment => ({ body: { commitment, replay: true } }),
-        store,
-      });
-      const payment = {
-        accepted: requirements(),
-        payload: { channelConfig, type: "voucher" as const, voucher },
-        x402Version: 2,
-      };
-      const context = {
-        declaredExtensions: {},
-        paymentPayload: payment,
-        requirements: requirements(),
-      };
-      const verified = await server.schemeHooks.onBeforeVerify!(context);
-      const replay = await server.schemeHooks.onAfterVerify!({
-        ...context,
-        result: (verified as { result: { isValid: true; payer: string } }).result,
-      });
-      expect(replay).toMatchObject({
-        response: {
-          body: {
-            commitment: { channelId, commitmentId: `${channelId}:1000` },
-            replay: true,
-          },
-        },
-        skipHandler: true,
+      await expect(server.schemeHooks.onBeforeVerify!(context)).resolves.toMatchObject({
+        abort: true,
+        reason: "duplicate_settlement",
       });
     });
   });
@@ -743,7 +691,7 @@ describe("batch-settlement SVM", () => {
       const result = await client.schemeHooks.onPaymentResponse!({
         paymentPayload: { accepted: requirements(), ...voucherPayment(stale) },
         paymentRequired: {
-          accepts: [corrective],
+          accepts: [requirements({ network: "solana:other" }), corrective],
           error: BatchError.CUMULATIVE_AMOUNT_MISMATCH,
           x402Version: 2,
         },

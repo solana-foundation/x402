@@ -516,7 +516,10 @@ export class BatchSvmScheme implements SchemeNetworkClient {
   ): Promise<boolean> {
     if (paymentRequired.error !== BatchError.CUMULATIVE_AMOUNT_MISMATCH) return false;
     const accept = paymentRequired.accepts.find(
-      candidate => candidate.scheme === BATCH_SETTLEMENT_SCHEME,
+      candidate =>
+        candidate.scheme === BATCH_SETTLEMENT_SCHEME &&
+        (candidate.extra?.channelState as BatchChannelState | undefined)?.channelId ===
+          pending.tracker.channelId,
     );
     const channelState = accept?.extra?.channelState as BatchChannelState | undefined;
     if (!channelState?.chargedCumulativeAmount) return false;

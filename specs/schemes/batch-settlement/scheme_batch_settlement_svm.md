@@ -1,6 +1,6 @@
 # SVM `batch-settlement` Scheme: High-Throughput Channel Payments on Solana
 
-> Status: **draft**. Companion to the network-agnostic
+> Companion to the network-agnostic
 > [`scheme_batch_settlement.md`](https://github.com/x402-foundation/x402/blob/main/specs/schemes/batch-settlement/scheme_batch_settlement.md).
 > This document specifies how the `batch-settlement` scheme is realized on
 > Solana Virtual Machine (SVM) networks.
@@ -1296,12 +1296,16 @@ server has authenticated that close. After the grace period, anyone can call
 
 The cumulative voucher and payment-channel state machine prevent duplicate
 token movement, but HTTP retries still require explicit operation-level
-idempotency:
+idempotency. Batch settlement does not define application-response caching;
+applications that require replayable responses SHOULD use the generic
+`payment-identifier` extension:
 
 - **Paid requests (`deposit` and `voucher`).** The server's per-channel lock and
-  `("access", channelId, maxClaimableAmount)` cache are the authoritative replay
-  defense. The same authorization MUST NOT execute the resource handler more
-  than once, regardless of whether a retry changes from `deposit` to `voucher`.
+  charged watermark are the authoritative replay defense. The same
+  authorization MUST NOT execute the resource handler more than once,
+  regardless of whether a retry changes from `deposit` to `voucher`. Without a
+  scheme-agnostic idempotency extension, the server MUST reject an
+  already-charged authorization rather than re-execute the handler.
 - **Client-supplied transactions.** For `deposit` and `refund`, the facilitator
   SHOULD maintain a short-lived in-flight cache keyed by the exact serialized
   transaction or its first signature. Concurrent `/settle` calls for the same
@@ -1499,8 +1503,9 @@ Standard x402 codes apply. The facilitator reports verification failures in
   client-initiated grace period, only the facilitator can apply the final
   voucher, and only after authenticating the server.
 - **No replay / no rollback.** Server offchain watermark plus onchain
-  `settled` monotonicity reject old vouchers. Paid-request equality is accepted
-  only as an idempotent replay of a cached access response. Refund initiation
+  `settled` monotonicity reject old vouchers. Paid-request equality is rejected
+  unless a scheme-agnostic idempotency extension supplies the previously cached
+  application response. Refund initiation
   is idempotent by the client-signed `request_close` transaction; optional
   cooperative closes use a separate operation namespace and a terminal onchain
   transition.
