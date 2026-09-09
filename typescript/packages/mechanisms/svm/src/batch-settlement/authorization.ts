@@ -77,14 +77,18 @@ export async function verifyBatchAuthorization(
   authorization: BatchAuthorization,
   operator: string,
 ): Promise<boolean> {
-  const base58 = getBase58Encoder();
-  return verifyEd25519Signature({
-    message: encodeBatchAuthorizationMessage({
-      channelId: authorization.channelId,
-      operator,
-      payer: authorization.payer,
-    }),
-    publicKey: base58.encode(authorization.payer) as Uint8Array,
-    signature: base58.encode(authorization.signature) as Uint8Array,
-  });
+  try {
+    const base58 = getBase58Encoder();
+    return await verifyEd25519Signature({
+      message: encodeBatchAuthorizationMessage({
+        channelId: authorization.channelId,
+        operator,
+        payer: authorization.payer,
+      }),
+      publicKey: base58.encode(authorization.payer) as Uint8Array,
+      signature: base58.encode(authorization.signature) as Uint8Array,
+    });
+  } catch {
+    return false;
+  }
 }

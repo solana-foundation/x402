@@ -83,7 +83,7 @@ export class BatchChannelTracker {
    */
   async authorization(): Promise<BatchAuthorization> {
     if (this.channelConfig.voucherSigner !== "server") {
-      throw new Error("client-signed channels do not use operator authorization");
+      throw new Error("client-signed channels do not use server authorization");
     }
     return signBatchAuthorization(this.signer, this.channelId, this.channelConfig.payerAuthorizer);
   }

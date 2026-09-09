@@ -10,12 +10,16 @@ import {
 import {
   BatchChannelTracker,
   buildDepositPayload,
+  signBatchVoucher,
 } from "../../src/batch-settlement/client/channel";
+import { BatchError } from "../../src/batch-settlement/errors";
 import { BatchSvmScheme as BatchServerScheme } from "../../src/batch-settlement/server/scheme";
 import { MemoryChannelStore } from "../../src/batch-settlement/server/storage";
 import {
   isBatchChannelConfig,
+  isBatchFacilitatorPayload,
   isBatchPayload,
+  isBatchVoucher,
   type BatchChannelConfig,
   type BatchDepositPayload,
 } from "../../src/batch-settlement/types";
@@ -69,6 +73,14 @@ function requirements(): PaymentRequirements {
 }
 
 describe("batch server voucher signer boundaries", () => {
+  it("covers malformed top-level wire guards", () => {
+    expect(isBatchVoucher(null)).toBe(false);
+    expect(isBatchFacilitatorPayload(null)).toBe(false);
+    expect(isBatchChannelConfig({ ...serverDeposit.channelConfig, receiverAuthorizer: 1 })).toBe(
+      false,
+    );
+  });
+
   it("rejects malformed server and client wire combinations", async () => {
     expect(isBatchPayload(serverDeposit)).toBe(true);
     const clientDeposit = (
@@ -138,12 +150,12 @@ describe("batch server voucher signer boundaries", () => {
     ];
     for (const payload of invalid) expect(isBatchPayload(payload)).toBe(false);
 
-    expect(
-      isBatchChannelConfig({ ...serverDeposit.channelConfig, voucherSigner: "unknown" }),
-    ).toBe(false);
-    expect(
-      isBatchChannelConfig({ ...serverDeposit.channelConfig, voucherSigner: "client" }),
-    ).toBe(true);
+    expect(isBatchChannelConfig({ ...serverDeposit.channelConfig, voucherSigner: "unknown" })).toBe(
+      false,
+    );
+    expect(isBatchChannelConfig({ ...serverDeposit.channelConfig, voucherSigner: "client" })).toBe(
+      true,
+    );
   });
 
   it("prevents using the wrong credential API for either signer mode", async () => {
@@ -164,7 +176,7 @@ describe("batch server voucher signer boundaries", () => {
       clientConfig,
       payer,
     );
-    await expect(clientTracker.authorization()).rejects.toThrow(/do not use operator authorization/);
+    await expect(clientTracker.authorization()).rejects.toThrow(/do not use server authorization/);
     await expect(
       buildDepositPayload({
         blockhash: { blockhash: USDC_MAINNET_ADDRESS, lastValidBlockHeight: 1n },
@@ -180,6 +192,54 @@ describe("batch server voucher signer boundaries", () => {
         withdrawDelay: 900,
       }),
     ).rejects.toThrow(/operator is required/);
+  });
+
+  it("enforces tracker and deposit-builder boundaries in both modes", async () => {
+    const clientConfig: BatchChannelConfig = {
+      ...serverDeposit.channelConfig,
+      payerAuthorizer: payer.address,
+      voucherSigner: "client",
+    };
+    const tracker = new BatchChannelTracker(
+      serverDeposit.authorization!.channelId,
+      clientConfig,
+      payer,
+      2n,
+    );
+    await expect(tracker.previewVoucher(0n)).rejects.toThrow(/positive/);
+    expect(() => tracker.commit(1n)).toThrow(/backwards/);
+    await expect(
+      signBatchVoucher({ address: payer.address, signMessages: async () => [{}] } as never, {
+        channelId: serverDeposit.authorization!.channelId,
+        expiresAt: 0,
+        maxClaimableAmount: 3n,
+      }),
+    ).rejects.toThrow(/did not return/);
+
+    const base = {
+      blockhash: { blockhash: USDC_MAINNET_ADDRESS, lastValidBlockHeight: 1n },
+      depositAmount: 10_000n,
+      feePayer: feePayer.address,
+      firstCharge: 1_000n,
+      mint: USDC_DEVNET_ADDRESS,
+      openSlot: 123n,
+      payer,
+      receiver: USDC_MAINNET_ADDRESS,
+      tokenProgram: TOKEN_PROGRAM_ADDRESS,
+      withdrawDelay: 900,
+    };
+    await expect(buildDepositPayload({ ...base, firstCharge: 0n })).rejects.toThrow(/positive/);
+    await expect(buildDepositPayload({ ...base, firstCharge: 10_001n })).rejects.toThrow(
+      /positive/,
+    );
+    await expect(
+      buildDepositPayload({ ...base, openSlot: BigInt(Number.MAX_SAFE_INTEGER) + 1n }),
+    ).rejects.toThrow(/safe integer/);
+    await expect(
+      buildDepositPayload({ ...base, receiverAuthorizer: operator.address }),
+    ).resolves.toMatchObject({
+      payload: { channelConfig: { receiverAuthorizer: operator.address } },
+    });
   });
 
   it("rejects malformed keys and a signer that returns no proof", async () => {
@@ -209,10 +269,86 @@ describe("batch server voucher signer boundaries", () => {
     ).resolves.toBe(false);
   });
 
+  it("rejects every server-mode term and proof mismatch", async () => {
+    type Internals = {
+      signOperatorVoucher(channelId: string, cumulative: bigint): Promise<unknown>;
+      validatePayload(raw: BatchDepositPayload, requirements: PaymentRequirements): Promise<string>;
+      validateRequestProof(
+        raw: BatchDepositPayload,
+        channelId: string,
+        mode: "client" | "server",
+      ): Promise<void>;
+    };
+    const api = new BatchServerScheme({ operator }) as unknown as Internals;
+    const channelId = serverDeposit.authorization!.channelId;
+    const req = requirements();
+    const withExtra = (extra: Record<string, unknown>) => ({
+      ...req,
+      extra: { ...req.extra, ...extra },
+    });
+
+    await expect(
+      api.validatePayload(serverDeposit, withExtra({ voucherSigner: "other" })),
+    ).rejects.toThrow(BatchError.CHANNEL_STATE);
+    await expect(
+      api.validatePayload(
+        {
+          ...serverDeposit,
+          channelConfig: { ...serverDeposit.channelConfig, voucherSigner: "client" },
+        },
+        req,
+      ),
+    ).rejects.toThrow(BatchError.CHANNEL_STATE);
+    await expect(
+      api.validatePayload(serverDeposit, withExtra({ operator: feePayer.address })),
+    ).rejects.toThrow(BatchError.CHANNEL_STATE);
+    await expect(
+      api.validatePayload(
+        {
+          ...serverDeposit,
+          channelConfig: { ...serverDeposit.channelConfig, voucherSigner: undefined },
+        },
+        withExtra({ operator: operator.address, voucherSigner: "client" }),
+      ),
+    ).rejects.toThrow(BatchError.CHANNEL_STATE);
+
+    await expect(
+      api.validateRequestProof(
+        { ...serverDeposit, authorization: undefined } as never,
+        channelId,
+        "server",
+      ),
+    ).rejects.toThrow(BatchError.VOUCHER_SIGNATURE);
+    await expect(
+      api.validateRequestProof(
+        { ...serverDeposit, voucher: undefined } as never,
+        channelId,
+        "client",
+      ),
+    ).rejects.toThrow(BatchError.VOUCHER_SIGNATURE);
+
+    const authorizationCases = [
+      { authorization: { ...serverDeposit.authorization!, channelId: feePayer.address } },
+      { authorization: { ...serverDeposit.authorization!, payer: feePayer.address } },
+      { idempotencyKey: "" },
+      { maxClaimableAmount: undefined },
+      { authorization: { ...serverDeposit.authorization!, signature: "bad" } },
+    ];
+    for (const overrides of authorizationCases) {
+      await expect(
+        api.validateRequestProof({ ...serverDeposit, ...overrides } as never, channelId, "server"),
+      ).rejects.toThrow(BatchError.VOUCHER_SIGNATURE);
+    }
+
+    const unsigned = new BatchServerScheme() as unknown as Internals;
+    await expect(unsigned.signOperatorVoucher(channelId, 1n)).rejects.toThrow(
+      BatchError.VOUCHER_SIGNATURE,
+    );
+  });
+
   it("opens and advances a server-signed channel through the server hook lifecycle", async () => {
     const store = new MemoryChannelStore();
     const server = new BatchServerScheme({
-      getReplayResponse: async () => ({ body: { replayed: true }, status: 200 }),
       operator,
       store,
     });
@@ -296,13 +432,9 @@ describe("batch server voucher signer boundaries", () => {
       payload: { ...authorizationPayment.payload },
     } as PaymentPayload;
     const replayContext = { ...authorizationContext, paymentPayload: replayPayment };
-    const replayVerified = await server.schemeHooks.onBeforeVerify!(replayContext);
-    expect(replayVerified).toMatchObject({ skip: true });
-    await expect(
-      server.schemeHooks.onAfterVerify!({
-        ...replayContext,
-        result: (replayVerified as { result: { isValid: true; payer: string } }).result,
-      }),
-    ).resolves.toMatchObject({ skipHandler: true, response: { body: { replayed: true } } });
+    await expect(server.schemeHooks.onBeforeVerify!(replayContext)).resolves.toMatchObject({
+      abort: true,
+      reason: "duplicate_settlement",
+    });
   });
 });

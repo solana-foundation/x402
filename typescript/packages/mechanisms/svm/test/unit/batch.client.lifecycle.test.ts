@@ -491,6 +491,17 @@ describe("batch client lifecycle", () => {
         }),
       ),
     ).resolves.toMatchObject({ memo: "invoice", receiverAuthorizer: payer.address });
+    await expect(
+      resolve(
+        requirements({
+          extra: {
+            ...requirements().extra,
+            operator: feePayer.address,
+            voucherSigner: "server",
+          },
+        }),
+      ),
+    ).resolves.toMatchObject({ operator: feePayer.address, voucherSigner: "server" });
     const invalid = [
       requirements({ extra: undefined }),
       requirements({ extra: { ...requirements().extra, paymentFlow: "upfront" } }),
@@ -499,6 +510,9 @@ describe("batch client lifecycle", () => {
       requirements({ extra: { ...requirements().extra, tokenProgram: payer.address } }),
       requirements({ extra: { ...requirements().extra, receiverAuthorizer: 1 } }),
       requirements({ extra: { ...requirements().extra, memo: 1 } }),
+      requirements({ extra: { ...requirements().extra, voucherSigner: "other" } }),
+      requirements({ extra: { ...requirements().extra, voucherSigner: "server" } }),
+      requirements({ extra: { ...requirements().extra, operator: feePayer.address } }),
     ];
     for (const value of invalid) await expect(resolve(value)).rejects.toThrow();
 

@@ -54,7 +54,7 @@ the facilitator:
   `has_voucher = 0`, then `distribute` and `reclaim`, even if the client and
   server disappear. A client/server pair cannot strand the rent it sponsored.
 - Only the channel's `payerAuthorizer` can sign a voucher that advances the
-  settled watermark. In client mode this is client-controlled. In operator
+  settled watermark. In client mode this is client-controlled. In server
   mode the client explicitly delegates that authority to `extra.operator`,
   which can sign up to the full channel deposit. The facilitator can close at
   the current onchain watermark but cannot redirect funds.
