@@ -49,7 +49,10 @@ type ParsedMoney = { amount: number; stablecoin?: SvmStablecoinSymbol };
 type SvmStablecoinSymbol = "USDC" | "USDT" | "USDG" | "PYUSD" | "CASH";
 type RequestContext = {
   channelId: string;
+  /** Client-signed cumulative amount, when the payer supplies the voucher. */
   cumulative?: bigint;
+  /** Maximum charge advertised before the handler runs. */
+  ceiling?: bigint;
   idempotencyKey?: string;
   pendingId?: string;
   /**
@@ -95,6 +98,10 @@ export class BatchSvmScheme implements SchemeNetworkServer {
 
   private readonly store: ChannelStore;
   private readonly requestContexts = new WeakMap<DeepReadonly<PaymentPayload>, RequestContext>();
+  private readonly settlementExtras = new WeakMap<
+    DeepReadonly<PaymentPayload>,
+    Record<string, unknown>
+  >();
   private moneyParsers: MoneyParser[] = [];
   private reservationSequence = 0;
 
@@ -109,6 +116,14 @@ export class BatchSvmScheme implements SchemeNetworkServer {
       onVerifiedPaymentCanceled: ctx => this.onCanceled(ctx),
     };
   }
+
+  enrichSettlementResponse = async (
+    ctx: SettleResultContext,
+  ): Promise<Record<string, unknown> | void> => {
+    const extra = this.settlementExtras.get(ctx.paymentPayload);
+    this.settlementExtras.delete(ctx.paymentPayload);
+    return extra;
+  };
 
   /**
    * Attach the corrective channel state a client needs to resynchronize after
@@ -310,7 +325,7 @@ export class BatchSvmScheme implements SchemeNetworkServer {
             requiresCumulativeCheck: true,
             ...(raw.type === "authorization"
               ? {
-                  cumulative: BigInt(raw.maxClaimableAmount),
+                  ceiling: BigInt(ctx.requirements.amount),
                   idempotencyKey: raw.idempotencyKey,
                 }
               : {}),
@@ -333,22 +348,16 @@ export class BatchSvmScheme implements SchemeNetworkServer {
           this.requestContexts.set(ctx.paymentPayload, {
             channelId,
             cumulative: submitted,
+            ceiling: BigInt(ctx.requirements.amount),
           });
         } else {
           if (raw.type === "voucher") throw new Error(BatchError.PAYLOAD_TYPE);
           const idempotencyKey = raw.idempotencyKey!;
-          const submitted = BigInt(raw.maxClaimableAmount!);
           const recorded = state?.authorizationRecords?.[idempotencyKey];
-          if (recorded === undefined && submitted !== expected) {
-            throw new Error(BatchError.CUMULATIVE_AMOUNT_MISMATCH);
-          }
-          if (recorded !== undefined && submitted !== BigInt(recorded)) {
-            throw new Error(BatchError.CUMULATIVE_AMOUNT_MISMATCH);
-          }
           if (recorded !== undefined) throw new Error(CHANNEL_BUSY);
           this.requestContexts.set(ctx.paymentPayload, {
             channelId,
-            cumulative: submitted,
+            ceiling: BigInt(ctx.requirements.amount),
             idempotencyKey,
           });
         }
@@ -399,17 +408,11 @@ export class BatchSvmScheme implements SchemeNetworkServer {
       await this.persistSnapshot(request.channelId, raw, ctx.requirements, snapshot);
     }
 
-    // The cumulative rule could not be applied before the record existed.
-    if (
-      request.requiresCumulativeCheck &&
-      (raw.type === "voucher" || raw.type === "authorization")
-    ) {
+    // A client-signed voucher must be checked against the refreshed baseline.
+    if (request.requiresCumulativeCheck && raw.type === "voucher") {
       const state = await this.store.get(request.channelId);
       if (!state) return this.abort(BatchError.CHANNEL_STATE, "channel state unavailable");
-      const submitted =
-        raw.type === "voucher"
-          ? BigInt(raw.voucher.maxClaimableAmount)
-          : BigInt(raw.maxClaimableAmount);
+      const submitted = BigInt(raw.voucher.maxClaimableAmount);
       const expected = state.chargedCumulativeAmount + BigInt(ctx.requirements.amount);
       if (submitted !== expected) {
         // The corrective 402 that follows carries this rebuilt snapshot and no
@@ -486,12 +489,18 @@ export class BatchSvmScheme implements SchemeNetworkServer {
     if (raw.type === "deposit") return;
 
     try {
+      const actual = BigInt(ctx.requirements.amount);
+      const ceiling = request.ceiling ?? actual;
+      if (actual > ceiling) {
+        throw new Error(BatchError.CUMULATIVE_AMOUNT_MISMATCH);
+      }
+      if (raw.type !== "authorization" && actual !== ceiling) {
+        throw new Error(BatchError.CUMULATIVE_AMOUNT_MISMATCH);
+      }
+      const actualCumulative = state.chargedCumulativeAmount + actual;
       const voucher =
         raw.type === "authorization"
-          ? await this.signOperatorVoucher(
-              request.channelId,
-              state.pendingRequest.maxClaimableAmount,
-            )
+          ? await this.signOperatorVoucher(request.channelId, actualCumulative)
           : raw.voucher;
       const committed = await this.store.update(request.channelId, current => {
         if (!current || current.pendingRequest?.id !== request.pendingId) {
@@ -535,13 +544,19 @@ export class BatchSvmScheme implements SchemeNetworkServer {
       if (!reserved || reserved.pendingRequest?.id !== request.pendingId) {
         throw new Error(CHANNEL_BUSY);
       }
+      const actual = BigInt(ctx.requirements.amount);
+      const ceiling = request.ceiling ?? actual;
+      if (actual > ceiling) throw new Error(BatchError.CUMULATIVE_AMOUNT_MISMATCH);
+      if (raw.voucher && actual !== ceiling) {
+        throw new Error(BatchError.CUMULATIVE_AMOUNT_MISMATCH);
+      }
       const voucher =
         raw.voucher ??
         (await this.signOperatorVoucher(
           request.channelId,
-          reserved.pendingRequest.maxClaimableAmount,
+          reserved.chargedCumulativeAmount + actual,
         ));
-      await this.store.update(request.channelId, current => {
+      const committed = await this.store.update(request.channelId, current => {
         if (!current || current.pendingRequest?.id !== request.pendingId) {
           throw new Error(CHANNEL_BUSY);
         }
@@ -568,6 +583,12 @@ export class BatchSvmScheme implements SchemeNetworkServer {
               }
             : {}),
         };
+      });
+      this.settlementExtras.set(ctx.paymentPayload, {
+        channelState: snapshot(committed),
+        chargedAmount: ctx.requirements.amount,
+        commitmentId: `${committed.channelId}:${committed.signedMaxClaimable}`,
+        voucher: receiptVoucher(committed),
       });
       this.requestContexts.delete(ctx.paymentPayload);
       return;
@@ -725,18 +746,11 @@ export class BatchSvmScheme implements SchemeNetworkServer {
             : raw.type === "deposit"
               ? raw.idempotencyKey
               : undefined;
-        const maxClaimableAmount =
-          raw.type === "authorization"
-            ? raw.maxClaimableAmount
-            : raw.type === "deposit"
-              ? raw.maxClaimableAmount
-              : undefined;
         if (
           authorization.channelId !== channelId ||
           authorization.payer !== raw.channelConfig.payer ||
           typeof idempotencyKey !== "string" ||
           idempotencyKey.length === 0 ||
-          typeof maxClaimableAmount !== "string" ||
           !(await verifyBatchAuthorization(authorization, raw.channelConfig.payerAuthorizer))
         ) {
           throw new Error(BatchError.VOUCHER_SIGNATURE);
@@ -955,10 +969,21 @@ function acceptedResponse(state: ChannelState, requirements: PaymentRequirements
     amount: "",
     extra: {
       channelState: snapshot(state),
-      // The fixed per-request price charged by this acceptance.
+      // `requirements` is the effective post-handler amount in server mode.
       chargedAmount: requirements.amount,
       commitmentId: `${state.channelId}:${state.pendingRequest?.maxClaimableAmount ?? state.signedMaxClaimable}`,
+      voucher: receiptVoucher(state),
     },
+  };
+}
+
+function receiptVoucher(state: ChannelState): BatchVoucher | undefined {
+  if (state.highestVoucherSignature === undefined) return undefined;
+  return {
+    channelId: state.channelId,
+    expiresAt: state.highestVoucherExpiresAt ?? 0,
+    maxClaimableAmount: state.signedMaxClaimable.toString(),
+    signature: state.highestVoucherSignature,
   };
 }
 

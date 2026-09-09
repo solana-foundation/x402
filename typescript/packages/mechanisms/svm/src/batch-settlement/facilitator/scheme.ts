@@ -226,8 +226,8 @@ export class BatchSvmScheme implements SchemeNetworkFacilitator {
           this.assertClaimChannel(channel, payload.channelConfig, terms, requirements, [
             ChannelStatus.Open,
           ]);
-          const cumulative = parseU64(payload.maxClaimableAmount, "maxClaimableAmount");
-          if (cumulative > channel.deposit) {
+          const ceiling = parseU64(requirements.amount, "amount");
+          if (ceiling > channel.deposit) {
             throw new Error(BatchError.CUMULATIVE_EXCEEDS_DEPOSIT);
           }
           return {
@@ -474,8 +474,8 @@ export class BatchSvmScheme implements SchemeNetworkFacilitator {
     const channelId = await this.deriveChannelId(payload.channelConfig, terms.feePayer);
     const voucherAmount = payload.voucher
       ? parseU64(payload.voucher.maxClaimableAmount, "maxClaimableAmount")
-      : payload.maxClaimableAmount !== undefined
-        ? parseU64(payload.maxClaimableAmount, "maxClaimableAmount")
+      : terms.voucherSigner === "server"
+        ? charge
         : undefined;
     if (terms.voucherSigner === "client" && !payload.voucher) {
       throw new Error(`${BatchError.VOUCHER_SIGNATURE}: client voucher missing`);

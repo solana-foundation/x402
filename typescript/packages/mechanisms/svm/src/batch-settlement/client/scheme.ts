@@ -21,8 +21,10 @@ import { BatchError } from "../errors";
 import {
   BATCH_SETTLEMENT_SCHEME,
   isBatchPayload,
+  isBatchVoucher,
   type BatchChannelState,
   type BatchPayload,
+  type BatchVoucher,
   type BatchVoucherState,
 } from "../types";
 import {
@@ -146,7 +148,6 @@ export class BatchSvmScheme implements SchemeNetworkClient {
                 authorization: await existing.tracker.authorization(),
                 channelConfig: existing.tracker.channelConfig,
                 idempotencyKey: crypto.randomUUID(),
-                maxClaimableAmount: cumulative.toString(),
                 type: "authorization",
               }
             : {
@@ -198,7 +199,6 @@ export class BatchSvmScheme implements SchemeNetworkClient {
             ? {
                 authorization: await existing.tracker.authorization(),
                 idempotencyKey: crypto.randomUUID(),
-                maxClaimableAmount: cumulative.toString(),
               }
             : { voucher: await existing.tracker.previewVoucher(charge) }),
         },
@@ -529,6 +529,7 @@ export class BatchSvmScheme implements SchemeNetworkClient {
           commitmentId?: unknown;
           chargedAmount?: unknown;
           channelState?: { balance?: unknown; chargedCumulativeAmount?: unknown };
+          voucher?: BatchVoucher;
         }
       | undefined;
     const requestAmount = parseU64(ctx.requirements.amount, "requirements.amount");
@@ -540,10 +541,30 @@ export class BatchSvmScheme implements SchemeNetworkClient {
       throw new Error("batch-settlement PAYMENT-RESPONSE charged more than the advertised price");
     }
     const confirmedCumulative = (pending.confirmed?.tracker.cumulative ?? 0n) + charged;
+    if (pending.tracker.channelConfig.voucherSigner === "server") {
+      const voucher = extra?.voucher;
+      if (
+        !isBatchVoucher(voucher) ||
+        voucher.channelId !== pending.tracker.channelId ||
+        voucher.expiresAt !== 0 ||
+        voucher.maxClaimableAmount !== confirmedCumulative.toString() ||
+        !(await verifyVoucherSignature({
+          message: encodeVoucherMessageBytes({
+            channelId: pending.tracker.channelId,
+            cumulativeAmount: confirmedCumulative,
+            expiresAt: BigInt(voucher.expiresAt),
+          }),
+          signatureBase58: voucher.signature,
+          signerBase58: pending.tracker.channelConfig.payerAuthorizer,
+        }))
+      ) {
+        await this.restoreConfirmedChannel(pending);
+        throw new Error("batch-settlement PAYMENT-RESPONSE has an invalid server voucher");
+      }
+    }
     const reported = extra?.channelState?.chargedCumulativeAmount;
     if (
-      extra?.commitmentId !== `${pending.tracker.channelId}:${pending.cumulative}` ||
-      confirmedCumulative !== pending.cumulative ||
+      extra?.commitmentId !== `${pending.tracker.channelId}:${confirmedCumulative}` ||
       (typeof reported === "string" && reported !== confirmedCumulative.toString())
     ) {
       // The server confirmed something this client did not submit. Leave local
@@ -556,13 +577,13 @@ export class BatchSvmScheme implements SchemeNetworkClient {
     // reports holding.
     const deposited =
       payload.type === "deposit" ? parseU64(payload.deposit.amount, "deposit.amount") : 0n;
-    pending.tracker.commit(pending.cumulative);
+    pending.tracker.commit(confirmedCumulative);
     pending.deposit = (pending.confirmed?.deposit ?? 0n) + deposited;
     this.channels.set(pending.key, pending);
     await this.config.channelStorage?.set(pending.key, {
       channelConfig: pending.tracker.channelConfig,
       channelId: pending.tracker.channelId,
-      chargedCumulativeAmount: pending.cumulative.toString(),
+      chargedCumulativeAmount: confirmedCumulative.toString(),
       deposit: pending.deposit.toString(),
     });
     return false;

@@ -1078,12 +1078,12 @@ describe("batch-settlement SVM", () => {
         withdrawDelay: WITHDRAW_DELAY,
       });
       expect(built.payload).toMatchObject({
-        maxClaimableAmount: "1000",
         channelConfig: {
           payerAuthorizer: operator.address,
           voucherSigner: "server",
         },
       });
+      expect("maxClaimableAmount" in built.payload).toBe(false);
       expect(built.payload.voucher).toBeUndefined();
       expect(built.payload.idempotencyKey).toBeTruthy();
       expect(await verifyBatchAuthorization(built.payload.authorization!, operator.address)).toBe(

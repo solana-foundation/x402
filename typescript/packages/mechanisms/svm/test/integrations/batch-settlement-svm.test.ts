@@ -533,7 +533,11 @@ describe("batch-settlement SVM onchain", () => {
           const matched = server.findMatchingRequirements(accepts, payload)!;
           const verified = await server.verifyPayment(payload, matched);
           expect(verified.isValid, JSON.stringify(verified)).toBe(true);
-          const settled = await server.settlePayment(payload, matched);
+          // The requirement is a per-request ceiling. Metering happens after
+          // the handler, and server mode signs only the actual charge.
+          const settled = await server.settlePayment(payload, matched, undefined, undefined, {
+            amount: "400",
+          });
           expect(settled.success, JSON.stringify(settled)).toBe(true);
           await clientScheme.schemeHooks.onPaymentResponse!({
             paymentPayload: payload,
@@ -572,7 +576,7 @@ describe("batch-settlement SVM onchain", () => {
 
         const channelId = firstPayload.authorization.channelId;
         const state = await store.get(channelId);
-        expect(state?.chargedCumulativeAmount).toBe(2n * BigInt(PRICE));
+        expect(state?.chargedCumulativeAmount).toBe(800n);
         expect(state?.highestVoucherSignature).toBeDefined();
         expect(
           await verifyVoucherSignature({
@@ -596,7 +600,7 @@ describe("batch-settlement SVM onchain", () => {
           claimed: [channelId],
           distributed: [channelId],
         });
-        expect(await usdcBalance(receiver.address)).toBe(before + 2n * BigInt(PRICE));
+        expect(await usdcBalance(receiver.address)).toBe(before + 800n);
       },
     );
   });

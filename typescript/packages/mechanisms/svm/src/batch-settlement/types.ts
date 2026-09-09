@@ -75,7 +75,6 @@ export type BatchDepositPayload = {
   voucher?: BatchVoucher | undefined;
   authorization?: BatchAuthorization | undefined;
   idempotencyKey?: string | undefined;
-  maxClaimableAmount?: string | undefined;
   deposit: {
     amount: string;
     transaction: string;
@@ -93,7 +92,6 @@ export type BatchAuthorizationPayload = {
   channelConfig: BatchChannelConfig;
   authorization: BatchAuthorization;
   idempotencyKey: string;
-  maxClaimableAmount: string;
 };
 
 export type BatchRefundPayload = {
@@ -183,7 +181,7 @@ export function isBatchPayload(value: unknown): value is BatchPayload {
             isBatchAuthorization(value.authorization) &&
             typeof value.idempotencyKey === "string" &&
             value.idempotencyKey.length > 0 &&
-            typeof value.maxClaimableAmount === "string"
+            value.maxClaimableAmount === undefined
         : isBatchVoucher(value.voucher) &&
             value.authorization === undefined &&
             value.idempotencyKey === undefined &&
@@ -196,7 +194,7 @@ export function isBatchPayload(value: unknown): value is BatchPayload {
         isBatchAuthorization(value.authorization) &&
         typeof value.idempotencyKey === "string" &&
         value.idempotencyKey.length > 0 &&
-        typeof value.maxClaimableAmount === "string"
+        value.maxClaimableAmount === undefined
       );
     case "refund":
       return (

@@ -176,7 +176,6 @@ export async function buildDepositPayload(args: BuildDepositArgs): Promise<Built
       ? {
           authorization: await tracker.authorization(),
           idempotencyKey: crypto.randomUUID(),
-          maxClaimableAmount: args.firstCharge.toString(),
         }
       : { voucher: await tracker.previewVoucher(args.firstCharge) };
   return {

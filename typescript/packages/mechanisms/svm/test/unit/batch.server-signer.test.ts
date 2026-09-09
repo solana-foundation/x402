@@ -22,10 +22,15 @@ import {
   isBatchVoucher,
   type BatchChannelConfig,
   type BatchDepositPayload,
+  type BatchVoucher,
 } from "../../src/batch-settlement/types";
 import { TOKEN_PROGRAM_ADDRESS } from "../../src/constants";
 import { SOLANA_DEVNET_CAIP2 } from "../../src/constants";
 import { USDC_DEVNET_ADDRESS, USDC_MAINNET_ADDRESS } from "../../src/defaultAssets";
+import {
+  encodeVoucherMessageBytes,
+  verifyVoucherSignature,
+} from "../../src/payment-channels/voucher";
 
 let payer: Awaited<ReturnType<typeof generateKeyPairSigner>>;
 let operator: Awaited<ReturnType<typeof generateKeyPairSigner>>;
@@ -331,7 +336,6 @@ describe("batch server voucher signer boundaries", () => {
       { authorization: { ...serverDeposit.authorization!, channelId: feePayer.address } },
       { authorization: { ...serverDeposit.authorization!, payer: feePayer.address } },
       { idempotencyKey: "" },
-      { maxClaimableAmount: undefined },
       { authorization: { ...serverDeposit.authorization!, signature: "bad" } },
     ];
     for (const overrides of authorizationCases) {
@@ -393,7 +397,6 @@ describe("batch server voucher signer boundaries", () => {
         authorization: serverDeposit.authorization!,
         channelConfig: serverDeposit.channelConfig,
         idempotencyKey: "request-2",
-        maxClaimableAmount: "2000",
         type: "authorization",
       },
       x402Version: 2,
@@ -409,22 +412,62 @@ describe("batch server voucher signer boundaries", () => {
       ...authorizationContext,
       result: (authorizationVerified as { result: { isValid: true; payer: string } }).result,
     });
-    await expect(
-      server.schemeHooks.onBeforeSettle!({
-        ...authorizationContext,
-        phase: "before-handler",
-      }),
-    ).resolves.toMatchObject({
+    const actualSettlement = await server.schemeHooks.onBeforeSettle!({
+      ...authorizationContext,
+      requirements: { ...authorizationContext.requirements, amount: "400" },
+      phase: "after-handler",
+    });
+    expect(actualSettlement).toMatchObject({
       skip: true,
       result: {
-        extra: { commitmentId: `${channelId}:2000` },
+        extra: { chargedAmount: "400", commitmentId: `${channelId}:1400` },
+        success: true,
+      },
+    });
+    const receipt = (actualSettlement as { result: { extra: { voucher: BatchVoucher } } }).result
+      .extra.voucher;
+    expect(
+      await verifyVoucherSignature({
+        message: encodeVoucherMessageBytes({
+          channelId,
+          cumulativeAmount: 1_400n,
+          expiresAt: 0n,
+        }),
+        signatureBase58: receipt.signature,
+        signerBase58: operator.address,
+      }),
+    ).toBe(true);
+    expect(await store.get(channelId)).toMatchObject({
+      authorizationRecords: { "request-2": "1400" },
+      chargedCumulativeAmount: 1_400n,
+      signedMaxClaimable: 1_400n,
+    });
+
+    const zeroPayment = {
+      ...authorizationPayment,
+      payload: { ...authorizationPayment.payload, idempotencyKey: "request-3" },
+    } as PaymentPayload;
+    const zeroContext = { ...authorizationContext, paymentPayload: zeroPayment };
+    const zeroVerified = await server.schemeHooks.onBeforeVerify!(zeroContext);
+    await server.schemeHooks.onAfterVerify!({
+      ...zeroContext,
+      result: (zeroVerified as { result: { isValid: true; payer: string } }).result,
+    });
+    await expect(
+      server.schemeHooks.onBeforeSettle!({
+        ...zeroContext,
+        requirements: { ...zeroContext.requirements, amount: "0" },
+        phase: "after-handler",
+      }),
+    ).resolves.toMatchObject({
+      result: {
+        extra: { chargedAmount: "0", commitmentId: `${channelId}:1400` },
         success: true,
       },
     });
     expect(await store.get(channelId)).toMatchObject({
-      authorizationRecords: { "request-2": "2000" },
-      chargedCumulativeAmount: 2_000n,
-      signedMaxClaimable: 2_000n,
+      authorizationRecords: { "request-2": "1400", "request-3": "1400" },
+      chargedCumulativeAmount: 1_400n,
     });
 
     const replayPayment = {

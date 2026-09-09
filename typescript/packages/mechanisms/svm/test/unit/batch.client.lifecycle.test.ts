@@ -12,6 +12,7 @@ import {
 import type { BatchChannelConfig } from "../../src/batch-settlement/types";
 import { SOLANA_DEVNET_CAIP2, TOKEN_PROGRAM_ADDRESS } from "../../src/constants";
 import { USDC_DEVNET_ADDRESS, USDC_MAINNET_ADDRESS } from "../../src/defaultAssets";
+import { signVoucher } from "../../src/payment-channels/voucher";
 import { createRpcClient, resolveBlockhash, resolveOpenSlot } from "../../src/utils";
 
 vi.mock("@solana-program/token-2022", async importOriginal => ({
@@ -94,6 +95,51 @@ function internals(client: BatchSvmScheme): ClientInternals {
 }
 
 describe("batch client lifecycle", () => {
+  it("commits the metered amount from a signed server-mode receipt", async () => {
+    const operator = await generateKeyPairSigner();
+    const { records, storage } = memoryStorage();
+    const client = new BatchSvmScheme(payer, {
+      channelStorage: storage,
+      depositAmount: 3_000n,
+      discoverChannels: false,
+    });
+    const serverRequirements = requirements({
+      extra: {
+        ...requirements().extra,
+        operator: operator.address,
+        voucherSigner: "server",
+      },
+    });
+    const opened = await client.createPaymentPayload(2, serverRequirements);
+    expect(opened.payload).toMatchObject({ type: "deposit" });
+    expect("maxClaimableAmount" in opened.payload).toBe(false);
+    const channelId = opened.payload.authorization!.channelId;
+    const signature = await signVoucher(operator, {
+      channelId,
+      cumulativeAmount: 400n,
+      expiresAt: 0n,
+    });
+
+    await client.schemeHooks.onPaymentResponse!({
+      paymentPayload: { accepted: serverRequirements, ...opened },
+      requirements: serverRequirements,
+      settleResponse: {
+        extra: {
+          chargedAmount: "400",
+          channelState: { chargedCumulativeAmount: "400" },
+          commitmentId: `${channelId}:400`,
+          voucher: { channelId, expiresAt: 0, maxClaimableAmount: "400", signature },
+        },
+        success: true,
+      },
+    } as never);
+
+    expect([...records.values()][0]).toMatchObject({
+      chargedCumulativeAmount: "400",
+      deposit: "3000",
+    });
+  });
+
   it("opens, replays, confirms, and advances a persisted channel", async () => {
     const { records, storage } = memoryStorage();
     const client = new BatchSvmScheme(payer, {
