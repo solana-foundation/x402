@@ -30,8 +30,6 @@ export interface ChannelState {
   payerAuthorizer: string;
   /** Reusable payer proof bound at open for server-signed channels. */
   authorizationSignature?: string | undefined;
-  /** Server-mode request keys and the cumulative voucher each committed. */
-  authorizationRecords?: Record<string, string> | undefined;
   /** Optional server close authorizer from the challenge. */
   receiverAuthorizer?: string | undefined;
   /** Forced-close grace period. */
@@ -65,13 +63,17 @@ export interface ChannelState {
   openSignature?: string | undefined;
   /** Broadcast signature for the payer-forced request_close transition. */
   closeSignature?: string | undefined;
-  /** Request-scoped reservation held between verification and handler completion. */
-  pendingRequest?:
-    | {
-        id: string;
-        expiresAt: number;
-        maxClaimableAmount: bigint;
-      }
+  /** Request ceilings reserved while verified handlers execute. */
+  reservations?:
+    | Record<
+        string,
+        {
+          ceiling: bigint;
+          expiresAt: number;
+          idempotencyKey?: string | undefined;
+          kind: "client" | "server" | "close";
+        }
+      >
     | undefined;
 }
 

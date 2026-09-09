@@ -266,10 +266,11 @@ describe("batch-settlement SVM", () => {
         result: { isValid: true, payer: payer.address },
       });
 
-      expect(await store.get(channelId)).toMatchObject({
-        chargedCumulativeAmount: 0n,
-        pendingRequest: { maxClaimableAmount: 1_000n },
-      });
+      const reserved = await store.get(channelId);
+      expect(reserved?.chargedCumulativeAmount).toBe(0n);
+      expect(Object.values(reserved?.reservations ?? {})).toEqual([
+        expect.objectContaining({ ceiling: 1_000n }),
+      ]);
 
       const forwarded = await server.schemeHooks.onBeforeSettle!({
         ...verifyContext,
@@ -290,7 +291,7 @@ describe("batch-settlement SVM", () => {
       expect(await store.get(channelId)).toMatchObject({
         chargedCumulativeAmount: 1_000n,
         openSignature: "open-signature",
-        pendingRequest: undefined,
+        reservations: {},
         signedMaxClaimable: 1_000n,
       });
     });
@@ -395,7 +396,7 @@ describe("batch-settlement SVM", () => {
       });
       expect(await store.get(channelId)).toMatchObject({
         chargedCumulativeAmount: 0n,
-        pendingRequest: undefined,
+        reservations: {},
       });
     });
 
@@ -485,10 +486,11 @@ describe("batch-settlement SVM", () => {
         },
       });
       expect(verified).toBeUndefined();
-      expect(await store.get(channelId)).toMatchObject({
-        chargedCumulativeAmount: 2_000n,
-        pendingRequest: { maxClaimableAmount: 3_000n },
-      });
+      const rebuilt = await store.get(channelId);
+      expect(rebuilt?.chargedCumulativeAmount).toBe(2_000n);
+      expect(Object.values(rebuilt?.reservations ?? {})).toEqual([
+        expect.objectContaining({ ceiling: 1_000n }),
+      ]);
     });
 
     it("refuses to rebuild a record for a channel that is closing", async () => {

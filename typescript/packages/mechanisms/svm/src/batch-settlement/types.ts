@@ -64,6 +64,19 @@ export type BatchVoucher = {
   signature: string;
 };
 
+/** Operator-signed itemization for one completed server-mode request. */
+export type BatchSettlementReceipt = {
+  type: "receipt";
+  channelId: string;
+  idempotencyKey: string;
+  authorizedAmount: string;
+  chargedAmount: string;
+  priorCumulativeAmount: string;
+  cumulativeAmount: string;
+  voucher: BatchVoucher;
+  signature: string;
+};
+
 export type CloseAuthorization = {
   validBefore: number;
   signature: string;
@@ -144,6 +157,21 @@ export function isBatchVoucher(value: unknown): value is BatchVoucher {
     typeof value.channelId === "string" &&
     typeof value.maxClaimableAmount === "string" &&
     typeof value.expiresAt === "number" &&
+    typeof value.signature === "string"
+  );
+}
+
+export function isBatchSettlementReceipt(value: unknown): value is BatchSettlementReceipt {
+  if (!isRecord(value)) return false;
+  return (
+    value.type === "receipt" &&
+    typeof value.channelId === "string" &&
+    typeof value.idempotencyKey === "string" &&
+    typeof value.authorizedAmount === "string" &&
+    typeof value.chargedAmount === "string" &&
+    typeof value.priorCumulativeAmount === "string" &&
+    typeof value.cumulativeAmount === "string" &&
+    isBatchVoucher(value.voucher) &&
     typeof value.signature === "string"
   );
 }

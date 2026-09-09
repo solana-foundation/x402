@@ -364,6 +364,37 @@ Each decoded address MUST be exactly 32 bytes. The proof delegates voucher
 signing only for that channel, payer, and operator. It is reusable for the life
 of the channel and therefore MUST be handled as a bearer credential.
 
+`BatchSettlementReceipt` is the operator-signed, itemized result of a
+server-mode request:
+
+| Field | Type | Notes |
+|---|---|---|
+| `type` | string | MUST be `"receipt"`. |
+| `channelId` | string | Channel PDA (base58). |
+| `idempotencyKey` | string | Request identifier from the accepted payload. |
+| `authorizedAmount` | string | Ceiling reserved for the request; MUST equal `PaymentRequirements.amount`. |
+| `chargedAmount` | string | Actual metered charge, from zero through `authorizedAmount`. |
+| `priorCumulativeAmount` | string | Committed channel watermark immediately before this operation completed. |
+| `cumulativeAmount` | string | MUST equal `priorCumulativeAmount + chargedAmount`. |
+| `voucher` | `BatchVoucher` | Operator-signed channel voucher whose `maxClaimableAmount` equals `cumulativeAmount`. |
+| `signature` | string | Base58 Ed25519 signature by `extra.operator` over the itemized message below. |
+
+The receipt signature covers exactly:
+
+```text
+utf8("x402-batch-receipt-v1") ||
+base58_decode(channelId) ||
+u16(len(utf8(idempotencyKey))).le || utf8(idempotencyKey) ||
+u64(authorizedAmount).le ||
+u64(chargedAmount).le ||
+u64(priorCumulativeAmount).le ||
+u64(cumulativeAmount).le
+```
+
+`channelId` MUST decode to 32 bytes, and `idempotencyKey` MUST encode to 1
+through 256 UTF-8 bytes. The client MUST verify both this signature and the
+embedded payment-channel voucher against `channelConfig.payerAuthorizer`.
+
 `CloseAuthorization`:
 
 | Field | Type | Notes |
@@ -613,7 +644,8 @@ unless an authenticated server confirms it is the latest accepted voucher.
 | `extra.commitmentId` | string | no | MUST be non-empty for voucher acceptance, e.g. `channelId:maxClaimableAmount`. |
 | `extra.chargedAmount` | string | no | Actual charge. In server mode MUST satisfy `0 <= chargedAmount <= PaymentRequirements.amount`; in client mode it MUST equal `PaymentRequirements.amount`. |
 | `extra.channelState` | `ChannelState` | no | Current channel snapshot. |
-| `extra.voucher` | `BatchVoucher` | conditional | REQUIRED in server mode. Operator-signed receipt for the resulting cumulative amount. |
+| `extra.voucher` | `BatchVoucher` | conditional | REQUIRED in server mode. Operator-signed payment-channel voucher for the resulting cumulative amount. |
+| `extra.receipt` | `BatchSettlementReceipt` | conditional | REQUIRED in server mode. Binds the request identifier, ceiling, actual charge, prior watermark, resulting watermark, and voucher. |
 
 Scheme-specific response fields are nested under `extra`.
 A successful voucher-only response is:
@@ -634,6 +666,28 @@ A successful voucher-only response is:
       "totalClaimed": "3000",
       "withdrawRequestedAt": 0,
       "chargedCumulativeAmount": "5000"
+    },
+    "voucher": {
+      "channelId": "<channel-pda>",
+      "maxClaimableAmount": "5000",
+      "expiresAt": 0,
+      "signature": "<base58-operator-voucher-signature>"
+    },
+    "receipt": {
+      "type": "receipt",
+      "channelId": "<channel-pda>",
+      "idempotencyKey": "<opaque-request-id>",
+      "authorizedAmount": "1000",
+      "chargedAmount": "1000",
+      "priorCumulativeAmount": "4000",
+      "cumulativeAmount": "5000",
+      "voucher": {
+        "channelId": "<channel-pda>",
+        "maxClaimableAmount": "5000",
+        "expiresAt": 0,
+        "signature": "<base58-operator-voucher-signature>"
+      },
+      "signature": "<base58-operator-receipt-signature>"
     }
   }
 }
@@ -1282,11 +1336,13 @@ The server is the sole owner of per-channel offchain state. A separate
 facilitator, if used, remains stateless for ordinary voucher acceptance; it only
 needs onchain state plus a voucher when it later settles.
 
-The server MUST serialize all paid-request and close processing per channel.
-The server stores `chargedCumulativeAmount`, `signedMaxClaimable`, the latest
-voucher signature, processed server-mode `idempotencyKey` values, and the last
-time its mirrored onchain fields were refreshed. For every paid request, the
-server MUST:
+The server MUST serialize only reservation, final accounting, and close
+transitions per channel. Server-mode resource handlers MAY execute concurrently
+outside that short critical section. The server stores
+`chargedCumulativeAmount`, `signedMaxClaimable`, the latest voucher signature,
+the last time its mirrored onchain fields were refreshed, and server-mode
+operations in a store keyed by `(channelId, idempotencyKey)`. For every paid
+request, the server MUST:
 
 1. In client mode, verify the Ed25519 signature over the 50-byte voucher message
    using `channelConfig.payerAuthorizer`. In server mode, verify the reusable
@@ -1319,13 +1375,21 @@ server MUST:
 5. Reserve capacity before running the handler. In client mode, require
    `maxClaimableAmount == chargedCumulativeAmount + PaymentRequirements.amount`
    and `maxClaimableAmount <= channel.deposit`. In server mode, reserve the
-   advertised ceiling and require `chargedCumulativeAmount +
-   PaymentRequirements.amount <= channel.deposit`. A failed or canceled handler
-   MUST release the reservation without charging.
+   advertised ceiling under the request's idempotency key and enforce:
+
+   ```text
+   sum(activeReservation.ceiling) <= deposit - chargedCumulativeAmount
+   ```
+
+   A failed or canceled handler MUST release the reservation without charging.
+   A close transition MUST NOT be accepted while any paid request remains
+   reserved.
 6. Enforce replay protection. Reject stale or already accepted client vouchers,
-   and reject a server-mode `idempotencyKey` that has already been committed.
-   A generic idempotency extension MAY instead replay a cached application
-   response without executing the handler.
+   and atomically create at most one server-mode operation for each
+   `(channelId, idempotencyKey)`. A retry of a running operation MAY wait,
+   coalesce, or return a defined pending response; it MUST NOT execute the
+   handler again. A retry of a completed operation MUST return the original
+   settlement response and receipt without executing or charging again.
 7. Execute the resource handler. In client mode, the actual charge is the
    advertised amount. In server mode, after metering completes, choose an actual
    charge satisfying `0 <= chargedAmount <= PaymentRequirements.amount` and set
@@ -1333,10 +1397,17 @@ server MUST:
    success, atomically store the new cumulative amount and voucher, then return
    `PAYMENT-RESPONSE` with `transaction == ""`, `extra.commitmentId`,
    `extra.chargedAmount`, `extra.channelState`, and, in server mode, the
-   operator-signed `extra.voucher`. The client MUST verify that voucher against
-   `channelConfig.payerAuthorizer` before committing the response. In server
-   mode the server MUST durably bind `idempotencyKey` to the actual cumulative
-   amount before acknowledging success.
+   operator-signed `extra.voucher` and `extra.receipt`. The client MUST verify
+   both signatures against `channelConfig.payerAuthorizer` before committing
+   the response. In server mode the server MUST durably bind `idempotencyKey`
+   to the ceiling, actual charge, resulting cumulative amount, receipt, and
+   settlement response before acknowledging success.
+
+Different operations MAY complete in any order. Each completion briefly locks
+the channel, adds its actual charge to the then-current watermark, signs that
+new cumulative value, commits the operation, and releases its reservation.
+Production implementations using separate channel and operation stores MUST
+make that transition atomic or provide equivalent recovery semantics.
 
 For a `deposit` payload, the `open` or `top_up` transaction is broadcast by the
 post-handler `/settle`, so the checks above run against the statically
@@ -1397,17 +1468,17 @@ server has authenticated that close. After the grace period, anyone can call
 
 The cumulative voucher and payment-channel state machine prevent duplicate
 token movement, but HTTP retries still require explicit operation-level
-idempotency. Batch settlement does not define application-response caching;
-applications that require replayable responses SHOULD use the generic
-`payment-identifier` extension:
+idempotency:
 
-- **Paid requests (`deposit`, `voucher`, and `authorization`).** The server's
-  per-channel lock and charged watermark are the authoritative replay defense.
-  The same authorization MUST NOT execute the resource handler more than once.
-  Server mode additionally records `idempotencyKey`; a recorded key MUST be
-  rejected. Without a scheme-agnostic idempotency extension, the server cannot
-  replay the application response and MUST reject the retry rather than
-  re-execute the handler.
+- **Server-mode paid requests.** The operation record is the authoritative
+  replay defense. A completed retry returns the original `PAYMENT-RESPONSE` and
+  signed receipt. Batch settlement does not prescribe storage for the arbitrary
+  application response body; applications that need to replay that body after
+  a lost response SHOULD integrate the same idempotency key with a generic
+  response cache. A running retry may wait, coalesce, or return pending.
+- **Client-mode paid requests.** The per-channel lock and charged watermark are
+  the authoritative replay defense. The same authorization MUST NOT execute the
+  resource handler more than once.
 - **Client-supplied transactions.** For `deposit` and `refund`, the facilitator
   SHOULD maintain a short-lived in-flight cache keyed by the exact serialized
   transaction or its first signature. Concurrent `/settle` calls for the same
@@ -1517,6 +1588,25 @@ Onchain recovery does not recreate an unclaimed voucher or the server's
 a charge. The facilitator's conservative recovery action is to close at the
 current onchain `settled` watermark and return the remainder to the payer.
 
+### 6.3 Reference Storage Boundaries
+
+The reference implementation separates channel accounting from request
+operations. Its channel store owns the cumulative watermark and active
+reservations; its operation store provides the conceptual operations:
+
+```text
+reserveOperation(channelId, idempotencyKey, ceiling)
+completeOperation(channelId, idempotencyKey, actual, receipt, settlementResponse)
+getOperation(channelId, idempotencyKey)
+```
+
+The included in-memory stores demonstrate the state machine and per-key locks.
+They are not production persistence. Implementers may replace them with a
+database, object store, distributed lock, HSM-backed signer, or another design,
+provided reservation and completion invariants survive process failure and
+concurrent workers. Retention, sharding, monitoring, and application-result
+storage are implementation concerns.
+
 ## 7. Error Codes
 
 Standard x402 codes apply. The facilitator reports verification failures in
@@ -1585,10 +1675,13 @@ Standard x402 codes apply. The facilitator reports verification failures in
   trust the resource operator with that authority.
 - **Bearer-proof confinement.** The reusable proof binds the channel, payer,
   and operator under a versioned domain. It MUST NOT be logged or sent to any
-  origin other than the authorized resource server. A unique `idempotencyKey`
-  prevents the same logical request from executing twice; it does not reduce
-  the operator's onchain signing authority. Closing the channel is the only
-  protocol-level revocation mechanism for a leaked proof.
+  origin other than the authorized resource server. A fresh `idempotencyKey`
+  prevents replay of one logical request but does not constrain a leaked proof:
+  its holder can create new identifiers and consume the remaining deposit.
+  Servers MAY layer an expiring or revocable authenticated session, audience
+  binding, or a per-request payer signature over the bearer proof. Closing the
+  channel is the only protocol-level revocation mechanism and the only action
+  that removes the operator's onchain authority over the remaining deposit.
 - **No redirection.** `distribution_hash` is fixed at `open` and re-checked at
   `distribute`; the derived distribution sends settled funds to `payTo`.
 - **Authenticated vouchers.** The wire `extra.feePayer` address is recorded as
@@ -1620,10 +1713,12 @@ Standard x402 codes apply. The facilitator reports verification failures in
   client-initiated grace period, only the facilitator can apply the final
   voucher, and only after authenticating the server.
 - **No replay / no rollback.** Server offchain watermark plus onchain
-  `settled` monotonicity reject old vouchers. Paid-request equality is rejected
-  unless a scheme-agnostic idempotency extension supplies the previously cached
-  application response. Refund initiation
-  is idempotent by the client-signed `request_close` transaction; optional
+  `settled` monotonicity reject old vouchers. Server-mode retries reuse their
+  operation record and signed receipt without executing or charging twice; a
+  generic response cache may additionally preserve the application body.
+  Clients accept out-of-order receipts without rolling their confirmed
+  cumulative state backward. Refund initiation is idempotent by the
+  client-signed `request_close` transaction; optional
   cooperative closes use a separate operation namespace and a terminal onchain
   transition.
 - **Bounded sponsor exposure.** Client-supplied transactions have a static

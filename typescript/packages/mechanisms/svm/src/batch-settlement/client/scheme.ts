@@ -18,12 +18,15 @@ import { ChannelStatus } from "../../payment-channels/generated/types/channelSta
 import type { ClientSvmConfig } from "../../signer";
 import { createRpcClient, resolveBlockhash, resolveOpenSlot } from "../../utils";
 import { BatchError } from "../errors";
+import { verifyBatchSettlementReceipt } from "../receipt";
 import {
   BATCH_SETTLEMENT_SCHEME,
   isBatchPayload,
+  isBatchSettlementReceipt,
   isBatchVoucher,
   type BatchChannelState,
   type BatchPayload,
+  type BatchSettlementReceipt,
   type BatchVoucher,
   type BatchVoucherState,
 } from "../types";
@@ -48,6 +51,7 @@ type PendingChannel = OpenChannel & {
   /** Confirmed allocation to restore if this pending request is rejected. */
   confirmed?: OpenChannel | undefined;
   key: string;
+  operationKey: string;
   amount: string;
   cumulative: bigint;
   payment: PendingPayment;
@@ -62,12 +66,21 @@ export interface BatchClientChannelRecord {
   deposit: string;
   /** Whether the top-level allocation is confirmed while `pending` is in flight. */
   hasConfirmedState?: boolean | undefined;
-  pending?: {
-    amount: string;
-    chargedCumulativeAmount: string;
-    deposit: string;
-    payment: PendingPayment;
-  };
+  pending?:
+    | {
+        amount: string;
+        chargedCumulativeAmount: string;
+        deposit: string;
+        operationKey?: string | undefined;
+        payment: PendingPayment;
+      }
+    | Array<{
+        amount: string;
+        chargedCumulativeAmount: string;
+        deposit: string;
+        operationKey: string;
+        payment: PendingPayment;
+      }>;
 }
 
 /** Optional durable storage for confirmed client allocations. */
@@ -132,22 +145,31 @@ export class BatchSvmScheme implements SchemeNetworkClient {
     if (charge === 0n) throw new Error("batch-settlement amount must be positive");
     const key = this.channelKey(requirements, terms.feePayer, terms.withdrawDelay);
     const existing = await this.loadChannel(key);
-    const pending = this.pending.get(key);
-    if (pending) {
-      if (pending.amount !== requirements.amount) {
+    const channelPending = [...this.pending.values()].filter(candidate => candidate.key === key);
+    const blocking = channelPending.find(
+      candidate =>
+        candidate.payment.payload.type !== "authorization" || terms.voucherSigner !== "server",
+    );
+    if (blocking) {
+      if (blocking.amount !== requirements.amount) {
         throw new Error("batch-settlement channel has a pending allocation for a different amount");
       }
-      return pending.payment;
+      return blocking.payment;
     }
     if (existing) {
-      const cumulative = existing.tracker.cumulative + charge;
+      const reserved = channelPending.reduce(
+        (sum, candidate) => sum + BigInt(candidate.amount),
+        0n,
+      );
+      const cumulative = existing.tracker.cumulative + reserved + charge;
       if (cumulative <= existing.deposit) {
+        const idempotencyKey = terms.voucherSigner === "server" ? crypto.randomUUID() : undefined;
         const payload: Extract<BatchPayload, { type: "authorization" | "voucher" }> =
           terms.voucherSigner === "server"
             ? {
                 authorization: await existing.tracker.authorization(),
                 channelConfig: existing.tracker.channelConfig,
-                idempotencyKey: crypto.randomUUID(),
+                idempotencyKey: idempotencyKey!,
                 type: "authorization",
               }
             : {
@@ -165,11 +187,15 @@ export class BatchSvmScheme implements SchemeNetworkClient {
           confirmed: existing,
           cumulative,
           key,
+          operationKey: idempotencyKey ? `${key}\u0000${idempotencyKey}` : key,
           payment,
         };
-        this.pending.set(key, next);
+        this.pending.set(next.operationKey, next);
         await this.persistPending(next);
         return payment;
+      }
+      if (channelPending.length > 0) {
+        throw new Error("batch-settlement channel has insufficient unreserved capacity");
       }
       const topUpAmount = this.resolveDepositAmount(
         requirements,
@@ -210,9 +236,10 @@ export class BatchSvmScheme implements SchemeNetworkClient {
         cumulative,
         deposit: existing.deposit + topUpAmount,
         key,
+        operationKey: key,
         payment,
       };
-      this.pending.set(key, next);
+      this.pending.set(next.operationKey, next);
       await this.persistPending(next);
       return payment;
     }
@@ -265,10 +292,14 @@ export class BatchSvmScheme implements SchemeNetworkClient {
       cumulative: charge,
       deposit,
       key,
+      operationKey:
+        built.payload.authorization && built.payload.idempotencyKey
+          ? `${key}\u0000${built.payload.idempotencyKey}`
+          : key,
       payment,
       tracker: built.tracker,
     };
-    this.pending.set(key, next);
+    this.pending.set(next.operationKey, next);
     await this.persistPending(next);
     return payment;
   }
@@ -447,40 +478,55 @@ export class BatchSvmScheme implements SchemeNetworkClient {
     const saved = await this.config.channelStorage?.get(key);
     if (!saved) return undefined;
     if (saved.pending) {
+      const savedPending = Array.isArray(saved.pending) ? saved.pending : [saved.pending];
+      if (savedPending.length === 0) return this.hydrateAndCache(key, saved);
       const confirmed = saved.hasConfirmedState ? this.hydrateChannel(saved) : undefined;
       if (confirmed) this.channels.set(key, confirmed);
       const tracker =
         confirmed?.tracker ??
         new BatchChannelTracker(saved.channelId, saved.channelConfig, this.signer);
-      this.pending.set(key, {
-        confirmed,
-        tracker,
-        amount: saved.pending.amount,
-        cumulative: parseU64(saved.pending.chargedCumulativeAmount, "stored pending cumulative"),
-        deposit: parseU64(saved.pending.deposit, "stored pending deposit"),
-        key,
-        payment: saved.pending.payment,
-      });
+      for (const pending of savedPending) {
+        const operationKey = pending.operationKey ?? key;
+        this.pending.set(operationKey, {
+          confirmed,
+          tracker,
+          amount: pending.amount,
+          cumulative: parseU64(pending.chargedCumulativeAmount, "stored pending cumulative"),
+          deposit: parseU64(pending.deposit, "stored pending deposit"),
+          key,
+          operationKey,
+          payment: pending.payment,
+        });
+      }
       return confirmed;
     }
-    const channel = this.hydrateChannel(saved);
+    return this.hydrateAndCache(key, saved);
+  }
+
+  private hydrateAndCache(key: string, record: BatchClientChannelRecord): OpenChannel {
+    const channel = this.hydrateChannel(record);
     this.channels.set(key, channel);
     return channel;
   }
 
   private persistPending(pending: PendingChannel): Promise<void> | undefined {
+    const allPending = [...this.pending.values()].filter(
+      candidate => candidate.key === pending.key,
+    );
+    const confirmed = this.channels.get(pending.key) ?? pending.confirmed;
     return this.config.channelStorage?.set(pending.key, {
       channelConfig: pending.tracker.channelConfig,
       channelId: pending.tracker.channelId,
-      chargedCumulativeAmount: (pending.confirmed?.tracker.cumulative ?? 0n).toString(),
-      deposit: (pending.confirmed?.deposit ?? 0n).toString(),
-      hasConfirmedState: pending.confirmed !== undefined,
-      pending: {
-        amount: pending.amount,
-        chargedCumulativeAmount: pending.cumulative.toString(),
-        deposit: pending.deposit.toString(),
-        payment: pending.payment,
-      },
+      chargedCumulativeAmount: (confirmed?.tracker.cumulative ?? 0n).toString(),
+      deposit: (confirmed?.deposit ?? 0n).toString(),
+      hasConfirmedState: confirmed !== undefined,
+      pending: allPending.map(item => ({
+        amount: item.amount,
+        chargedCumulativeAmount: item.cumulative.toString(),
+        deposit: item.deposit.toString(),
+        operationKey: item.operationKey,
+        payment: item.payment,
+      })),
     });
   }
 
@@ -492,6 +538,7 @@ export class BatchSvmScheme implements SchemeNetworkClient {
    *
    * @param ctx
    */
+  // eslint-disable-next-line complexity
   private async handlePaymentResponse(ctx: PaymentResponseContext): Promise<boolean> {
     const payload = ctx.paymentPayload.payload;
     if (
@@ -500,17 +547,26 @@ export class BatchSvmScheme implements SchemeNetworkClient {
     ) {
       return false;
     }
-    const pending = [...this.pending.values()].find(
-      candidate =>
-        candidate.tracker.channelId ===
-        (payload.type === "voucher"
-          ? payload.voucher.channelId
-          : payload.type === "authorization"
-            ? payload.authorization.channelId
-            : (payload.voucher?.channelId ?? payload.authorization?.channelId)),
+    const idempotencyKey =
+      payload.type === "authorization"
+        ? payload.idempotencyKey
+        : payload.type === "deposit"
+          ? payload.idempotencyKey
+          : undefined;
+    const voucherChannelId =
+      payload.type === "voucher"
+        ? payload.voucher.channelId
+        : payload.type === "deposit"
+          ? payload.voucher?.channelId
+          : undefined;
+    const pending = [...this.pending.values()].find(candidate =>
+      idempotencyKey
+        ? candidate.payment.payload.type !== "voucher" &&
+          candidate.payment.payload.idempotencyKey === idempotencyKey
+        : candidate.tracker.channelId === voucherChannelId,
     );
     if (!pending) return false;
-    this.pending.delete(pending.key);
+    this.pending.delete(pending.operationKey);
 
     if (!ctx.settleResponse?.success) {
       await this.restoreConfirmedChannel(pending);
@@ -529,6 +585,7 @@ export class BatchSvmScheme implements SchemeNetworkClient {
           commitmentId?: unknown;
           chargedAmount?: unknown;
           channelState?: { balance?: unknown; chargedCumulativeAmount?: unknown };
+          receipt?: BatchSettlementReceipt;
           voucher?: BatchVoucher;
         }
       | undefined;
@@ -540,18 +597,47 @@ export class BatchSvmScheme implements SchemeNetworkClient {
     if (charged === undefined || charged > requestAmount) {
       throw new Error("batch-settlement PAYMENT-RESPONSE charged more than the advertised price");
     }
-    const confirmedCumulative = (pending.confirmed?.tracker.cumulative ?? 0n) + charged;
+    let confirmedCumulative = (pending.confirmed?.tracker.cumulative ?? 0n) + charged;
     if (pending.tracker.channelConfig.voucherSigner === "server") {
+      const receipt = extra?.receipt;
       const voucher = extra?.voucher;
+      const receiptAmounts =
+        isBatchSettlementReceipt(receipt) &&
+        /^\d+$/.test(receipt.authorizedAmount) &&
+        /^\d+$/.test(receipt.chargedAmount) &&
+        /^\d+$/.test(receipt.priorCumulativeAmount) &&
+        /^\d+$/.test(receipt.cumulativeAmount)
+          ? {
+              authorized: BigInt(receipt.authorizedAmount),
+              charged: BigInt(receipt.chargedAmount),
+              cumulative: BigInt(receipt.cumulativeAmount),
+              prior: BigInt(receipt.priorCumulativeAmount),
+            }
+          : undefined;
       if (
+        !isBatchSettlementReceipt(receipt) ||
         !isBatchVoucher(voucher) ||
+        !receiptAmounts ||
+        receipt.channelId !== pending.tracker.channelId ||
+        receipt.idempotencyKey !== idempotencyKey ||
+        receiptAmounts.authorized !== requestAmount ||
+        receiptAmounts.charged !== charged ||
+        receiptAmounts.prior + charged !== receiptAmounts.cumulative ||
+        receipt.voucher.channelId !== voucher.channelId ||
+        receipt.voucher.maxClaimableAmount !== voucher.maxClaimableAmount ||
+        receipt.voucher.expiresAt !== voucher.expiresAt ||
+        receipt.voucher.signature !== voucher.signature ||
         voucher.channelId !== pending.tracker.channelId ||
         voucher.expiresAt !== 0 ||
-        voucher.maxClaimableAmount !== confirmedCumulative.toString() ||
+        voucher.maxClaimableAmount !== receipt.cumulativeAmount ||
+        !(await verifyBatchSettlementReceipt(
+          receipt,
+          pending.tracker.channelConfig.payerAuthorizer,
+        )) ||
         !(await verifyVoucherSignature({
           message: encodeVoucherMessageBytes({
             channelId: pending.tracker.channelId,
-            cumulativeAmount: confirmedCumulative,
+            cumulativeAmount: receiptAmounts.cumulative,
             expiresAt: BigInt(voucher.expiresAt),
           }),
           signatureBase58: voucher.signature,
@@ -561,6 +647,7 @@ export class BatchSvmScheme implements SchemeNetworkClient {
         await this.restoreConfirmedChannel(pending);
         throw new Error("batch-settlement PAYMENT-RESPONSE has an invalid server voucher");
       }
+      confirmedCumulative = receiptAmounts.cumulative;
     }
     const reported = extra?.channelState?.chargedCumulativeAmount;
     if (
@@ -577,15 +664,21 @@ export class BatchSvmScheme implements SchemeNetworkClient {
     // reports holding.
     const deposited =
       payload.type === "deposit" ? parseU64(payload.deposit.amount, "deposit.amount") : 0n;
-    pending.tracker.commit(confirmedCumulative);
+    if (confirmedCumulative > pending.tracker.cumulative) {
+      pending.tracker.commit(confirmedCumulative);
+    }
     pending.deposit = (pending.confirmed?.deposit ?? 0n) + deposited;
-    this.channels.set(pending.key, pending);
-    await this.config.channelStorage?.set(pending.key, {
-      channelConfig: pending.tracker.channelConfig,
-      channelId: pending.tracker.channelId,
-      chargedCumulativeAmount: confirmedCumulative.toString(),
-      deposit: pending.deposit.toString(),
-    });
+    const confirmed = { deposit: pending.deposit, tracker: pending.tracker };
+    this.channels.set(pending.key, confirmed);
+    const remaining = [...this.pending.values()].find(candidate => candidate.key === pending.key);
+    if (remaining) await this.persistPending(remaining);
+    else
+      await this.config.channelStorage?.set(pending.key, {
+        channelConfig: confirmed.tracker.channelConfig,
+        channelId: confirmed.tracker.channelId,
+        chargedCumulativeAmount: confirmed.tracker.cumulative.toString(),
+        deposit: confirmed.deposit.toString(),
+      });
     return false;
   }
 
@@ -674,6 +767,11 @@ export class BatchSvmScheme implements SchemeNetworkClient {
   }
 
   private async restoreConfirmedChannel(pending: PendingChannel): Promise<void> {
+    const remaining = [...this.pending.values()].find(candidate => candidate.key === pending.key);
+    if (remaining) {
+      await this.persistPending(remaining);
+      return;
+    }
     if (!pending.confirmed) {
       await this.config.channelStorage?.delete(pending.key);
       return;

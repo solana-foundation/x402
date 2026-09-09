@@ -553,7 +553,9 @@ describe("batch server lifecycle boundaries", () => {
   it("rejects busy, closing, and mismatched stored channel reservations", async () => {
     const cases = [
       state({
-        pendingRequest: { expiresAt: Date.now() + 10_000, id: "busy", maxClaimableAmount: 1n },
+        reservations: {
+          busy: { ceiling: 1n, expiresAt: Date.now() + 10_000, kind: "client" },
+        },
       }),
       state({ status: "closing" }),
       state({ channelConfig: { ...channelConfig, salt: "1" } }),
@@ -750,7 +752,9 @@ describe("batch server lifecycle boundaries", () => {
     });
     await changedStore.update(channelId, current => ({
       ...current!,
-      pendingRequest: { expiresAt: 1, id: "replacement", maxClaimableAmount: 1n },
+      reservations: {
+        replacement: { ceiling: 1n, expiresAt: Date.now() + 10_000, kind: "client" },
+      },
     }));
     await expect(
       changed.schemeHooks.onBeforeSettle!({ ...ctx2, phase: "before-handler" }),

@@ -10,11 +10,13 @@ import {
 import {
   BatchChannelTracker,
   buildDepositPayload,
+  buildRefundPayload,
   signBatchVoucher,
 } from "../../src/batch-settlement/client/channel";
 import { BatchError } from "../../src/batch-settlement/errors";
 import { BatchSvmScheme as BatchServerScheme } from "../../src/batch-settlement/server/scheme";
 import { MemoryChannelStore } from "../../src/batch-settlement/server/storage";
+import { MemoryBatchOperationStore } from "../../src/batch-settlement/server/operationStore";
 import {
   isBatchChannelConfig,
   isBatchFacilitatorPayload,
@@ -352,8 +354,10 @@ describe("batch server voucher signer boundaries", () => {
 
   it("opens and advances a server-signed channel through the server hook lifecycle", async () => {
     const store = new MemoryChannelStore();
+    const operationStore = new MemoryBatchOperationStore();
     const server = new BatchServerScheme({
       operator,
+      operationStore,
       store,
     });
     const depositPayment: PaymentPayload = {
@@ -438,9 +442,13 @@ describe("batch server voucher signer boundaries", () => {
       }),
     ).toBe(true);
     expect(await store.get(channelId)).toMatchObject({
-      authorizationRecords: { "request-2": "1400" },
       chargedCumulativeAmount: 1_400n,
       signedMaxClaimable: 1_400n,
+    });
+    await expect(operationStore.get(channelId, "request-2")).resolves.toMatchObject({
+      actual: 400n,
+      cumulative: 1_400n,
+      status: "completed",
     });
 
     const zeroPayment = {
@@ -465,9 +473,11 @@ describe("batch server voucher signer boundaries", () => {
         success: true,
       },
     });
-    expect(await store.get(channelId)).toMatchObject({
-      authorizationRecords: { "request-2": "1400", "request-3": "1400" },
-      chargedCumulativeAmount: 1_400n,
+    expect(await store.get(channelId)).toMatchObject({ chargedCumulativeAmount: 1_400n });
+    await expect(operationStore.get(channelId, "request-3")).resolves.toMatchObject({
+      actual: 0n,
+      cumulative: 1_400n,
+      status: "completed",
     });
 
     const replayPayment = {
@@ -476,8 +486,166 @@ describe("batch server voucher signer boundaries", () => {
     } as PaymentPayload;
     const replayContext = { ...authorizationContext, paymentPayload: replayPayment };
     await expect(server.schemeHooks.onBeforeVerify!(replayContext)).resolves.toMatchObject({
-      abort: true,
-      reason: "duplicate_settlement",
+      skip: true,
     });
+    const replayVerified = await server.schemeHooks.onAfterVerify!({
+      ...replayContext,
+      result: { isValid: true, payer: payer.address },
+    });
+    expect(replayVerified).toMatchObject({
+      skipHandler: true,
+      response: { body: { replayed: true } },
+    });
+    await expect(
+      server.schemeHooks.onBeforeSettle!({ ...replayContext, phase: "after-handler" }),
+    ).resolves.toMatchObject({
+      skip: true,
+      result: { extra: { chargedAmount: "400", commitmentId: `${channelId}:1400` } },
+    });
+  });
+
+  it("reserves concurrent ceilings, completes out of order, and replays receipts", async () => {
+    const store = new MemoryChannelStore();
+    const operationStore = new MemoryBatchOperationStore();
+    const server = new BatchServerScheme({ operator, operationStore, store });
+    const openPayment: PaymentPayload = {
+      accepted: requirements(),
+      payload: serverDeposit,
+      x402Version: 2,
+    };
+    const openContext = {
+      declaredExtensions: {},
+      paymentPayload: openPayment,
+      requirements: requirements(),
+    };
+    const openVerified = await server.schemeHooks.onBeforeVerify!(openContext);
+    await server.schemeHooks.onAfterVerify!({
+      ...openContext,
+      result: (openVerified as { result: { isValid: true; payer: string } }).result,
+    });
+    await server.schemeHooks.onAfterSettle!({
+      ...openContext,
+      phase: "after-handler",
+      result: {
+        extra: { channelState: { balance: "10000", totalClaimed: "0", withdrawRequestedAt: 0 } },
+        network: SOLANA_DEVNET_CAIP2,
+        success: true,
+        transaction: "open-signature",
+      },
+    });
+    const channelId = serverDeposit.authorization!.channelId;
+    const ceiling = { ...requirements(), amount: "4000" };
+    const payment = (idempotencyKey: string, accepted = ceiling): PaymentPayload => ({
+      accepted,
+      payload: {
+        authorization: serverDeposit.authorization!,
+        channelConfig: serverDeposit.channelConfig,
+        idempotencyKey,
+        type: "authorization",
+      },
+      x402Version: 2,
+    });
+    const reserve = async (value: PaymentPayload, accepted = ceiling) => {
+      const context = { declaredExtensions: {}, paymentPayload: value, requirements: accepted };
+      const verified = await server.schemeHooks.onBeforeVerify!(context);
+      expect(verified).toMatchObject({ skip: true });
+      const result = await server.schemeHooks.onAfterVerify!({
+        ...context,
+        result: (verified as { result: { isValid: true; payer: string } }).result,
+      });
+      return { context, result };
+    };
+
+    const first = await reserve(payment("concurrent-1"));
+    const second = await reserve(payment("concurrent-2"));
+    expect(Object.values((await store.get(channelId))?.reservations ?? {})).toHaveLength(2);
+
+    const exhaustedRequirements = { ...requirements(), amount: "2000" };
+    const exhaustedPayment = payment("concurrent-3", exhaustedRequirements);
+    const exhausted = await reserve(exhaustedPayment, exhaustedRequirements);
+    expect(exhausted.result).toMatchObject({
+      abort: true,
+      reason: BatchError.CUMULATIVE_EXCEEDS_DEPOSIT,
+    });
+
+    const refundPayment: PaymentPayload = {
+      accepted: requirements(),
+      payload: await buildRefundPayload({
+        blockhash: { blockhash: USDC_MAINNET_ADDRESS, lastValidBlockHeight: 1n },
+        channelConfig: serverDeposit.channelConfig,
+        channelId,
+        feePayer: feePayer.address,
+        payer,
+      }),
+      x402Version: 2,
+    };
+    const refundContext = {
+      declaredExtensions: {},
+      paymentPayload: refundPayment,
+      requirements: requirements(),
+    };
+    const refundVerified = await server.schemeHooks.onBeforeVerify!(refundContext);
+    await expect(
+      server.schemeHooks.onAfterVerify!({
+        ...refundContext,
+        result: (refundVerified as { result: { isValid: true; payer: string } }).result,
+      }),
+    ).resolves.toMatchObject({ abort: true, reason: "duplicate_settlement" });
+
+    await server.schemeHooks.onVerifiedPaymentCanceled!({
+      ...first.context,
+      reason: "handler_error",
+      settledPhases: [],
+    });
+    const third = await reserve(exhaustedPayment, exhaustedRequirements);
+    expect(third.result).toBeUndefined();
+
+    const thirdSettled = await server.schemeHooks.onBeforeSettle!({
+      ...third.context,
+      requirements: { ...exhaustedRequirements, amount: "500" },
+      phase: "after-handler",
+    });
+    expect(thirdSettled).toMatchObject({
+      result: {
+        extra: {
+          receipt: {
+            authorizedAmount: "2000",
+            chargedAmount: "500",
+            priorCumulativeAmount: "1000",
+            cumulativeAmount: "1500",
+          },
+        },
+      },
+    });
+    const secondSettled = await server.schemeHooks.onBeforeSettle!({
+      ...second.context,
+      requirements: { ...ceiling, amount: "250" },
+      phase: "after-handler",
+    });
+    expect(secondSettled).toMatchObject({
+      result: {
+        extra: {
+          receipt: {
+            authorizedAmount: "4000",
+            chargedAmount: "250",
+            priorCumulativeAmount: "1500",
+            cumulativeAmount: "1750",
+          },
+        },
+      },
+    });
+    expect(await store.get(channelId)).toMatchObject({
+      chargedCumulativeAmount: 1_750n,
+      reservations: {},
+    });
+
+    const replay = await reserve(exhaustedPayment, exhaustedRequirements);
+    expect(replay.result).toMatchObject({
+      skipHandler: true,
+      response: { body: { replayed: true } },
+    });
+    await expect(
+      server.schemeHooks.onBeforeSettle!({ ...replay.context, phase: "after-handler" }),
+    ).resolves.toEqual(thirdSettled);
   });
 });

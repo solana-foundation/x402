@@ -517,7 +517,13 @@ describe("batch-settlement SVM onchain", () => {
           {
             amount: PRICE,
             asset: USDC_DEVNET_ADDRESS,
-            extra: { feePayer: feePayer.address },
+            extra: {
+              feePayer: feePayer.address,
+              operator: voucherOperator.address,
+              tokenProgram: TOKEN_PROGRAM_ADDRESS,
+              voucherSigner: "server",
+              withdrawDelay: WITHDRAW_DELAY,
+            },
             maxTimeoutSeconds: 300,
             network: NETWORK,
             payTo: receiver.address,
@@ -528,15 +534,15 @@ describe("batch-settlement SVM onchain", () => {
           url: "https://example.test/operator-paid",
         });
 
-        const pay = async () => {
+        const pay = async (amount: string) => {
           const payload = await client.createPaymentPayload(required);
-          const matched = server.findMatchingRequirements(accepts, payload)!;
+          const matched = server.findMatchingRequirements(required.accepts, payload)!;
           const verified = await server.verifyPayment(payload, matched);
           expect(verified.isValid, JSON.stringify(verified)).toBe(true);
           // The requirement is a per-request ceiling. Metering happens after
           // the handler, and server mode signs only the actual charge.
           const settled = await server.settlePayment(payload, matched, undefined, undefined, {
-            amount: "400",
+            amount,
           });
           expect(settled.success, JSON.stringify(settled)).toBe(true);
           await clientScheme.schemeHooks.onPaymentResponse!({
@@ -547,7 +553,7 @@ describe("batch-settlement SVM onchain", () => {
           return { matched, payload };
         };
 
-        const first = await pay();
+        const first = await pay("400");
         const firstPayload = first.payload.payload as {
           authorization: { channelId: string; signature: string };
           channelConfig: { payerAuthorizer: string; voucherSigner?: string };
@@ -564,19 +570,62 @@ describe("batch-settlement SVM onchain", () => {
         });
         expect(firstPayload.voucher).toBeUndefined();
 
-        const second = await pay();
-        const secondPayload = second.payload.payload as {
+        // Reserve two ceilings before either handler settles. Complete them in
+        // one order and deliver their responses in the reverse order.
+        const secondPayment = await client.createPaymentPayload(required);
+        const thirdPayment = await client.createPaymentPayload(required);
+        const matched = server.findMatchingRequirements(required.accepts, secondPayment)!;
+        const [secondVerified, thirdVerified] = await Promise.all([
+          server.verifyPayment(secondPayment, matched),
+          server.verifyPayment(thirdPayment, matched),
+        ]);
+        expect(secondVerified.isValid, JSON.stringify(secondVerified)).toBe(true);
+        expect(thirdVerified.isValid, JSON.stringify(thirdVerified)).toBe(true);
+
+        const thirdSettled = await server.settlePayment(
+          thirdPayment,
+          matched,
+          undefined,
+          undefined,
+          { amount: "300" },
+        );
+        const secondSettled = await server.settlePayment(
+          secondPayment,
+          matched,
+          undefined,
+          undefined,
+          { amount: "200" },
+        );
+        expect(thirdSettled.success, JSON.stringify(thirdSettled)).toBe(true);
+        expect(secondSettled.success, JSON.stringify(secondSettled)).toBe(true);
+        await clientScheme.schemeHooks.onPaymentResponse!({
+          paymentPayload: secondPayment,
+          requirements: matched,
+          settleResponse: secondSettled,
+        } as never);
+        await clientScheme.schemeHooks.onPaymentResponse!({
+          paymentPayload: thirdPayment,
+          requirements: matched,
+          settleResponse: thirdSettled,
+        } as never);
+
+        const secondPayload = secondPayment.payload as {
           authorization: { signature: string };
           idempotencyKey: string;
           type: string;
         };
         expect(secondPayload.type).toBe("authorization");
         expect(secondPayload.authorization.signature).toBe(firstPayload.authorization.signature);
+        const thirdPayload = thirdPayment.payload as {
+          idempotencyKey: string;
+          type: string;
+        };
         expect(secondPayload.idempotencyKey).not.toBe(firstPayload.idempotencyKey);
+        expect(thirdPayload.idempotencyKey).not.toBe(secondPayload.idempotencyKey);
 
         const channelId = firstPayload.authorization.channelId;
         const state = await store.get(channelId);
-        expect(state?.chargedCumulativeAmount).toBe(800n);
+        expect(state?.chargedCumulativeAmount).toBe(900n);
         expect(state?.highestVoucherSignature).toBeDefined();
         expect(
           await verifyVoucherSignature({
@@ -592,7 +641,7 @@ describe("batch-settlement SVM onchain", () => {
 
         const before = await usdcBalance(receiver.address);
         const manager = new BatchChannelManager({
-          requirements: second.matched,
+          requirements: matched,
           settle: (payload, requirements) => facilitator.settle(payload as never, requirements),
           store,
         });
@@ -600,7 +649,7 @@ describe("batch-settlement SVM onchain", () => {
           claimed: [channelId],
           distributed: [channelId],
         });
-        expect(await usdcBalance(receiver.address)).toBe(before + 800n);
+        expect(await usdcBalance(receiver.address)).toBe(before + 900n);
       },
     );
   });
