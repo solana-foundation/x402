@@ -371,11 +371,11 @@ describe("batch server voucher signer boundaries", () => {
       requirements: requirements(),
     };
     const verified = await server.schemeHooks.onBeforeVerify!(depositContext);
-    expect(verified).toMatchObject({ skip: true, result: { isValid: true } });
+    expect(verified).toBeUndefined();
     await expect(
       server.schemeHooks.onAfterVerify!({
         ...depositContext,
-        result: (verified as { result: { isValid: true; payer: string } }).result,
+        result: { isValid: true, payer: payer.address },
       }),
     ).resolves.toBeUndefined();
     await server.schemeHooks.onAfterSettle!({
@@ -519,9 +519,10 @@ describe("batch server voucher signer boundaries", () => {
       requirements: requirements(),
     };
     const openVerified = await server.schemeHooks.onBeforeVerify!(openContext);
+    expect(openVerified).toBeUndefined();
     await server.schemeHooks.onAfterVerify!({
       ...openContext,
-      result: (openVerified as { result: { isValid: true; payer: string } }).result,
+      result: { isValid: true, payer: payer.address },
     });
     await server.schemeHooks.onAfterSettle!({
       ...openContext,

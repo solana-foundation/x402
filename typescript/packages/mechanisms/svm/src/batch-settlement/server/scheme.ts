@@ -383,8 +383,8 @@ export class BatchSvmScheme implements SchemeNetworkServer {
         this.requestContexts.set(ctx.paymentPayload, { channelId });
       }
       // Deposits and refunds carry transactions whose complete instruction and
-      // onchain-state checks belong to the facilitator. Only a voucher backed
-      // by a fresh local snapshot can use the local verification fast path.
+      // onchain-state checks belong to the facilitator. Only a steady-state
+      // proof backed by a fresh local snapshot can use the local fast path.
       if (raw.type !== "voucher" && raw.type !== "authorization") return;
       return {
         skip: true,

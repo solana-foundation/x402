@@ -1279,6 +1279,15 @@ MUST re-read the channel and verify its status, deposit, mint, payer, payee,
 authorized signer, rent payer, grace period, open slot, and distribution against
 the payload and requirements before reporting settlement success.
 
+The payer MUST provision its canonical return ATA. The resource server MUST
+provision the canonical `payTo` recipient ATA before advertising these
+requirements, and the payment-channel deployment operator MUST provision the
+canonical treasury ATA for each supported mint and token program. A client MUST
+NOT be required to create or fund an ATA owned by the resource server or
+payment-channel treasury. When a required ATA is absent, a facilitator SHOULD
+identify whether the payer, recipient, or treasury ATA is missing in its
+settlement-simulation error.
+
 Under the `authorization` flow, the `open` or `top_up` transaction is broadcast
 by the post-handler `/settle`, after the statically validated `deposit` request
 passes Phase 3 and the resource handler succeeds. After the transaction

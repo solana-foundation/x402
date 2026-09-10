@@ -1,5 +1,6 @@
 /* eslint-disable jsdoc/require-jsdoc */
 import { address, type Signature } from "@solana/kit";
+import { findAssociatedTokenPda } from "@solana-program/token-2022";
 import type {
   Network,
   PaymentPayload,
@@ -21,6 +22,7 @@ import {
   buildDistributeInstruction,
   buildSettleInstructions,
   ChannelStatus,
+  getPaymentChannelsTreasuryOwner,
   type ServerInstruction,
 } from "../../payment-channels/onchain";
 import {
@@ -524,6 +526,11 @@ export class BatchSvmScheme implements SchemeNetworkFacilitator {
         mint: requirements.asset,
         tokenProgram: terms.tokenProgram,
       });
+      await this.assertSettlementAccounts(
+        requirements,
+        payload.channelConfig.payer,
+        terms.tokenProgram,
+      );
       return {
         channelId,
         deposit,
@@ -557,6 +564,11 @@ export class BatchSvmScheme implements SchemeNetworkFacilitator {
     if (open.channelId !== channelId) {
       throw new Error(`${BatchError.CHANNEL_ID_MISMATCH}: setup transaction channel mismatch`);
     }
+    await this.assertSettlementAccounts(
+      requirements,
+      payload.channelConfig.payer,
+      terms.tokenProgram,
+    );
     return {
       channelId,
       deposit,
@@ -619,6 +631,12 @@ export class BatchSvmScheme implements SchemeNetworkFacilitator {
       }
     } catch (error) {
       this.settlementCache.delete(key);
+      if (
+        error instanceof Error &&
+        error.message.startsWith(`${BatchError.SETTLEMENT_SIMULATION}:`)
+      ) {
+        throw error;
+      }
       throw new Error(`${BatchError.SETTLEMENT_SIMULATION}: ${String(error)}`);
     }
     try {
@@ -661,6 +679,48 @@ export class BatchSvmScheme implements SchemeNetworkFacilitator {
     const channel = await this.fetchChannel(requirements.network, channelId);
     this.assertDepositChannel(channel, validated, requirements);
     return depositResponse(channelId, channel, requirements.network, signature);
+  }
+
+  private async assertSettlementAccounts(
+    requirements: PaymentRequirements,
+    payer: string,
+    tokenProgram: string,
+  ): Promise<void> {
+    if (typeof this.signer.getAccountInfo !== "function") {
+      throw new Error(
+        "BatchSvmScheme requires getAccountInfo on the facilitator signer. " +
+          "Use toFacilitatorSvmSigner() which provides all required methods.",
+      );
+    }
+    const mint = address(requirements.asset);
+    const tokenProgramAddress = address(tokenProgram);
+    const required = [
+      { label: "payer", owner: address(payer) },
+      { label: "recipient", owner: address(requirements.payTo) },
+      {
+        label: "payment-channel treasury",
+        owner: getPaymentChannelsTreasuryOwner(requirements.network),
+      },
+    ] as const;
+    for (const { label, owner } of required) {
+      const [ata] = await findAssociatedTokenPda({
+        mint,
+        owner,
+        tokenProgram: tokenProgramAddress,
+      });
+      const account = await this.signer.getAccountInfo(ata, requirements.network, {
+        commitment: "confirmed",
+        encoding: "base64",
+      });
+      if (!account) {
+        throw new Error(`${BatchError.SETTLEMENT_SIMULATION}: missing ${label} ATA: ${ata}`);
+      }
+      if (account.owner.toString() !== tokenProgram) {
+        throw new Error(
+          `${BatchError.SETTLEMENT_SIMULATION}: ${label} ATA is not owned by ${tokenProgram}: ${ata}`,
+        );
+      }
+    }
   }
 
   private async settleVoucher(
