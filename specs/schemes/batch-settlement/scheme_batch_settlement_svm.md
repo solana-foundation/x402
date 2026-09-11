@@ -179,7 +179,7 @@ and `SettlementResponse` types are defined in
 | `memo` | string | no | Seller-defined UTF-8 payment reference for the setup transaction's Memo instruction. Maximum 256 bytes. |
 | `recentBlockhash` | string | no | Pre-fetched blockhash the client MAY use to build an `open` or `top_up` transaction without an RPC round trip. The client MUST refresh it if it is no longer valid. |
 | `recentSlot` | number | no | Recent slot the client MAY use as `channelConfig.openSlot` when it does not fetch its own slot. The program still enforces the open-slot window. |
-| `transactionVersions` | array | no | Transaction message versions the facilitator accepts, as an array of `"legacy"`, `0`, and/or `1`, copied from the facilitator's `/supported` `extra`. Absent means legacy and version `0`. See [Transaction versions](#transaction-versions). |
+| `transactionVersions` | array | no | Transaction message versions the facilitator accepts, as an array of `0` and/or `1`, copied from the facilitator's `/supported` `extra`. Absent means version `0` only; legacy transactions are not supported by this scheme. See [Transaction versions](#transaction-versions). |
 | `channelState` | object | no | Corrective-only server channel snapshot for cumulative amount resynchronization. |
 | `voucherState` | object | no | Corrective-only signed voucher proof for cumulative amount resynchronization. |
 
@@ -1023,9 +1023,10 @@ Address Lookup Tables), and version `1` ([SIMD-0385](https://github.com/solana-f
 carry the compute budget in the message header). The facilitator advertises
 the versions it accepts as `extra.transactionVersions` in `/supported`, and the
 server MUST copy that value into `PaymentRequirements.extra.transactionVersions`.
-Entries are the string `"legacy"` or the integers `0` and `1`, the Wallet
-Standard `supportedTransactionVersions` vocabulary. When the field is absent,
-the accepted set is `["legacy", 0]`.
+Entries are the integers `0` and `1`, the Wallet Standard
+`supportedTransactionVersions` vocabulary. This scheme does not support legacy
+transactions: `"legacy"` MUST NOT be advertised, and a legacy message MUST be
+rejected. When the field is absent, the accepted set is `[0]`.
 
 - The facilitator MUST NOT advertise `1` unless the `enable_tx_v1` feature gate
   (`txv1aq4pp281K9um3tnPgkfX8UqtFT6wcVW3hNezGLL`) is active on `network`.
@@ -1034,8 +1035,8 @@ the accepted set is `["legacy", 0]`.
   version `0`. The client MUST NOT use Address Lookup Tables.
 - The facilitator MUST reject any other message version, before inspecting any
   instruction, with `unsupported_transaction_version`.
-- A legacy or version-0 transaction MUST NOT exceed 1232 serialized bytes; a
-  version-1 transaction MUST NOT exceed 4096 serialized bytes.
+- A version-0 transaction MUST NOT exceed 1232 serialized bytes; a version-1
+  transaction MUST NOT exceed 4096 serialized bytes.
 - A version-1 transaction carries its compute budget in the message
   `TransactionConfig`. It MUST set `computeUnitLimit` and
   `loadedAccountsDataSizeLimit` (a version-1 transaction that omits either is
@@ -1047,9 +1048,9 @@ the accepted set is `["legacy", 0]`.
 ##### Message and signer rules
 
 - The message version MUST be one advertised in `extra.transactionVersions`
-  (legacy or `0` when the field is absent; see
-  [Transaction versions](#transaction-versions)), and the message MUST NOT
-  contain Address Lookup Table lookups. The canonical `open` and `top_up` forms
+  (`0` when the field is absent; see
+  [Transaction versions](#transaction-versions)). Legacy messages MUST be
+  rejected, and the message MUST NOT contain Address Lookup Table lookups. The canonical `open` and `top_up` forms
   fit in static account keys.
 - The transaction fee payer MUST equal `extra.feePayer`.
 - The complete required-signer set MUST equal the distinct addresses in
@@ -1071,7 +1072,7 @@ the accepted set is `["legacy", 0]`.
 
 The top-level instructions MUST consist only of the following ordered regions:
 
-1. In a legacy or version-0 transaction, an optional Compute Budget prefix
+1. In a version-0 transaction, an optional Compute Budget prefix
    containing at most one `SetComputeUnitLimit` instruction and at most one
    `SetComputeUnitPrice` instruction. If both are present, the limit MUST
    precede the price. A version-1 transaction carries its compute budget in the
