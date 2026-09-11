@@ -4,6 +4,11 @@ import { beforeAll, describe, expect, it } from "vitest";
 
 import { BatchError } from "../../src/batch-settlement/errors";
 import {
+  encodeBatchAuthorizationMessage,
+  signBatchAuthorization,
+  verifyBatchAuthorization,
+} from "../../src/batch-settlement/authorization";
+import {
   BatchChannelTracker,
   buildDepositPayload,
   buildRefundPayload,
@@ -216,6 +221,25 @@ describe("batch-settlement SVM", () => {
       });
     });
 
+    it("publishes the configured operator voucher signer", async () => {
+      const operator = await generateKeyPairSigner();
+      const server = new BatchServerScheme({ operator });
+      const enhanced = await server.enhancePaymentRequirements(
+        requirements(),
+        {
+          extra: { feePayer: feePayer.address },
+          network: SOLANA_DEVNET_CAIP2,
+          scheme: "batch-settlement",
+          x402Version: 2,
+        },
+        [],
+      );
+      expect(enhanced.extra).toMatchObject({
+        operator: operator.address,
+        voucherSigner: "server",
+      });
+    });
+
     it("broadcasts the deposit and commits its voucher only in the post-handler settle", async () => {
       const store = new MemoryChannelStore();
       const server = new BatchServerScheme({ store });
@@ -242,10 +266,11 @@ describe("batch-settlement SVM", () => {
         result: { isValid: true, payer: payer.address },
       });
 
-      expect(await store.get(channelId)).toMatchObject({
-        chargedCumulativeAmount: 0n,
-        pendingRequest: { maxClaimableAmount: 1_000n },
-      });
+      const reserved = await store.get(channelId);
+      expect(reserved?.chargedCumulativeAmount).toBe(0n);
+      expect(Object.values(reserved?.reservations ?? {})).toEqual([
+        expect.objectContaining({ ceiling: 1_000n }),
+      ]);
 
       const forwarded = await server.schemeHooks.onBeforeSettle!({
         ...verifyContext,
@@ -266,7 +291,7 @@ describe("batch-settlement SVM", () => {
       expect(await store.get(channelId)).toMatchObject({
         chargedCumulativeAmount: 1_000n,
         openSignature: "open-signature",
-        pendingRequest: undefined,
+        reservations: {},
         signedMaxClaimable: 1_000n,
       });
     });
@@ -371,7 +396,7 @@ describe("batch-settlement SVM", () => {
       });
       expect(await store.get(channelId)).toMatchObject({
         chargedCumulativeAmount: 0n,
-        pendingRequest: undefined,
+        reservations: {},
       });
     });
 
@@ -461,10 +486,11 @@ describe("batch-settlement SVM", () => {
         },
       });
       expect(verified).toBeUndefined();
-      expect(await store.get(channelId)).toMatchObject({
-        chargedCumulativeAmount: 2_000n,
-        pendingRequest: { maxClaimableAmount: 3_000n },
-      });
+      const rebuilt = await store.get(channelId);
+      expect(rebuilt?.chargedCumulativeAmount).toBe(2_000n);
+      expect(Object.values(rebuilt?.reservations ?? {})).toEqual([
+        expect.objectContaining({ ceiling: 1_000n }),
+      ]);
     });
 
     it("refuses to rebuild a record for a channel that is closing", async () => {
@@ -1034,7 +1060,51 @@ describe("batch-settlement SVM", () => {
         token: MINT,
         withdrawDelay: WITHDRAW_DELAY,
       });
-      expect(built.payload.voucher.maxClaimableAmount).toBe("1000");
+      expect(built.payload.voucher!.maxClaimableAmount).toBe("1000");
+    });
+
+    it("builds an operator channel with a reusable payer proof", async () => {
+      const operator = await generateKeyPairSigner();
+      const built = await buildDepositPayload({
+        blockhash: { blockhash: DUMMY_BLOCKHASH, lastValidBlockHeight: 1n },
+        depositAmount: 10_000n,
+        feePayer: feePayer.address,
+        firstCharge: 1_000n,
+        mint: MINT,
+        openSlot: OPEN_SLOT,
+        operator: operator.address,
+        payer,
+        receiver: RECEIVER,
+        tokenProgram: TOKEN_PROGRAM_ADDRESS,
+        voucherSigner: "server",
+        withdrawDelay: WITHDRAW_DELAY,
+      });
+      expect(built.payload).toMatchObject({
+        channelConfig: {
+          payerAuthorizer: operator.address,
+          voucherSigner: "server",
+        },
+      });
+      expect("maxClaimableAmount" in built.payload).toBe(false);
+      expect(built.payload.voucher).toBeUndefined();
+      expect(built.payload.idempotencyKey).toBeTruthy();
+      expect(await verifyBatchAuthorization(built.payload.authorization!, operator.address)).toBe(
+        true,
+      );
+      const stranger = await generateKeyPairSigner();
+      expect(await verifyBatchAuthorization(built.payload.authorization!, stranger.address)).toBe(
+        false,
+      );
+      expect(
+        encodeBatchAuthorizationMessage({
+          channelId: built.channelId,
+          operator: operator.address,
+          payer: payer.address,
+        }),
+      ).toHaveLength(123);
+      expect(await signBatchAuthorization(payer, built.channelId, operator.address)).toEqual(
+        built.payload.authorization,
+      );
     });
 
     it("builds and verifies the payer-signed forced-close transaction", async () => {

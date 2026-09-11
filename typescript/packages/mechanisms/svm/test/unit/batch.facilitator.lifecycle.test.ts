@@ -171,6 +171,11 @@ type FacilitatorInternals = {
   ): Promise<unknown>;
   assertExpiry(expiresAt: number): void;
   assertClaimChannel: ReturnType<typeof vi.fn>;
+  assertSettlementAccounts(
+    requirements: PaymentRequirements,
+    payer: string,
+    tokenProgram: string,
+  ): Promise<void>;
   readChannel: ReturnType<typeof vi.fn>;
   settlementCache: {
     delete: ReturnType<typeof vi.fn>;
@@ -190,6 +195,70 @@ describe("batch facilitator lifecycle", () => {
     expect(
       () => new BatchSvmScheme({ getAddresses: () => [], getSigner: vi.fn() } as never),
     ).toThrow(/at least one fee payer/);
+  });
+
+  it.each([
+    ["payer", 0],
+    ["recipient", 1],
+    ["payment-channel treasury", 2],
+  ])("identifies a missing %s settlement ATA", async (label, missingIndex) => {
+    let readIndex = 0;
+    const getAccountInfo = vi.fn().mockImplementation(async () => {
+      const exists = readIndex !== missingIndex;
+      readIndex += 1;
+      return exists ? { owner: TOKEN_PROGRAM_ADDRESS } : null;
+    });
+    const api = internals(new BatchSvmScheme(signer({ getAccountInfo }) as never));
+
+    await expect(
+      api.assertSettlementAccounts(requirements(), payer.address, TOKEN_PROGRAM_ADDRESS),
+    ).rejects.toThrow(`missing ${label} ATA`);
+    expect(getAccountInfo).toHaveBeenCalledTimes(missingIndex + 1);
+  });
+
+  it("identifies a settlement ATA owned by the wrong token program", async () => {
+    const api = internals(
+      new BatchSvmScheme(
+        signer({
+          getAccountInfo: vi.fn().mockResolvedValue({ owner: TOKEN_2022_PROGRAM_ADDRESS }),
+        }) as never,
+      ),
+    );
+
+    await expect(
+      api.assertSettlementAccounts(requirements(), payer.address, TOKEN_PROGRAM_ADDRESS),
+    ).rejects.toThrow(`payer ATA is not owned by ${TOKEN_PROGRAM_ADDRESS}`);
+  });
+
+  it("requires account reads for settlement-path preflight", async () => {
+    const api = internals(new BatchSvmScheme(signer({ getAccountInfo: undefined }) as never));
+
+    await expect(
+      api.assertSettlementAccounts(requirements(), payer.address, TOKEN_PROGRAM_ADDRESS),
+    ).rejects.toThrow("requires getAccountInfo");
+  });
+
+  it("rejects a deposit during verify when its settlement path is unavailable", async () => {
+    const getAccountInfo = vi
+      .fn()
+      .mockResolvedValueOnce({ owner: TOKEN_PROGRAM_ADDRESS })
+      .mockResolvedValueOnce(null);
+    const scheme = new BatchSvmScheme(signer({ getAccountInfo }) as never);
+    const paymentRequirements = requirements();
+
+    await expect(
+      scheme.verify(
+        {
+          accepted: paymentRequirements,
+          payload: actualDeposit,
+          x402Version: 2,
+        },
+        paymentRequirements,
+      ),
+    ).resolves.toMatchObject({
+      isValid: false,
+      invalidReason: BatchError.SETTLEMENT_SIMULATION,
+    });
   });
 
   it("resolves valid channel terms and rejects malformed requirements", async () => {
@@ -763,6 +832,30 @@ describe("batch facilitator lifecycle", () => {
       ),
     ).rejects.toThrow(BatchError.SETTLEMENT_SIMULATION);
     expect(simulationDelete).toHaveBeenCalledWith(`batch:topup:${NETWORK}:open-a`);
+
+    const classifiedSimulation = new BatchSvmScheme(
+      signer({
+        simulateTransaction: vi
+          .fn()
+          .mockRejectedValue(
+            new Error(`${BatchError.SETTLEMENT_SIMULATION}: missing treasury ATA`),
+          ),
+      }) as never,
+    );
+    const classifiedApi = internals(classifiedSimulation);
+    classifiedApi.validateDeposit = simulationApi.validateDeposit;
+    classifiedApi.readChannel = vi.fn().mockResolvedValue(undefined);
+    classifiedApi.settlementCache = {
+      delete: vi.fn(),
+      isDuplicate: vi.fn().mockReturnValue(false),
+    };
+    await expect(
+      classifiedApi.settleDeposit(
+        { accepted: requirements(), payload: deposit, x402Version: 2 },
+        deposit,
+        requirements(),
+      ),
+    ).rejects.toThrow(`${BatchError.SETTLEMENT_SIMULATION}: missing treasury ATA`);
 
     const indexing = new BatchSvmScheme(signer() as never);
     const indexingApi = internals(indexing);

@@ -9,6 +9,16 @@
  */
 
 export { BatchSvmScheme } from "./client/scheme";
+export {
+  encodeBatchAuthorizationMessage,
+  signBatchAuthorization,
+  verifyBatchAuthorization,
+} from "./authorization";
 export * from "./types";
 export { BatchError } from "./errors";
 export type { BatchErrorReason } from "./errors";
+export {
+  encodeBatchSettlementReceiptMessage,
+  signBatchSettlementReceipt,
+  verifyBatchSettlementReceipt,
+} from "./receipt";

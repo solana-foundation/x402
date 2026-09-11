@@ -11,7 +11,9 @@ import {
 import { buildRequestCloseTransaction } from "../../payment-channels/close";
 import { buildOpenPaymentChannelTransaction } from "../../payment-channels/open";
 import { encodeVoucherMessageBytes } from "../../payment-channels/voucher";
+import { signBatchAuthorization } from "../authorization";
 import type {
+  BatchAuthorization,
   BatchChannelConfig,
   BatchDepositPayload,
   BatchRefundPayload,
@@ -64,11 +66,26 @@ export class BatchChannelTracker {
    */
   async previewVoucher(charge: bigint): Promise<BatchVoucher> {
     if (charge <= 0n) throw new Error("charge must be positive");
+    if (this.channelConfig.voucherSigner === "server") {
+      throw new Error("server-signed channels do not use client vouchers");
+    }
     return signBatchVoucher(this.signer, {
       channelId: this.channelId,
       expiresAt: 0,
       maxClaimableAmount: this.chargedCumulativeAmount + charge,
     });
+  }
+
+  /**
+   * Create the reusable payer proof for an server-signed channel.
+   *
+   * @returns Reusable bearer proof
+   */
+  async authorization(): Promise<BatchAuthorization> {
+    if (this.channelConfig.voucherSigner !== "server") {
+      throw new Error("client-signed channels do not use server authorization");
+    }
+    return signBatchAuthorization(this.signer, this.channelId, this.channelConfig.payerAuthorizer);
   }
 
   /**
@@ -105,6 +122,8 @@ export interface BuildDepositArgs {
   memo?: string | undefined;
   /** Channel-derivation salt; random when omitted. */
   salt?: bigint | undefined;
+  voucherSigner?: "client" | "server" | undefined;
+  operator?: string | undefined;
 }
 
 export interface BuiltDeposit {
@@ -120,8 +139,11 @@ export async function buildDepositPayload(args: BuildDepositArgs): Promise<Built
   if (args.openSlot > BigInt(Number.MAX_SAFE_INTEGER)) {
     throw new Error("openSlot must fit in a JavaScript safe integer");
   }
+  const voucherSigner = args.voucherSigner ?? "client";
+  const authorizedSigner = voucherSigner === "server" ? args.operator : args.payer.address;
+  if (!authorizedSigner) throw new Error("operator is required for operator voucher signing");
   const open = await buildOpenPaymentChannelTransaction({
-    authorizedSigner: args.payer.address,
+    authorizedSigner,
     blockhash: args.blockhash,
     deposit: args.depositAmount,
     feePayer: args.feePayer,
@@ -138,24 +160,31 @@ export async function buildDepositPayload(args: BuildDepositArgs): Promise<Built
   const channelConfig: BatchChannelConfig = {
     openSlot: Number(open.openSlot),
     payer: args.payer.address,
-    payerAuthorizer: args.payer.address,
+    payerAuthorizer: authorizedSigner,
     receiver: args.receiver,
     ...(args.receiverAuthorizer ? { receiverAuthorizer: args.receiverAuthorizer } : {}),
     salt: open.salt.toString(),
     token: args.mint,
     withdrawDelay: args.withdrawDelay,
+    ...(voucherSigner === "server" ? { voucherSigner } : {}),
   };
   const tracker = new BatchChannelTracker(open.channelId, channelConfig, args.payer);
   // A payment payload is only an authorization.  Do not advance local state
   // until the resource server confirms it in PAYMENT-RESPONSE.
-  const voucher = await tracker.previewVoucher(args.firstCharge);
+  const credential =
+    voucherSigner === "server"
+      ? {
+          authorization: await tracker.authorization(),
+          idempotencyKey: crypto.randomUUID(),
+        }
+      : { voucher: await tracker.previewVoucher(args.firstCharge) };
   return {
     channelId: open.channelId,
     payload: {
       channelConfig,
       deposit: { amount: args.depositAmount.toString(), transaction: open.transaction },
       type: "deposit",
-      voucher,
+      ...credential,
     },
     tracker,
   };

@@ -53,7 +53,11 @@ export type { DiscoveredChannel } from "./payment-channels/discovery";
 // Export batch-settlement wire types
 export type {
   BatchExtra,
+  BatchAuthorization,
+  BatchAuthorizationPayload,
+  BatchVoucherSigner,
   BatchVoucher,
+  BatchSettlementReceipt,
   CloseAuthorization,
   BatchChannelConfig,
   BatchPayload,
@@ -67,9 +71,20 @@ export type {
   BatchChannelState,
 } from "./batch-settlement/types";
 export {
+  encodeBatchAuthorizationMessage,
+  signBatchAuthorization,
+  verifyBatchAuthorization,
+} from "./batch-settlement/authorization";
+export {
+  encodeBatchSettlementReceiptMessage,
+  signBatchSettlementReceipt,
+  verifyBatchSettlementReceipt,
+} from "./batch-settlement/receipt";
+export {
   BATCH_SETTLEMENT_SCHEME,
   isBatchChannelConfig,
   isBatchPayload,
+  isBatchSettlementReceipt,
   isBatchFacilitatorPayload,
   isBatchVoucher,
 } from "./batch-settlement/types";
