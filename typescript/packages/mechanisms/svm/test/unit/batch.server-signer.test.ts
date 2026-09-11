@@ -586,10 +586,22 @@ describe("batch server voucher signer boundaries", () => {
       requirements: requirements(),
     };
     const refundVerified = await server.schemeHooks.onBeforeVerify!(refundContext);
+    expect(refundVerified).toBeUndefined();
     await expect(
       server.schemeHooks.onAfterVerify!({
         ...refundContext,
-        result: (refundVerified as { result: { isValid: true; payer: string } }).result,
+        result: {
+          extra: {
+            channelState: {
+              balance: "10000",
+              channelId,
+              totalClaimed: "0",
+              withdrawRequestedAt: 0,
+            },
+          },
+          isValid: true,
+          payer: payer.address,
+        },
       }),
     ).resolves.toMatchObject({ abort: true, reason: "duplicate_settlement" });
 
