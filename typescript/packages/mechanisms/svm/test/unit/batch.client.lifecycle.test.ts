@@ -228,7 +228,7 @@ describe("batch client lifecycle", () => {
     });
   });
 
-  it("uses the request charge as the default top-up increment", async () => {
+  it("uses five request charges as the default top-up target", async () => {
     const client = new BatchSvmScheme(payer, { discoverChannels: false });
     const api = internals(client);
     const config: BatchChannelConfig = {
@@ -245,7 +245,58 @@ describe("batch client lifecycle", () => {
       tracker: new BatchChannelTracker(RECEIVER, config, payer, 1_000n),
     });
     await expect(client.createPaymentPayload(2, requirements())).resolves.toMatchObject({
-      payload: { deposit: { amount: "1000" }, type: "deposit" },
+      payload: { deposit: { amount: "5000" }, type: "deposit" },
+    });
+  });
+
+  it("honors a valid minDeposit hint within the local spend ceiling", async () => {
+    const hinted = requirements({
+      extra: { ...requirements().extra, minDeposit: "15000" },
+    });
+    const client = new BatchSvmScheme(payer, { discoverChannels: false });
+    await expect(client.createPaymentPayload(2, hinted)).resolves.toMatchObject({
+      payload: { deposit: { amount: "15000" }, type: "deposit" },
+    });
+
+    const capped = new BatchSvmScheme(payer, { discoverChannels: false });
+    await expect(
+      capped.createPaymentPayload(2, hinted, { maxAmountPerPayment: "2000" }),
+    ).resolves.toMatchObject({
+      payload: { deposit: { amount: "10000" }, type: "deposit" },
+    });
+  });
+
+  it("falls back from malformed minDeposit and validates depositMultiplier", async () => {
+    const malformed = requirements({
+      extra: { ...requirements().extra, minDeposit: "500" },
+    });
+    const client = new BatchSvmScheme(payer, {
+      depositPolicy: { depositMultiplier: 3 },
+      discoverChannels: false,
+    });
+    await expect(client.createPaymentPayload(2, malformed)).resolves.toMatchObject({
+      payload: { deposit: { amount: "3000" }, type: "deposit" },
+    });
+    expect(() => new BatchSvmScheme(payer, { depositPolicy: { depositMultiplier: 2 } })).toThrow(
+      /integer >= 3/,
+    );
+  });
+
+  it("rejects a required deposit above the spend-derived ceiling", async () => {
+    const client = new BatchSvmScheme(payer, { discoverChannels: false });
+    await expect(
+      client.createPaymentPayload(2, requirements(), { maxAmountPerPayment: "100" }),
+    ).rejects.toThrow(/Required deposit 1000 exceeds/);
+
+    const malformedCap = new BatchSvmScheme(payer, { discoverChannels: false });
+    await expect(
+      malformedCap.createPaymentPayload(
+        2,
+        requirements({ extra: { ...requirements().extra, minDeposit: "not-an-amount" } }),
+        { maxAmountPerPayment: "not-an-amount" },
+      ),
+    ).resolves.toMatchObject({
+      payload: { deposit: { amount: "5000" }, type: "deposit" },
     });
   });
 
@@ -285,6 +336,27 @@ describe("batch client lifecycle", () => {
       payload: { type: "voucher", voucher: { maxClaimableAmount: "2000" } },
     });
     expect([...records.values()][0]).toMatchObject({ chargedCumulativeAmount: "1000" });
+  });
+
+  it("preserves the spend-derived deposit ceiling after channel discovery", async () => {
+    const client = new BatchSvmScheme(payer);
+    const api = internals(client);
+    const config: BatchChannelConfig = {
+      openSlot: 123,
+      payer: payer.address,
+      payerAuthorizer: payer.address,
+      receiver: RECEIVER,
+      salt: "0",
+      token: MINT,
+      withdrawDelay: 900,
+    };
+    api.discoverChannel = vi.fn().mockResolvedValue({
+      deposit: 0n,
+      tracker: new BatchChannelTracker(RECEIVER, config, payer, 0n),
+    });
+    await expect(
+      client.createPaymentPayload(2, requirements(), { maxAmountPerPayment: "100" }),
+    ).rejects.toThrow(/Required deposit 1000 exceeds/);
   });
 
   it("restores confirmed state after a failed request", async () => {
@@ -449,7 +521,7 @@ describe("batch client lifecycle", () => {
         2,
         requirements(),
       ),
-    ).resolves.toMatchObject({ payload: { deposit: { amount: "1000" }, type: "deposit" } });
+    ).resolves.toMatchObject({ payload: { deposit: { amount: "5000" }, type: "deposit" } });
   });
 
   it("builds a refund from a cached channel and rejects a missing one", async () => {

@@ -18,6 +18,7 @@ export const BatchError = {
   VOUCHER_EXPIRY: `${PREFIX}voucher_expiry`,
   SETUP_TRANSACTION: `${PREFIX}setup_transaction`,
   SETTLEMENT_SIMULATION: `${PREFIX}settlement_simulation`,
+  DEPOSIT_BELOW_MIN_DEPOSIT: `${PREFIX}deposit_below_min_deposit`,
   CHANNEL_STATE: `${PREFIX}channel_state`,
   REFUND_TRANSACTION: `${PREFIX}refund_transaction`,
 } as const;

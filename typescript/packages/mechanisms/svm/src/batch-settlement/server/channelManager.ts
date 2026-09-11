@@ -177,6 +177,7 @@ export class BatchChannelManager {
       for (const channel of batch) {
         await this.record(channel.channelId, state => ({
           ...state,
+          onchainSyncedAt: Date.now(),
           settled: channel.signedMaxClaimable,
         }));
         claimed.push(channel.channelId);
@@ -222,6 +223,7 @@ export class BatchChannelManager {
       for (const channel of batch) {
         await this.record(channel.channelId, state => ({
           ...state,
+          onchainSyncedAt: Date.now(),
           payoutWatermark: channel.settled,
         }));
         distributed.push(channel.channelId);

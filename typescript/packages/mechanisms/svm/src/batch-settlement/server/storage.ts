@@ -45,6 +45,8 @@ export interface ChannelState {
   settled: bigint;
   /** Cumulative distributed on-chain (base units). */
   payoutWatermark: bigint;
+  /** Wall-clock time when facilitator verification last refreshed onchain state. */
+  onchainSyncedAt?: number | undefined;
   /** Channel lifecycle status. */
   status: BatchChannelStatus;
   /** When a forced/cooperative close was requested (Unix seconds), if any. */

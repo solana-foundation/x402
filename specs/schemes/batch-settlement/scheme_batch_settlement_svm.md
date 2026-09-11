@@ -179,6 +179,7 @@ and `SettlementResponse` types are defined in
 | `memo` | string | no | Seller-defined UTF-8 payment reference for the setup transaction's Memo instruction. Maximum 256 bytes. |
 | `recentBlockhash` | string | no | Pre-fetched blockhash the client MAY use to build an `open` or `top_up` transaction without an RPC round trip. The client MUST refresh it if it is no longer valid. |
 | `recentSlot` | number | no | Recent slot the client MAY use as `channelConfig.openSlot` when it does not fetch its own slot. The program still enforces the open-slot window. |
+| `minDeposit` | string | no | Atomic deposit target. When present, MUST be a positive integer greater than or equal to `amount`. |
 | `channelState` | object | no | Corrective-only server channel snapshot for cumulative amount resynchronization. |
 | `voucherState` | object | no | Corrective-only signed voucher proof for cumulative amount resynchronization. |
 
@@ -186,6 +187,14 @@ and `SettlementResponse` types are defined in
 transaction-construction hints only. They are not persistent channel
 configuration and are not included in the voucher message. A client MAY ignore
 the hints and obtain fresher values from an RPC.
+
+Clients SHOULD use a conforming `extra.minDeposit` as the deposit target and
+SHOULD enforce a local maximum deposit so a 402 cannot lock unbounded escrow.
+Servers SHOULD NOT reject a deposit solely because `deposit.amount` is below
+this field. A server that applies a local minimum-deposit policy MAY reject it
+and MUST return
+`invalid_batch_settlement_svm_deposit_below_min_deposit`. The facilitator MUST
+NOT enforce `minDeposit`.
 
 The x402 wire format does not expose program-specific split arrays. The client
 derives the payment-channel accounts and distribution from the x402 fields:
@@ -220,6 +229,7 @@ Example:
     "receiverAuthorizer": "<server-close-authorizer>",
     "withdrawDelay": 3600,
     "tokenProgram": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+    "minDeposit": "10000",
     "memo": "invoice-123",
     "recentBlockhash": "<recent-blockhash>",
     "recentSlot": 341000000
@@ -1198,9 +1208,8 @@ needs onchain state plus a voucher when it later settles.
 The server MUST serialize all paid-request and close processing per
 channel.
 The server stores `chargedCumulativeAmount`, `signedMaxClaimable`, the latest
-voucher signature, and a cached paid-response entry keyed by
-`("access", channelId, maxClaimableAmount)`. For every paid-request voucher,
-the server MUST:
+voucher signature, and the last time its mirrored onchain fields were
+refreshed. For every paid-request voucher, the server MUST:
 
 1. Verify the Ed25519 signature over the 50-byte message using
    `channelConfig.payerAuthorizer` and confirm that key equals the channel
@@ -1215,6 +1224,11 @@ the server MUST:
    matching section 4.1. When `channelConfig.receiverAuthorizer` is supplied,
    confirm it equals `extra.receiverAuthorizer`; otherwise both fields MUST be
    absent. Reject if `payer` or `payerAuthorizer` equals `feePayer`.
+   The server MUST obtain these fields from facilitator verification for every
+   `deposit` and `refund`. It MAY verify a `voucher` locally only while its
+   mirrored onchain state is within a bounded freshness interval. A missing or
+   stale snapshot MUST fall through to facilitator verification, and a
+   successful verification MUST refresh the stored snapshot timestamp.
 4. **No voucher expiry.** The client MUST sign `expiresAt = 0`, and the
    server and facilitator MUST reject any voucher with nonzero `expiresAt`.
    The forced-close grace period already bounds the redemption window after a
@@ -1223,17 +1237,14 @@ the server MUST:
    the channel is still open, after the resource has been served.
 5. Enforce the deposit cap: `maxClaimableAmount <= channel.deposit`.
 6. Enforce replay protection and the per-request ceiling:
-   - A previously accepted `("access", channelId, maxClaimableAmount)` is an
-     idempotent retry. Return its cached response and do not execute the resource
-     handler again.
-   - Any other `maxClaimableAmount <= signedMaxClaimable` is stale and MUST be
-     rejected.
+   - Any `maxClaimableAmount <= signedMaxClaimable` is stale and MUST be
+     rejected without executing the resource handler.
    - A fresh voucher MUST have `maxClaimableAmount ==
      chargedCumulativeAmount + PaymentRequirements.amount`.
 7. Execute the resource handler. Only after it succeeds, set `chargedAmount =
    PaymentRequirements.amount`, atomically add `chargedAmount` to
-   `chargedCumulativeAmount`, store `signedMaxClaimable`, the voucher and the
-   cached response, and return `PAYMENT-RESPONSE` with `transaction == ""`,
+   `chargedCumulativeAmount`, store `signedMaxClaimable` and the voucher, and
+   return `PAYMENT-RESPONSE` with `transaction == ""`,
    `extra.commitmentId`, `extra.chargedAmount`, and `extra.channelState`. If the
    handler fails, state MUST remain unchanged so the client can retry.
 
@@ -1342,7 +1353,7 @@ discover channels whose `payer` equals its wallet. A facilitator can discover
 every channel for which it fronted rent by querying `rent_payer` or, equivalently
 in this scheme, `payee`. The server still requires durable offchain storage for
 the accepted charge watermark, unclaimed voucher, request correlation, and
-cached responses; those values cannot be reconstructed from channel accounts.
+replay state; those values cannot be reconstructed from channel accounts.
 
 Implementations MAY retain a local lifecycle index, but a facilitator MUST be
 able to rebuild the onchain portion after local state loss, at startup, and
@@ -1461,6 +1472,9 @@ Standard x402 codes apply. The facilitator reports verification failures in
   sponsor safety checks.
 - `invalid_batch_settlement_svm_settlement_simulation` - setup or
   settlement-readiness simulation/checks failed before accepting the deposit.
+- `invalid_batch_settlement_svm_deposit_below_min_deposit` - the server applies
+  a local minimum-deposit policy and rejected a deposit below the advertised
+  `extra.minDeposit` target.
 - `invalid_batch_settlement_svm_channel_state` - confirmed channel state does
   not match the payload and challenge-bound requirements.
 - `invalid_batch_settlement_svm_refund_transaction` - refund transaction is not

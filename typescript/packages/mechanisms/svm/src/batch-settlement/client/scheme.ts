@@ -2,6 +2,7 @@
 import { type Address } from "@solana/kit";
 import { fetchMint } from "@solana-program/token-2022";
 import type {
+  PaymentPayloadContext,
   PaymentPayload,
   PaymentRequirements,
   SchemeClientHooks,
@@ -75,8 +76,10 @@ export interface BatchClientChannelStorage {
 }
 
 export interface BatchSvmClientConfig extends ClientSvmConfig {
-  /** Deposit used for a new channel. Defaults to one request charge. */
+  /** Fixed deposit target. Overrides server hints and `depositPolicy`. */
   depositAmount?: bigint | string | undefined;
+  /** Policy used to size deposits when `depositAmount` is not set. */
+  depositPolicy?: { depositMultiplier?: number | undefined } | undefined;
   /** Persists confirmed state and a replayable pending allocation. */
   channelStorage?: BatchClientChannelStorage | undefined;
   /**
@@ -110,11 +113,17 @@ export class BatchSvmScheme implements SchemeNetworkClient {
   constructor(
     private readonly signer: BatchClientSigner,
     private readonly config: BatchSvmClientConfig = {},
-  ) {}
+  ) {
+    const multiplier = config.depositPolicy?.depositMultiplier;
+    if (multiplier !== undefined && (!Number.isInteger(multiplier) || multiplier < 3)) {
+      throw new Error("depositMultiplier must be an integer >= 3");
+    }
+  }
 
   async createPaymentPayload(
     x402Version: number,
     requirements: PaymentRequirements,
+    context?: PaymentPayloadContext,
   ): Promise<Pick<PaymentPayload, "x402Version" | "payload">> {
     const terms = await this.resolveTerms(requirements);
     const charge = parseU64(requirements.amount, "amount");
@@ -148,11 +157,12 @@ export class BatchSvmScheme implements SchemeNetworkClient {
         await this.persistPending(next);
         return payment;
       }
-      const configured = this.config.depositAmount
-        ? parseU64(this.config.depositAmount, "depositAmount")
-        : charge;
-      const topUpAmount =
-        configured >= cumulative - existing.deposit ? configured : cumulative - existing.deposit;
+      const topUpAmount = this.resolveDepositAmount(
+        requirements,
+        charge,
+        cumulative - existing.deposit,
+        context,
+      );
       const rpc = createRpcClient(requirements.network, this.config.rpcUrl);
       const blockhash = await resolveBlockhash(rpc, requirements);
       const topUp = await buildTopUpPaymentChannelTransaction({
@@ -198,13 +208,16 @@ export class BatchSvmScheme implements SchemeNetworkClient {
         chargedCumulativeAmount: discovered.tracker.cumulative.toString(),
         deposit: discovered.deposit.toString(),
       });
-      return this.createPaymentPayload(x402Version, requirements);
+      return this.createPaymentPayload(x402Version, requirements, context);
     }
 
-    const deposit = this.config.depositAmount
-      ? parseU64(this.config.depositAmount, "depositAmount")
-      : charge;
-    if (deposit < charge) throw new Error("depositAmount must cover the current request");
+    if (
+      this.config.depositAmount !== undefined &&
+      parseU64(this.config.depositAmount, "depositAmount") < charge
+    ) {
+      throw new Error("depositAmount must cover the current request");
+    }
+    const deposit = this.resolveDepositAmount(requirements, charge, charge, context);
     const rpc = createRpcClient(requirements.network, this.config.rpcUrl);
     const [blockhash, openSlot] = await Promise.all([
       resolveBlockhash(rpc, requirements),
@@ -294,6 +307,30 @@ export class BatchSvmScheme implements SchemeNetworkClient {
 
   private salt(): bigint {
     return this.config.salt === undefined ? 0n : parseU64(this.config.salt, "salt");
+  }
+
+  private resolveDepositAmount(
+    requirements: PaymentRequirements,
+    requestAmount: bigint,
+    needed: bigint,
+    context: PaymentPayloadContext | undefined,
+  ): bigint {
+    const multiplier = this.config.depositPolicy?.depositMultiplier ?? 5;
+    const configured =
+      this.config.depositAmount === undefined
+        ? undefined
+        : parseU64(this.config.depositAmount, "depositAmount");
+    const announced = parseAnnouncedMinDeposit(requirements.extra?.minDeposit, requestAmount);
+    const target = configured ?? announced ?? requestAmount * BigInt(multiplier);
+    const proposed = target > needed ? target : needed;
+    const maxDeposit = maxDepositFromSpendCap(context?.maxAmountPerPayment, multiplier);
+    if (maxDeposit !== undefined && needed > maxDeposit) {
+      throw new Error(
+        `Required deposit ${needed} exceeds depositMultiplier × spendControls.maxAmountPerPayment (${maxDeposit}). ` +
+          "Raise maxAmountPerPayment or depositMultiplier.",
+      );
+    }
+    return maxDeposit !== undefined && proposed > maxDeposit ? maxDeposit : proposed;
   }
 
   /**
@@ -660,4 +697,24 @@ export class BatchSvmScheme implements SchemeNetworkClient {
       withdrawDelay,
     };
   }
+}
+
+function parseAnnouncedMinDeposit(value: unknown, requestAmount: bigint): bigint | undefined {
+  if (typeof value !== "string" || !/^\d+$/.test(value)) return undefined;
+  const parsed = BigInt(value);
+  return parsed >= requestAmount && parsed > 0n ? parsed : undefined;
+}
+
+function maxDepositFromSpendCap(
+  maxAmountPerPayment: string | undefined,
+  depositMultiplier: number,
+): bigint | undefined {
+  if (
+    maxAmountPerPayment === undefined ||
+    !/^\d+$/.test(maxAmountPerPayment) ||
+    BigInt(maxAmountPerPayment) <= 0n
+  ) {
+    return undefined;
+  }
+  return BigInt(maxAmountPerPayment) * BigInt(depositMultiplier);
 }

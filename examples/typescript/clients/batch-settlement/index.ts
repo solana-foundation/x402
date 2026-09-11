@@ -43,6 +43,7 @@ async function main(): Promise<void> {
     maxAmountPerPayment: "$1",
   });
   let evmScheme: BatchSettlementEvmScheme | undefined;
+  let svmScheme: BatchSvmScheme | undefined;
 
   if (evmPrivateKeyRaw) {
     const evmPrivateKey = evmPrivateKeyRaw as `0x${string}`;
@@ -73,11 +74,10 @@ async function main(): Promise<void> {
 
   if (svmPrivateKeyRaw) {
     const svmSigner = await createKeyPairSignerFromBytes(base58.decode(svmPrivateKeyRaw));
-    const svmScheme = new BatchSvmScheme(svmSigner, {
+    svmScheme = new BatchSvmScheme(svmSigner, {
+      depositPolicy: { depositMultiplier },
       ...(svmRpcUrl ? { rpcUrl: svmRpcUrl } : {}),
-      ...(svmDepositAmount
-        ? { depositAmount: svmDepositAmount }
-        : { depositAmount: String(10_000 * depositMultiplier) }),
+      ...(svmDepositAmount ? { depositAmount: svmDepositAmount } : {}),
     });
     client.register("solana:*", svmScheme);
 
@@ -109,9 +109,12 @@ async function main(): Promise<void> {
   }
 
   if (refundAfterRequests) {
-    if (!evmScheme) {
-      console.warn("REFUND_AFTER_REQUESTS is only supported for EVM in this example");
+    if (!evmScheme && !svmScheme) {
+      console.warn("No batch-settlement scheme is available to refund");
       return;
+    }
+    if (refundAmount && !evmScheme) {
+      throw new Error("SVM batch settlement supports only a full refund");
     }
     console.log(
       refundAmount
@@ -119,9 +122,11 @@ async function main(): Promise<void> {
         : "REQUESTING FULL REFUND of remaining channel balance",
     );
     const refundT0 = performance.now();
-    const settle = await evmScheme.refund(url, {
-      ...(refundAmount ? { amount: refundAmount } : {}),
-    });
+    const settle = evmScheme
+      ? await evmScheme.refund(url, {
+          ...(refundAmount ? { amount: refundAmount } : {}),
+        })
+      : await svmScheme!.refund(url);
     console.log(JSON.stringify(settle, null, 2));
     console.log(`Refund completed in ${((performance.now() - refundT0) / 1000).toFixed(3)}s`);
   }

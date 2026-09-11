@@ -5,6 +5,7 @@ export const BATCH_SETTLEMENT_SCHEME = "batch-settlement";
 
 export type BatchExtra = {
   paymentFlow?: "authorization" | undefined;
+  minDeposit?: string | undefined;
   feePayer: string;
   receiverAuthorizer?: string | undefined;
   withdrawDelay: number;

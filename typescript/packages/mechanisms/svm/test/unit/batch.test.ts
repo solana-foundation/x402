@@ -100,6 +100,7 @@ function serverState(overrides: Partial<ChannelState> = {}): ChannelState {
     deposit: 10_000n,
     feePayer: feePayer.address,
     mint: MINT,
+    onchainSyncedAt: Date.now(),
     openSlot: OPEN_SLOT,
     payer: payer.address,
     payerAuthorizer: payer.address,
@@ -149,10 +150,70 @@ describe("batch-settlement SVM", () => {
       expect(server.paymentFlows.channel.default).toBe("authorization");
       expect(enhanced.extra).toMatchObject({
         feePayer: feePayer.address,
+        minDeposit: "10000",
         tokenProgram: TOKEN_PROGRAM_ADDRESS,
         withdrawDelay: 1_200,
       });
       expect(enhanced.extra).not.toHaveProperty("paymentFlow");
+    });
+
+    it("publishes route minDeposit overrides and optionally enforces them", async () => {
+      const routeRequirements = requirements();
+      routeRequirements.extra = { ...routeRequirements.extra, minDeposit: "$0.02" };
+      const hinted = await new BatchServerScheme().enhancePaymentRequirements(
+        routeRequirements,
+        {
+          extra: { feePayer: feePayer.address },
+          network: SOLANA_DEVNET_CAIP2,
+          scheme: "batch-settlement",
+          x402Version: 2,
+        },
+        [],
+      );
+      expect(hinted.extra?.minDeposit).toBe("20000");
+
+      const atomicFloor = requirements();
+      atomicFloor.extra = { ...atomicFloor.extra, minDeposit: "500" };
+      expect(new BatchServerScheme().resolveMinDepositHint(atomicFloor)).toBe("1000");
+      const zeroFloor = requirements();
+      zeroFloor.extra = { ...zeroFloor.extra, minDeposit: "0" };
+      expect(() => new BatchServerScheme().resolveMinDepositHint(zeroFloor)).toThrow(/positive/);
+      const wrongCurrency = requirements();
+      wrongCurrency.extra = { ...wrongCurrency.extra, minDeposit: "1 USDT" };
+      expect(() => new BatchServerScheme().resolveMinDepositHint(wrongCurrency)).toThrow(
+        /currency must match USDC/,
+      );
+      const customAsset = requirements();
+      customAsset.asset = payer.address;
+      customAsset.extra = { ...customAsset.extra, minDeposit: "$1" };
+      expect(() => new BatchServerScheme().resolveMinDepositHint(customAsset)).toThrow(
+        /only supported for default assets/,
+      );
+
+      const payment = {
+        accepted: hinted,
+        payload: {
+          channelConfig,
+          deposit: { amount: "10000", transaction: "setup-transaction" },
+          type: "deposit" as const,
+          voucher: await signedVoucher(1_000n),
+        },
+        x402Version: 2,
+      };
+      const context = {
+        declaredExtensions: {},
+        paymentPayload: payment,
+        requirements: hinted,
+      };
+      await expect(
+        new BatchServerScheme().schemeHooks.onBeforeVerify!(context),
+      ).resolves.toBeUndefined();
+      await expect(
+        new BatchServerScheme({ enforceMinDeposit: true }).schemeHooks.onBeforeVerify!(context),
+      ).resolves.toMatchObject({
+        abort: true,
+        reason: BatchError.DEPOSIT_BELOW_MIN_DEPOSIT,
+      });
     });
 
     it("broadcasts the deposit and commits its voucher only in the post-handler settle", async () => {
@@ -175,10 +236,10 @@ describe("batch-settlement SVM", () => {
         requirements: requirements(),
       };
       const beforeVerify = await server.schemeHooks.onBeforeVerify!(verifyContext);
-      expect(beforeVerify).toMatchObject({ skip: true, result: { isValid: true } });
+      expect(beforeVerify).toBeUndefined();
       await server.schemeHooks.onAfterVerify!({
         ...verifyContext,
-        result: (beforeVerify as { result: { isValid: true; payer: string } }).result,
+        result: { isValid: true, payer: payer.address },
       });
 
       expect(await store.get(channelId)).toMatchObject({
@@ -298,9 +359,10 @@ describe("batch-settlement SVM", () => {
         requirements: requirements(),
       };
       const verified = await server.schemeHooks.onBeforeVerify!(context);
+      expect(verified).toBeUndefined();
       await server.schemeHooks.onAfterVerify!({
         ...context,
-        result: (verified as { result: { isValid: true; payer: string } }).result,
+        result: { isValid: true, payer: payer.address },
       });
       await server.schemeHooks.onVerifiedPaymentCanceled!({
         ...context,

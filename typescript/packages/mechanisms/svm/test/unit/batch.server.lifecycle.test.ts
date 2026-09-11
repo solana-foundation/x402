@@ -69,6 +69,7 @@ function state(overrides: Partial<ChannelState> = {}): ChannelState {
     deposit: 10_000n,
     feePayer: feePayer.address,
     mint: MINT,
+    onchainSyncedAt: Date.now(),
     openSlot: 123n,
     payer: payer.address,
     payerAuthorizer: payer.address,
@@ -496,6 +497,59 @@ describe("batch server lifecycle boundaries", () => {
     ).resolves.toMatchObject({ abort: true, reason: "duplicate_settlement" });
   });
 
+  it("uses local voucher verification only while the onchain snapshot is fresh", async () => {
+    const freshStore = new MemoryChannelStore();
+    await freshStore.put(state());
+    const payment: PaymentPayload = {
+      accepted: requirements(),
+      payload: { channelConfig, type: "voucher", voucher: depositPayload.voucher },
+      x402Version: 2,
+    };
+    const freshContext = {
+      declaredExtensions: {},
+      paymentPayload: payment,
+      requirements: requirements(),
+    };
+    await expect(
+      new BatchSvmScheme({ onchainStateTtlMs: 1_000, store: freshStore }).schemeHooks
+        .onBeforeVerify!(freshContext),
+    ).resolves.toMatchObject({ skip: true });
+
+    const staleStore = new MemoryChannelStore();
+    await staleStore.put(state({ onchainSyncedAt: 0 }));
+    const staleServer = new BatchSvmScheme({ onchainStateTtlMs: 1_000, store: staleStore });
+    const stalePayment = { ...payment, payload: { ...payment.payload } } as PaymentPayload;
+    const staleContext = { ...freshContext, paymentPayload: stalePayment };
+    await expect(staleServer.schemeHooks.onBeforeVerify!(staleContext)).resolves.toBeUndefined();
+    await expect(
+      staleServer.schemeHooks.onAfterVerify!({
+        ...staleContext,
+        result: { isValid: true, payer: payer.address },
+      }),
+    ).resolves.toMatchObject({ abort: true, reason: BatchError.CHANNEL_STATE });
+    const beforeRefresh = Date.now();
+    await expect(
+      staleServer.schemeHooks.onAfterVerify!({
+        ...staleContext,
+        result: {
+          extra: {
+            channelState: {
+              balance: "10000",
+              channelId,
+              totalClaimed: "0",
+              withdrawRequestedAt: 0,
+            },
+          },
+          isValid: true,
+          payer: payer.address,
+        },
+      }),
+    ).resolves.toBeUndefined();
+    expect((await staleStore.get(channelId))?.onchainSyncedAt).toBeGreaterThanOrEqual(
+      beforeRefresh,
+    );
+  });
+
   it("rejects busy, closing, and mismatched stored channel reservations", async () => {
     const cases = [
       state({
@@ -519,7 +573,7 @@ describe("batch server lifecycle boundaries", () => {
         expect(before).toMatchObject({ abort: true, reason: BatchError.CHANNEL_STATE });
         continue;
       }
-      expect(before).toMatchObject({ skip: true });
+      expect(before).toBeUndefined();
       await expect(
         server.schemeHooks.onAfterVerify!({
           ...ctx,
@@ -622,7 +676,7 @@ describe("batch server lifecycle boundaries", () => {
       };
       const ctx = { declaredExtensions: {}, paymentPayload: payment, requirements: requirements() };
       const before = await server.schemeHooks.onBeforeVerify!(ctx);
-      expect(before).toMatchObject({ skip: true });
+      expect(before).toBeUndefined();
       await server.schemeHooks.onAfterVerify!({
         ...ctx,
         result: { isValid: true, payer: payer.address },
@@ -774,7 +828,7 @@ describe("batch server lifecycle boundaries", () => {
       x402Version: 2,
     };
     const ctx = { declaredExtensions: {}, paymentPayload: payment, requirements: requirements() };
-    await expect(server.schemeHooks.onBeforeVerify!(ctx)).resolves.toMatchObject({ skip: true });
+    await expect(server.schemeHooks.onBeforeVerify!(ctx)).resolves.toBeUndefined();
     await expect(
       server.schemeHooks.onAfterVerify!({
         ...ctx,

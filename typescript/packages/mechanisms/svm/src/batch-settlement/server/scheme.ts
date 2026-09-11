@@ -25,6 +25,7 @@ import type {
 import type { DeepReadonly } from "@x402/core/types";
 
 import { TOKEN_2022_PROGRAM_ADDRESS, TOKEN_PROGRAM_ADDRESS } from "../../constants";
+import { findDefaultAsset } from "../../defaultAssets";
 import { encodeVoucherMessageBytes, verifyVoucherSignature } from "../../payment-channels/voucher";
 import { findPaymentChannelPda, parseU64 } from "../../payment-channels/open";
 import {
@@ -44,22 +45,26 @@ type RequestContext = {
   channelId: string;
   pendingId?: string;
   /**
-   * Set when this server held no record for the channel, so the cumulative
-   * rule could not be applied before the facilitator confirmed onchain state.
-   * `afterVerify` rebuilds the record from that snapshot and applies it there.
+   * Set when local state is absent or stale, so the cumulative rule must be
+   * applied after the facilitator refreshes the onchain snapshot.
    */
-  unknownChannel?: boolean;
+  requiresCumulativeCheck?: boolean;
 };
 
 const PRICE_STABLECOINS = new Set(["USDC", "USDT", "USDG", "PYUSD", "CASH"]);
 const MIN_WITHDRAW_DELAY = 900;
 const MAX_WITHDRAW_DELAY = 2_592_000;
 const CHANNEL_BUSY = "duplicate_settlement";
+const DEFAULT_SERVER_MIN_DEPOSIT_MULTIPLIER = 10n;
 
 export interface BatchSvmServerConfig {
   withdrawDelay?: number | undefined;
   receiverAuthorizer?: string | undefined;
   store?: ChannelStore | undefined;
+  /** Maximum age of onchain state used to verify vouchers locally. */
+  onchainStateTtlMs?: number | undefined;
+  /** Reject deposits below the announced `extra.minDeposit` hint. Defaults to false. */
+  enforceMinDeposit?: boolean | undefined;
 }
 
 /**
@@ -205,11 +210,47 @@ export class BatchSvmScheme implements SchemeNetworkServer {
           paymentRequirements.network,
         ),
         withdrawDelay,
+        minDeposit: this.resolveMinDepositHint(paymentRequirements),
         ...(this.config.receiverAuthorizer
           ? { receiverAuthorizer: this.config.receiverAuthorizer }
           : {}),
       },
     });
+  }
+
+  /**
+   * Resolve the deposit target advertised for one request.
+   *
+   * @param paymentRequirements - Route requirements, optionally with a target override
+   * @returns The normalized deposit target in atomic units
+   */
+  resolveMinDepositHint(paymentRequirements: PaymentRequirements): string {
+    const amount = BigInt(paymentRequirements.amount);
+    const override = paymentRequirements.extra?.minDeposit;
+    let configured: bigint | undefined;
+    if (typeof override === "string") {
+      if (/^\d+$/.test(override)) {
+        configured = parsePositiveAmount(override, "minDeposit");
+      } else {
+        const asset = findDefaultAsset(paymentRequirements.asset, paymentRequirements.network);
+        if (!asset) {
+          throw new Error(
+            `extra.minDeposit money values are only supported for default assets; ` +
+              `use an integer atomic string for ${paymentRequirements.asset} on ${paymentRequirements.network}.`,
+          );
+        }
+        const parsed = this.parseMoney(override);
+        if (parsed.stablecoin !== undefined && parsed.stablecoin !== asset.symbol) {
+          throw new Error(`extra.minDeposit currency must match ${asset.symbol}`);
+        }
+        configured = parsePositiveAmount(
+          convertToTokenAmount(numberToDecimalString(parsed.amount), asset.decimals),
+          "minDeposit",
+        );
+      }
+    }
+    const minimum = configured ?? amount * DEFAULT_SERVER_MIN_DEPOSIT_MULTIPLIER;
+    return (minimum > amount ? minimum : amount).toString();
   }
 
   private async beforeVerify(
@@ -232,8 +273,14 @@ export class BatchSvmScheme implements SchemeNetworkServer {
         // and `afterVerify` rebuilds the record from the snapshot it returns.
         // Refusing here instead would strand the payer's escrow behind a
         // forced close every time this server lost its store.
-        if (!state && raw.type === "voucher") {
-          this.requestContexts.set(ctx.paymentPayload, { channelId, unknownChannel: true });
+        if (
+          raw.type === "voucher" &&
+          (!state || !isOnchainStateFresh(state, this.config.onchainStateTtlMs))
+        ) {
+          this.requestContexts.set(ctx.paymentPayload, {
+            channelId,
+            requiresCumulativeCheck: true,
+          });
           return;
         }
         const expected = (state?.chargedCumulativeAmount ?? 0n) + BigInt(ctx.requirements.amount);
@@ -251,6 +298,10 @@ export class BatchSvmScheme implements SchemeNetworkServer {
         if (!state) throw new Error(BatchError.CHANNEL_STATE);
         this.requestContexts.set(ctx.paymentPayload, { channelId });
       }
+      // Deposits and refunds carry transactions whose complete instruction and
+      // onchain-state checks belong to the facilitator. Only a voucher backed
+      // by a fresh local snapshot can use the local verification fast path.
+      if (raw.type !== "voucher") return;
       return {
         skip: true,
         result: { isValid: true, payer: raw.channelConfig.payer, extra: { channelId } },
@@ -280,6 +331,9 @@ export class BatchSvmScheme implements SchemeNetworkServer {
     // no record of a live channel serve it, and what keeps `deposit`, `settled`
     // and the close state from drifting behind the chain.
     const snapshot = readVerifiedChannelState(ctx.result);
+    if (request.requiresCumulativeCheck && !snapshot) {
+      return this.abort(BatchError.CHANNEL_STATE, "facilitator did not return channel state");
+    }
     if (snapshot && !this.applySnapshot(request.channelId, snapshot)) {
       return this.abort(BatchError.CHANNEL_STATE, "verified channel snapshot is unusable");
     }
@@ -288,7 +342,7 @@ export class BatchSvmScheme implements SchemeNetworkServer {
     }
 
     // The cumulative rule could not be applied before the record existed.
-    if (request.unknownChannel) {
+    if (request.requiresCumulativeCheck) {
       const state = await this.store.get(request.channelId);
       if (!state) return this.abort(BatchError.CHANNEL_STATE, "channel state unavailable");
       const submitted = BigInt(raw.type === "refund" ? "0" : raw.voucher.maxClaimableAmount);
@@ -409,6 +463,7 @@ export class BatchSvmScheme implements SchemeNetworkServer {
           highestVoucherExpiresAt: raw.voucher.expiresAt,
           highestVoucherSignature: raw.voucher.signature,
           signedMaxClaimable: BigInt(raw.voucher.maxClaimableAmount),
+          onchainSyncedAt: Date.now(),
           pendingRequest: undefined,
         };
       });
@@ -426,6 +481,7 @@ export class BatchSvmScheme implements SchemeNetworkServer {
           ...current,
           closeRequestedAt: snapshot.withdrawRequestedAt,
           closeSignature: ctx.result.transaction,
+          onchainSyncedAt: Date.now(),
           pendingRequest: undefined,
           status: "closing",
         };
@@ -513,6 +569,14 @@ export class BatchSvmScheme implements SchemeNetworkServer {
       });
       if (!valid) throw new Error(BatchError.VOUCHER_SIGNATURE);
     }
+    if (
+      raw.type === "deposit" &&
+      this.config.enforceMinDeposit === true &&
+      parseU64(raw.deposit.amount, "deposit.amount") <
+        parseU64(this.resolveMinDepositHint(requirements), "minDeposit")
+    ) {
+      throw new Error(BatchError.DEPOSIT_BELOW_MIN_DEPOSIT);
+    }
     return channelId;
   }
 
@@ -578,6 +642,7 @@ export class BatchSvmScheme implements SchemeNetworkServer {
           snapshot.totalClaimed > base.signedMaxClaimable
             ? snapshot.totalClaimed
             : base.signedMaxClaimable,
+        onchainSyncedAt: Date.now(),
         ...(snapshot.withdrawRequestedAt !== 0
           ? { closeRequestedAt: snapshot.withdrawRequestedAt, status: "closing" as const }
           : {}),
@@ -803,6 +868,23 @@ function confirmedDeposit(current: bigint, confirmed: string | undefined): bigin
   } catch {
     return current;
   }
+}
+
+function isOnchainStateFresh(state: ChannelState, configuredTtlMs: number | undefined): boolean {
+  if (state.onchainSyncedAt === undefined) return false;
+  const ttlMs = configuredTtlMs ?? defaultOnchainStateTtlMs(state.withdrawDelay);
+  return Date.now() - state.onchainSyncedAt <= ttlMs;
+}
+
+function defaultOnchainStateTtlMs(withdrawDelaySeconds: number): number {
+  const withdrawDelayMs = Math.max(0, withdrawDelaySeconds) * 1_000;
+  return Math.min(5 * 60_000, Math.max(30_000, Math.floor(withdrawDelayMs / 3)));
+}
+
+function parsePositiveAmount(value: string, field: string): bigint {
+  const amount = parseU64(value, field);
+  if (amount === 0n) throw new Error(`${field} must resolve to a positive integer`);
+  return amount;
 }
 
 function classifyError(error: unknown): string {
