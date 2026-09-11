@@ -159,6 +159,7 @@ from `exact`.
 | `lastValidBlockHeight` | string | no | Last block height at which `recentBlockhash` is valid, as a decimal string. Informational; MAY be ignored by the client. Ignored when `recentBlockhash` is absent. |
 | `recentSlot` | number | no | Recent slot the client MAY use as `openSlot` when it does not fetch its own slot. The `open` instruction still enforces the program's slot window. |
 | `validAfter` | number | no | Earliest activation time (Unix seconds); default = now. |
+| `transactionVersions` | array | no | Transaction message versions the facilitator accepts, as an array of `"legacy"`, `0`, and/or `1`, copied from the facilitator's `/supported` `extra`. Absent means legacy and version `0`. See [Transaction versions](#transaction-versions). |
 
 The x402 wire format does not expose program-specific split arrays. The client
 derives the payment-channel accounts and distribution from the x402 fields:
@@ -240,7 +241,7 @@ Example: server uses an external facilitator for fee/rent sponsorship:
 | `channelId` | string | Channel PDA (base58), derived before `open` from the fields below. |
 | `deposit` | string | Onchain escrow amount. MUST equal `maxAmount`. |
 | `authorizedSigner` | string | MUST equal `extra.receiverAuthorizer`; included for explicit payload validation. Maps to the onchain `authorized_signer` account. |
-| `openTransaction` | string | Base64 partially signed `open` transaction. The client signature is present; the `feePayer`/`rent_payer` signature is still required before broadcast. |
+| `openTransaction` | string | Base64 partially signed `open` transaction. The client signature is present; the `feePayer`/`rent_payer` signature is still required before broadcast. Its message version MUST be one advertised in `extra.transactionVersions` (see [Transaction versions](#transaction-versions)). |
 
 `channelId` is the program-derived address:
 
@@ -312,8 +313,8 @@ settled funds, refunds the client, and closes the escrow token account.
 
 ### Phase 1 - Setup
 
-The facilitator's `/supported` `extra` advertises `feePayer`. The server
-returns that `feePayer` together with its own `receiverAuthorizer` and
+The facilitator's `/supported` `extra` advertises `feePayer` and, optionally,
+`transactionVersions`. The server returns those values together with its own `receiverAuthorizer` and
 `withdrawDelay` in the 402 response. The client builds an `open` transaction
 against the canonical payment-channels program, deposits `maxAmount`, sets
 `payee` and `rent_payer` to `extra.feePayer`, sets `authorized_signer` to
@@ -381,12 +382,42 @@ signature has already authorized the transaction.
 These rules apply only to the client-supplied `openTransaction`. The settlement
 transaction is constructed by the facilitator and is governed by Phase 4.
 
+##### Transaction versions
+
+Solana defines three transaction message formats: legacy, version `0` (adds
+Address Lookup Tables), and version `1` ([SIMD-0385](https://github.com/solana-foundation/solana-improvement-documents/blob/main/proposals/0385-transaction-v1.md): 4096-byte transactions that
+carry the compute budget in the message header). The facilitator advertises
+the versions it accepts as `extra.transactionVersions` in `/supported`, and the
+server MUST copy that value into `PaymentRequirements.extra.transactionVersions`.
+Entries are the string `"legacy"` or the integers `0` and `1`, the Wallet
+Standard `supportedTransactionVersions` vocabulary. When the field is absent,
+the accepted set is `["legacy", 0]`.
+
+- The facilitator MUST NOT advertise `1` unless the `enable_tx_v1` feature gate
+  (`txv1aq4pp281K9um3tnPgkfX8UqtFT6wcVW3hNezGLL`) is active on `network`.
+- The client MUST build one of the advertised versions and SHOULD build the
+  highest one its signer can produce. When the field is absent it SHOULD build
+  version `0`. The client MUST NOT use Address Lookup Tables.
+- The facilitator MUST reject any other message version, before inspecting any
+  instruction, with `unsupported_transaction_version`.
+- A legacy or version-0 transaction MUST NOT exceed 1232 serialized bytes; a
+  version-1 transaction MUST NOT exceed 4096 serialized bytes.
+- A version-1 transaction carries its compute budget in the message
+  `TransactionConfig`. It MUST set `computeUnitLimit` and
+  `loadedAccountsDataSizeLimit` (a version-1 transaction that omits either is
+  budgeted zero and cannot execute), it MUST NOT contain Compute Budget program
+  instructions, and its `priorityFee` is a total in lamports, evaluated against
+  a per-compute-unit cap as `priorityFee * 1000000 <= maxPriceMicroLamports *
+  computeUnitLimit`.
+
 ##### Message and signer rules
 
-- The message MAY be legacy or version `0`, but it MUST NOT contain Address
-  Lookup Table lookups. The canonical `open` fits entirely in static account
-  keys, and rejecting lookups ensures that every program and account is visible
-  before the facilitator signs.
+- The message version MUST be one advertised in `extra.transactionVersions`
+  (legacy or `0` when the field is absent; see
+  [Transaction versions](#transaction-versions)), and the message MUST NOT
+  contain Address Lookup Table lookups. The canonical `open` fits entirely in
+  static account keys, and rejecting lookups ensures that every program and
+  account is visible before the facilitator signs.
 - The transaction fee payer MUST equal `extra.feePayer`.
 - The complete required-signer set MUST equal the distinct addresses in
   `{ payload.from, extra.feePayer }`. No other signature may be required.
@@ -403,10 +434,12 @@ transaction is constructed by the facilitator and is governed by Phase 4.
 
 The top-level instructions MUST consist only of the following ordered regions:
 
-1. An optional Compute Budget prefix containing at most one
-   `SetComputeUnitLimit` instruction and at most one `SetComputeUnitPrice`
-   instruction. If both are present, `SetComputeUnitLimit` MUST precede
-   `SetComputeUnitPrice`.
+1. In a legacy or version-0 transaction, an optional Compute Budget prefix
+   containing at most one `SetComputeUnitLimit` instruction and at most one
+   `SetComputeUnitPrice` instruction. If both are present,
+   `SetComputeUnitLimit` MUST precede `SetComputeUnitPrice`. A version-1
+   transaction carries its compute budget in the message config and MUST NOT
+   contain this prefix.
 2. Exactly one payment-channels `open` instruction.
 3. An optional suffix of at most four instructions, each invoking either
    Lighthouse (`L2TExMFKdjpN9kozasaurPirfHy9P8sbXoAN1qA3S95`) or SPL Memo
@@ -435,6 +468,13 @@ A sponsor MAY apply a stricter local policy for compute-unit limit, compute-unit
 price, and required-signature count (operator-configurable caps), but MUST NOT
 admit a compute-unit limit above `400000` or a compute-unit price above
 `5000000` microlamports.
+
+In a version-1 transaction the same caps apply to the message
+`TransactionConfig` instead: `computeUnitLimit` MUST be present and MUST NOT
+exceed `400000`, `loadedAccountsDataSizeLimit` MUST be present, and
+`priorityFee` (total lamports) MUST satisfy
+`priorityFee * 1000000 <= 5000000 * computeUnitLimit`. A version-1 transaction
+that contains a Compute Budget instruction MUST be rejected.
 
 Lighthouse and Memo instructions are allowed only in the optional suffix and
 MUST NOT reference `extra.feePayer` as an account or as the invoked program.
