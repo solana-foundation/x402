@@ -13,3 +13,6 @@ export type {
   RentCleanupReclaimResult,
   RentCleanupStartConfig,
 } from "../../payment-channels/rentCleanup";
+
+export { InMemoryBatchPendingSettlementStore } from "./recovery";
+export type { BatchPendingSettlementStore } from "./recovery";

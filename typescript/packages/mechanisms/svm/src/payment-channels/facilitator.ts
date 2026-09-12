@@ -23,6 +23,7 @@ import {
   createTransactionMessage,
   decompileTransactionMessage,
   getBase58Encoder,
+  getSignatureFromTransaction,
   getBase64Codec,
   getBase64EncodedWireTransaction,
   getCompiledTransactionMessageDecoder,
@@ -53,7 +54,7 @@ import {
 import type { ChannelSplit } from "./open";
 import type { FacilitatorSvmSigner } from "../signer";
 import { BLOCKHASH_COMMITMENT, STATE_COMMITMENT } from "../upto/shared";
-import { createRpcClient } from "../utils";
+import { createRpcClient, TransactionOnchainFailureError } from "../utils";
 
 /** Solana per-transaction compute-unit maximum. */
 const MAX_TRANSACTION_COMPUTE_UNITS = 1_400_000;
@@ -308,9 +309,19 @@ export async function broadcastOpen(
   network: string,
   openTransactionBase64: string,
   onBroadcast?: (signature: string) => Promise<void>,
+  onPrepared?: (signature: string, wire: string) => Promise<void>,
 ): Promise<string> {
   const wire = await facilitator.signTransaction(openTransactionBase64, feePayer, network);
-  const signature = await facilitator.sendTransaction(wire, network);
+  let signature = onPrepared
+    ? getSignatureFromTransaction(getTransactionDecoder().decode(getBase64Codec().encode(wire)))
+    : "";
+  if (onPrepared) await onPrepared(signature, wire);
+  try {
+    const sent = await facilitator.sendTransaction(wire, network);
+    if (!onPrepared) signature = sent;
+  } catch (error) {
+    throw new ChannelBroadcastConfirmationError(signature, error);
+  }
   // Report the signature before confirming, so a caller that persists it can
   // reconcile even if this process dies mid-wait.
   await onBroadcast?.(signature);
@@ -484,6 +495,8 @@ export interface SubmitSettleOptions {
    * reconcile later rather than broadcast the same work twice.
    */
   onBroadcast?: ((signature: string) => Promise<void>) | undefined;
+  /** Await recovery storage before the signed bytes can reach the network. */
+  onPrepared?: ((signature: string, wire: string) => Promise<void>) | undefined;
   /**
    * Blockhash to pin the transaction to. Fetched through the caller's
    * transport when omitted; supply it to overlap the fetch with other reads.
@@ -593,12 +606,25 @@ export async function submitChannelTransactionWithSigner(
   } catch (error) {
     throw new ChannelSimulationError(error);
   }
-  const signature = (await signer.sendTransaction(wire, network)) as Signature;
+  let signature = options.onPrepared
+    ? getSignatureFromTransaction(getTransactionDecoder().decode(getBase64Codec().encode(wire)))
+    : ("" as Signature);
+  if (options.onPrepared) await options.onPrepared(signature, wire);
+  try {
+    const sent = await signer.sendTransaction(wire, network);
+    if (!options.onPrepared) signature = sent as Signature;
+  } catch {
+    throw new SettlementConfirmationTimeoutError(signature);
+  }
   await options.onBroadcast?.(signature);
   try {
     await signer.confirmTransaction(signature, network);
   } catch (error) {
-    if (error instanceof SettlementConfirmationTimeoutError) throw error;
+    if (
+      error instanceof SettlementConfirmationTimeoutError ||
+      error instanceof TransactionOnchainFailureError
+    )
+      throw error;
     throw new SettlementConfirmationTimeoutError(signature);
   }
   return signature;

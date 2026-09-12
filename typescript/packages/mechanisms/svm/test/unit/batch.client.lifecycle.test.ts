@@ -96,122 +96,128 @@ function internals(client: BatchSvmScheme): ClientInternals {
 }
 
 describe("batch client lifecycle", () => {
-  it("commits the metered amount from a signed server-mode receipt", async () => {
-    const operator = await generateKeyPairSigner();
-    const { records, storage } = memoryStorage();
-    const client = new BatchSvmScheme(payer, {
-      channelStorage: storage,
-      depositAmount: 3_000n,
-      discoverChannels: false,
-    });
-    const serverRequirements = requirements({
-      extra: {
-        ...requirements().extra,
-        operator: operator.address,
-        voucherSigner: "server",
-      },
-    });
-    const opened = await client.createPaymentPayload(2, serverRequirements);
-    expect(opened.payload).toMatchObject({ type: "deposit" });
-    expect("maxClaimableAmount" in opened.payload).toBe(false);
-    const channelId = opened.payload.authorization!.channelId;
-    const signature = await signVoucher(operator, {
-      channelId,
-      cumulativeAmount: 400n,
-      expiresAt: 0n,
-    });
-    const voucher = { channelId, expiresAt: 0, maxClaimableAmount: "400", signature };
-    const receipt = await signBatchSettlementReceipt(operator, {
-      channelId,
-      idempotencyKey: opened.payload.idempotencyKey!,
-      authorizedAmount: 1_000n,
-      chargedAmount: 400n,
-      priorCumulativeAmount: 0n,
-      cumulativeAmount: 400n,
-      voucher,
-    });
-
-    await client.schemeHooks.onPaymentResponse!({
-      paymentPayload: { accepted: serverRequirements, ...opened },
-      requirements: serverRequirements,
-      settleResponse: {
+  it.each([false, true])(
+    "commits a signed server receipt without allocating again (restart=%s)",
+    async restart => {
+      const operator = await generateKeyPairSigner();
+      const { records, storage } = memoryStorage();
+      let client = new BatchSvmScheme(payer, {
+        channelStorage: storage,
+        depositAmount: 3_000n,
+        discoverChannels: false,
+      });
+      const serverRequirements = requirements({
         extra: {
-          chargedAmount: "400",
-          channelState: { chargedCumulativeAmount: "400" },
-          commitmentId: `${channelId}:400`,
-          receipt,
-          voucher,
+          ...requirements().extra,
+          operator: operator.address,
+          voucherSigner: "server",
         },
-        success: true,
-      },
-    } as never);
-
-    expect([...records.values()][0]).toMatchObject({
-      chargedCumulativeAmount: "400",
-      deposit: "3000",
-    });
-
-    const first = await client.createPaymentPayload(2, serverRequirements);
-    const second = await client.createPaymentPayload(2, serverRequirements);
-    expect(first.payload).toMatchObject({ type: "authorization" });
-    expect(second.payload).toMatchObject({ type: "authorization" });
-    if (first.payload.type !== "authorization" || second.payload.type !== "authorization") {
-      throw new Error("expected server-mode authorization payloads");
-    }
-    expect(first.payload.idempotencyKey).not.toBe(second.payload.idempotencyKey);
-
-    const response = async (
-      payment: typeof first,
-      prior: bigint,
-      actual: bigint,
-      cumulative: bigint,
-    ) => {
-      const voucherSignature = await signVoucher(operator, {
+      });
+      const opened = await client.createPaymentPayload(2, serverRequirements);
+      expect(opened.payload).toMatchObject({ type: "deposit" });
+      expect("maxClaimableAmount" in opened.payload).toBe(false);
+      const channelId = opened.payload.authorization!.channelId;
+      const signature = await signVoucher(operator, {
         channelId,
-        cumulativeAmount: cumulative,
+        cumulativeAmount: 400n,
         expiresAt: 0n,
       });
-      const completedVoucher = {
+      const voucher = { channelId, expiresAt: 0, maxClaimableAmount: "400", signature };
+      const receipt = await signBatchSettlementReceipt(operator, {
         channelId,
-        expiresAt: 0,
-        maxClaimableAmount: cumulative.toString(),
-        signature: voucherSignature,
-      };
-      const completedReceipt = await signBatchSettlementReceipt(operator, {
-        channelId,
-        idempotencyKey: payment.payload.idempotencyKey!,
+        idempotencyKey: opened.payload.idempotencyKey!,
         authorizedAmount: 1_000n,
-        chargedAmount: actual,
-        priorCumulativeAmount: prior,
-        cumulativeAmount: cumulative,
-        voucher: completedVoucher,
+        chargedAmount: 400n,
+        priorCumulativeAmount: 0n,
+        cumulativeAmount: 400n,
+        voucher,
       });
-      return {
-        extra: {
-          chargedAmount: actual.toString(),
-          channelState: { chargedCumulativeAmount: cumulative.toString() },
-          commitmentId: `${channelId}:${cumulative}`,
-          receipt: completedReceipt,
-          voucher: completedVoucher,
-        },
-        success: true,
-      };
-    };
 
-    // Request two completed second, then its response arrived after request
-    // one's newer cumulative receipt. The client must not roll state back.
-    await client.schemeHooks.onPaymentResponse!({
-      paymentPayload: { accepted: serverRequirements, ...first },
-      requirements: serverRequirements,
-      settleResponse: await response(first, 700n, 200n, 900n),
-    } as never);
-    await client.schemeHooks.onPaymentResponse!({
-      paymentPayload: { accepted: serverRequirements, ...second },
-      requirements: serverRequirements,
-      settleResponse: await response(second, 400n, 300n, 700n),
-    } as never);
-    expect([...records.values()][0]).toMatchObject({ chargedCumulativeAmount: "900" });
-  });
+      if (restart) {
+        client = new BatchSvmScheme(payer, { channelStorage: storage, discoverChannels: false });
+      }
+      await client.schemeHooks.onPaymentResponse!({
+        paymentPayload: { accepted: serverRequirements, ...opened },
+        requirements: serverRequirements,
+        settleResponse: {
+          extra: {
+            chargedAmount: "400",
+            channelState: { chargedCumulativeAmount: "400" },
+            commitmentId: `${channelId}:400`,
+            receipt,
+            voucher,
+          },
+          success: true,
+        },
+      } as never);
+
+      expect([...records.values()][0]).toMatchObject({
+        chargedCumulativeAmount: "400",
+        deposit: "3000",
+      });
+
+      const first = await client.createPaymentPayload(2, serverRequirements);
+      const second = await client.createPaymentPayload(2, serverRequirements);
+      expect(first.payload).toMatchObject({ type: "authorization" });
+      expect(second.payload).toMatchObject({ type: "authorization" });
+      if (first.payload.type !== "authorization" || second.payload.type !== "authorization") {
+        throw new Error("expected server-mode authorization payloads");
+      }
+      expect(first.payload.idempotencyKey).not.toBe(second.payload.idempotencyKey);
+
+      const response = async (
+        payment: typeof first,
+        prior: bigint,
+        actual: bigint,
+        cumulative: bigint,
+      ) => {
+        const voucherSignature = await signVoucher(operator, {
+          channelId,
+          cumulativeAmount: cumulative,
+          expiresAt: 0n,
+        });
+        const completedVoucher = {
+          channelId,
+          expiresAt: 0,
+          maxClaimableAmount: cumulative.toString(),
+          signature: voucherSignature,
+        };
+        const completedReceipt = await signBatchSettlementReceipt(operator, {
+          channelId,
+          idempotencyKey: payment.payload.idempotencyKey!,
+          authorizedAmount: 1_000n,
+          chargedAmount: actual,
+          priorCumulativeAmount: prior,
+          cumulativeAmount: cumulative,
+          voucher: completedVoucher,
+        });
+        return {
+          extra: {
+            chargedAmount: actual.toString(),
+            channelState: { chargedCumulativeAmount: cumulative.toString() },
+            commitmentId: `${channelId}:${cumulative}`,
+            receipt: completedReceipt,
+            voucher: completedVoucher,
+          },
+          success: true,
+        };
+      };
+
+      // Request two completed second, then its response arrived after request
+      // one's newer cumulative receipt. The client must not roll state back.
+      await client.schemeHooks.onPaymentResponse!({
+        paymentPayload: { accepted: serverRequirements, ...first },
+        requirements: serverRequirements,
+        settleResponse: await response(first, 700n, 200n, 900n),
+      } as never);
+      await client.schemeHooks.onPaymentResponse!({
+        paymentPayload: { accepted: serverRequirements, ...second },
+        requirements: serverRequirements,
+        settleResponse: await response(second, 400n, 300n, 700n),
+      } as never);
+      expect([...records.values()][0]).toMatchObject({ chargedCumulativeAmount: "900" });
+    },
+  );
 
   it("opens, replays, confirms, and advances a persisted channel", async () => {
     const { records, storage } = memoryStorage();

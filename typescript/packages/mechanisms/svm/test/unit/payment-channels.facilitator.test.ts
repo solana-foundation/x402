@@ -169,6 +169,64 @@ describe("payment-channel transaction submission", () => {
     programAddress: address(MEMO_PROGRAM_ADDRESS),
   };
 
+  it("records signed bytes before RPC submission, including when the send response is lost", async () => {
+    const feePayer = await generateKeyPairSigner();
+    let recorded: { signature: string; wire: string } | undefined;
+    const sendTransaction = vi.fn(async (wire: string) => {
+      expect(recorded?.wire).toBe(wire);
+      expect(recorded?.signature).toBeTruthy();
+      throw new Error("accepted by RPC, response lost");
+    });
+    const submit = submitChannelTransactionWithSigner(
+      feePayer,
+      {
+        getLatestBlockhash: async () => ({
+          blockhash: USDC_MAINNET_ADDRESS,
+          lastValidBlockHeight: 100n,
+        }),
+        simulateTransaction: async () => undefined,
+        sendTransaction,
+        confirmTransaction: vi.fn(),
+      },
+      SOLANA_DEVNET_CAIP2,
+      [instruction],
+      {
+        onPrepared: async (signature, wire) => {
+          recorded = { signature, wire };
+        },
+      },
+    );
+    await expect(submit).rejects.toBeInstanceOf(SettlementConfirmationTimeoutError);
+    expect(sendTransaction).toHaveBeenCalledOnce();
+  });
+
+  it("does not broadcast if recording signed bytes fails", async () => {
+    const feePayer = await generateKeyPairSigner();
+    const sendTransaction = vi.fn();
+    await expect(
+      submitChannelTransactionWithSigner(
+        feePayer,
+        {
+          getLatestBlockhash: async () => ({
+            blockhash: USDC_MAINNET_ADDRESS,
+            lastValidBlockHeight: 100n,
+          }),
+          simulateTransaction: async () => undefined,
+          sendTransaction,
+          confirmTransaction: vi.fn(),
+        },
+        SOLANA_DEVNET_CAIP2,
+        [instruction],
+        {
+          onPrepared: async () => {
+            throw new Error("storage unavailable");
+          },
+        },
+      ),
+    ).rejects.toThrow("storage unavailable");
+    expect(sendTransaction).not.toHaveBeenCalled();
+  });
+
   it("broadcasts an open and reports its signature before confirmation", async () => {
     const events: string[] = [];
     const facilitator = {

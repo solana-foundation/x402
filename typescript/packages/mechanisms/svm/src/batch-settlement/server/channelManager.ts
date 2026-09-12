@@ -7,6 +7,10 @@
  * that redemption on an interval, out of the request path.
  */
 
+import { address } from "@solana/kit";
+import { createRpcClient } from "../../utils";
+import { getChannelDecoder } from "../../payment-channels/generated/accounts/channel";
+import { PAYMENT_CHANNELS_PROGRAM_ID } from "../../payment-channels/onchain";
 import type { PaymentRequirements, SettleResponse } from "@x402/core/types";
 
 import { BATCH_SETTLEMENT_SCHEME } from "../types";
@@ -37,6 +41,10 @@ export interface BatchChannelManagerConfig {
   requirements: PaymentRequirements;
   /** Channels per claim transaction. Defaults to the spec's four. */
   maxChannelsPerBatch?: number | undefined;
+  /** RPC used to reconcile paid state after a sweep response. */
+  rpcUrl?: string | undefined;
+  /** Optional confirmed channel reader for custom transports; never estimate from the response amount. */
+  readPayoutWatermark?: ((channelId: string) => Promise<bigint | undefined>) | undefined;
   /** Reports a pass that failed, so an operator can see it. */
   onError?: ((error: unknown) => void) | undefined;
 }
@@ -174,11 +182,37 @@ export class BatchChannelManager {
         );
         continue;
       }
+      const accepts = response.extra?.accepts;
+      if (
+        response.network !== this.config.requirements.network ||
+        !Array.isArray(accepts) ||
+        accepts.length !== batch.length ||
+        batch.some(channel => {
+          const matches = accepts.filter(
+            item =>
+              typeof item === "object" &&
+              item !== null &&
+              "channelId" in item &&
+              item.channelId === channel.channelId,
+          );
+          return (
+            matches.length !== 1 ||
+            !("totalClaimed" in matches[0]!) ||
+            matches[0]!.totalClaimed !== channel.signedMaxClaimable.toString()
+          );
+        })
+      ) {
+        this.config.onError?.(
+          new Error(`${BATCH_SETTLEMENT_SCHEME} claim missing confirmed settled watermark`),
+        );
+        continue;
+      }
       for (const channel of batch) {
         await this.record(channel.channelId, state => ({
           ...state,
           onchainSyncedAt: Date.now(),
-          settled: channel.signedMaxClaimable,
+          settled:
+            state.settled > channel.signedMaxClaimable ? state.settled : channel.signedMaxClaimable,
         }));
         claimed.push(channel.channelId);
       }
@@ -220,16 +254,57 @@ export class BatchChannelManager {
         );
         continue;
       }
+      const channels = response.extra?.channels;
+      if (
+        response.network !== this.config.requirements.network ||
+        !Array.isArray(channels) ||
+        channels.length !== batch.length ||
+        new Set(channels).size !== channels.length ||
+        batch.some(channel => !channels.includes(channel.channelId))
+      ) {
+        this.config.onError?.(
+          new Error(`${BATCH_SETTLEMENT_SCHEME} distribute response channel mismatch`),
+        );
+        continue;
+      }
       for (const channel of batch) {
-        await this.record(channel.channelId, state => ({
-          ...state,
-          onchainSyncedAt: Date.now(),
-          payoutWatermark: channel.settled,
-        }));
-        distributed.push(channel.channelId);
+        try {
+          // This response may recover an earlier sweep. A channel ID and a
+          // successful signature do not prove that today's full claim was paid.
+          const paid = await this.readPayoutWatermark(channel.channelId);
+          if (paid === undefined || paid < 0n || paid > channel.deposit)
+            throw new Error("confirmed payout watermark unavailable or invalid");
+          await this.record(channel.channelId, state => ({
+            ...state,
+            onchainSyncedAt: Date.now(),
+            payoutWatermark: state.payoutWatermark > paid ? state.payoutWatermark : paid,
+          }));
+          if (paid >= channel.settled) distributed.push(channel.channelId);
+        } catch (error) {
+          // Leave the balance payable for the next pass, including after restart.
+          this.config.onError?.(error);
+        }
       }
     }
     return distributed;
+  }
+
+  /**
+   * Read a conservative paid watermark; stale reads delay bookkeeping, never advance it too far.
+   *
+   * @param channelId - Channel whose paid state is being reconciled
+   * @returns Observed payout watermark, or undefined if the account is absent
+   */
+  private async readPayoutWatermark(channelId: string): Promise<bigint | undefined> {
+    if (this.config.readPayoutWatermark) return this.config.readPayoutWatermark(channelId);
+    const account = await createRpcClient(this.config.requirements.network, this.config.rpcUrl)
+      .getAccountInfo(address(channelId), { commitment: "confirmed", encoding: "base64" })
+      .send();
+    if (!account.value) return undefined;
+    if (account.value.owner !== PAYMENT_CHANNELS_PROGRAM_ID)
+      throw new Error("unexpected channel account owner");
+    return getChannelDecoder().decode(Buffer.from(account.value.data[0], "base64")).settlement
+      .payoutWatermark;
   }
 
   /**

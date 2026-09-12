@@ -1,9 +1,17 @@
-import { generateKeyPairSigner } from "@solana/kit";
+import {
+  generateKeyPairSigner,
+  address,
+  getSignatureFromTransaction,
+  getTransactionDecoder,
+  getBase64Codec,
+} from "@solana/kit";
 import { InMemoryPendingSettlementStore } from "@x402/core/facilitator";
-import { beforeAll, describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it, vi } from "vitest";
 
 import { BatchSvmScheme as BatchFacilitatorScheme } from "../../src/batch-settlement/facilitator/scheme";
-import { SOLANA_DEVNET_CAIP2 } from "../../src/constants";
+import { broadcastOpen } from "../../src/payment-channels/facilitator";
+import { USDC_DEVNET_ADDRESS } from "../../src/defaultAssets";
+import { SOLANA_DEVNET_CAIP2, MEMO_PROGRAM_ADDRESS } from "../../src/constants";
 import { toFacilitatorSvmSigner } from "../../src/signer";
 
 const NETWORK = SOLANA_DEVNET_CAIP2;
@@ -16,7 +24,8 @@ type Durable = {
     network: string,
     payer: string,
     broadcast: (onBroadcast: (signature: string) => Promise<void>) => Promise<string>,
-  ): Promise<{ ok: true; signature: string } | { ok: false; response: unknown }>;
+  ): Promise<{ ok: true; replayed: boolean; signature: string } | { ok: false; response: unknown }>;
+  completeBroadcast(key: string, signature: string): Promise<void>;
 };
 
 describe("batch-settlement pending settlement", () => {
@@ -43,6 +52,75 @@ describe("batch-settlement pending settlement", () => {
     return scheme as unknown as Durable;
   }
 
+  it.each(["redemption", "open"])(
+    "does not repeat the successful confirmation RPC for %s",
+    async kind => {
+      const wallet = await generateKeyPairSigner();
+      const confirm = vi.fn().mockResolvedValue({ slot: 432n });
+      let wire = "";
+      const transport = {
+        ...toFacilitatorSvmSigner(wallet),
+        getLatestBlockhash: vi
+          .fn()
+          .mockResolvedValue({ blockhash: USDC_DEVNET_ADDRESS, lastValidBlockHeight: 1n }),
+        simulateTransaction: vi.fn().mockResolvedValue(undefined),
+        sendTransaction: vi.fn(async (bytes: string) => {
+          wire = bytes;
+          return getSignatureFromTransaction(
+            getTransactionDecoder().decode(getBase64Codec().encode(bytes)),
+          );
+        }),
+        confirmTransaction: confirm,
+        getAccountInfo: vi.fn().mockResolvedValue(null),
+      };
+      const scheme = new BatchFacilitatorScheme(transport);
+      const internals = scheme as any;
+      const instructions = [
+        {
+          programAddress: address(MEMO_PROGRAM_ADDRESS),
+          accounts: [],
+          data: new TextEncoder().encode("RPC budget"),
+        },
+      ];
+      const result = await internals.submitRedemption(
+        wallet.address,
+        NETWORK,
+        instructions,
+        "redemption",
+        payer,
+      );
+      expect(result.ok).toBe(true);
+      if (kind === "open") {
+        confirm.mockClear();
+        transport.signTransaction = vi.fn().mockImplementation(async () => wire);
+        await internals.broadcastDurably("open", NETWORK, payer, (onPrepared: any) =>
+          broadcastOpen(
+            internals.submissionSigner(),
+            wallet.address,
+            NETWORK,
+            wire,
+            undefined,
+            onPrepared,
+          ),
+        );
+      }
+      expect(confirm).toHaveBeenCalledTimes(1);
+      expect(confirm.mock.calls[0]).toHaveLength(2); // no history search on fresh submission
+      await internals.readChannel(NETWORK, wallet.address);
+      expect(transport.getAccountInfo).toHaveBeenCalledWith(
+        wallet.address,
+        NETWORK,
+        expect.objectContaining({ minContextSlot: 432n }),
+      );
+      // Reconciliation is allowed to search older transaction history, without building new bytes.
+      confirm.mockClear();
+      await internals.reconcileBroadcast(kind, result.signature, NETWORK, payer);
+      expect(confirm).toHaveBeenCalledWith(result.signature, NETWORK, {
+        searchTransactionHistory: true,
+      });
+    },
+  );
+
   it("reconciles a recorded broadcast instead of repeating it", async () => {
     const store = new InMemoryPendingSettlementStore();
     await store.set(KEY, "recorded-signature");
@@ -56,8 +134,9 @@ describe("batch-settlement pending settlement", () => {
 
     expect(result).toMatchObject({ ok: true, signature: "recorded-signature" });
     expect(broadcasts, "the recorded transaction is confirmed, never resent").toBe(0);
-    // Confirmed, so the record is gone and the next attempt starts clean.
-    expect(await store.get(KEY)).toBeUndefined();
+    // Confirmation alone is not the operation outcome: its identity remains
+    // recoverable until the claim/distribution/close postcondition is visible.
+    expect(await store.get(KEY)).toBe("recorded-signature");
   });
 
   it("keeps the record until the reconcile knows the outcome", async () => {
@@ -99,8 +178,10 @@ describe("batch-settlement pending settlement", () => {
     );
     expect(result).toMatchObject({ ok: true, signature: "recorded-signature" });
     expect(broadcasts).toBe(0);
-    // Only once the outcome is known does the record go.
+    expect(await store.get(KEY)).toBe("recorded-signature");
+    await (scheme as unknown as Durable).completeBroadcast(KEY, "recorded-signature");
     expect(await store.get(KEY)).toBeUndefined();
+    expect(await store.get(`${KEY}:completed`)).toBe("recorded-signature");
   });
 
   it("has both concurrent retries reconcile rather than rebroadcast", async () => {
@@ -135,7 +216,6 @@ describe("batch-settlement pending settlement", () => {
     });
 
     expect(recordedMidFlight).toBe("in-flight-signature");
-    // Confirmed, so it is cleaned up afterwards.
-    expect(await store.get(KEY)).toBeUndefined();
+    expect(await store.get(KEY)).toBe("in-flight-signature");
   });
 });
