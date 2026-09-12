@@ -138,7 +138,14 @@ export type BatchClaimPayload = {
 
 export type BatchSettlePayload = {
   type: "settle";
-  channels: { channelId: string; channelConfig: BatchChannelConfig }[];
+  channels: {
+    channelId: string;
+    channelConfig: BatchChannelConfig;
+    /** Onchain payout watermark the merchant observed before this payout. */
+    payoutWatermark: string;
+    /** Onchain settled watermark this payout is expected to distribute through. */
+    settled: string;
+  }[];
 };
 
 export type BatchFacilitatorPayload = BatchPayload | BatchClaimPayload | BatchSettlePayload;
@@ -264,7 +271,9 @@ export function isBatchFacilitatorPayload(value: unknown): value is BatchFacilit
       item =>
         isRecord(item) &&
         typeof item.channelId === "string" &&
-        isBatchChannelConfig(item.channelConfig),
+        isBatchChannelConfig(item.channelConfig) &&
+        typeof item.payoutWatermark === "string" &&
+        typeof item.settled === "string",
     )
   );
 }

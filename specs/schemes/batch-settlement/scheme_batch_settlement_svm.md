@@ -782,6 +782,8 @@ server-authored or server-enriched variants are:
 | Settle | `channels` | array | One or more channels to distribute. |
 | Settle | `channels[].channelId` | string | Channel PDA. |
 | Settle | `channels[].channelConfig` | `ChannelConfig` | Full configuration used to derive accounts, validate the channel, and reconstruct the distribution. |
+| Settle | `channels[].payoutWatermark` | string | Exact onchain payout watermark observed before this distribution. |
+| Settle | `channels[].settled` | string | Exact settled watermark this distribution is expected to pay through. MUST be greater than `payoutWatermark`. |
 | Refund | `type` | string | `"refund"` |
 | Refund | `channelConfig` | `ChannelConfig` | Client-provided channel configuration. |
 | Refund | `transaction` | string | Client-signed `request_close` transaction forwarded to the facilitator. |
@@ -931,7 +933,9 @@ a `settle` payload:
         "withdrawDelay": 3600,
         "salt": "42",
         "openSlot": 341000000
-      }
+      },
+      "payoutWatermark": "0",
+      "settled": "5000"
     },
     {
       "channelId": "<channel-pda-2>",
@@ -944,15 +948,19 @@ a `settle` payload:
         "withdrawDelay": 3600,
         "salt": "43",
         "openSlot": 341000050
-      }
+      },
+      "payoutWatermark": "2000",
+      "settled": "7000"
     }
   ]
 }
 ```
 
-The facilitator invokes `distribute` for every `channels[]` entry and MUST
-process every entry or fail the request. It MUST confirm each transaction
-onchain before returning success.
+Before a fresh broadcast, the facilitator MUST require each channel's onchain
+`payout_watermark` and `settled` values to exactly match the two values in the
+payload. It invokes `distribute` for every `channels[]` entry and MUST process
+every entry or fail the request. It MUST confirm each transaction and observe
+the operation-specific onchain postcondition before returning success.
 
 Successful responses have operation-specific `amount` semantics:
 
@@ -963,7 +971,11 @@ Claim (`amount` is empty because no funds move):
   "success": true,
   "transaction": "<base58-transaction-signature>",
   "network": "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
-  "amount": ""
+  "amount": "",
+  "extra": {
+    "accepts": [{ "channelId": "<channel-pda-1>", "totalClaimed": "5000" }],
+    "replayed": false
+  }
 }
 ```
 
@@ -974,9 +986,18 @@ Settle (`amount` is the total transferred to the receiver across the batch):
   "success": true,
   "transaction": "<base58-transaction-signature>",
   "network": "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
-  "amount": "5000"
+  "amount": "5000",
+  "extra": {
+    "payouts": [{ "channelId": "<channel-pda-1>", "payoutWatermark": "5000" }],
+    "replayed": false
+  }
 }
 ```
+
+A successful retry of an already-broadcast distribution MUST return its
+original transaction signature and confirmed `extra.payouts`, set
+`extra.replayed` to `true`, and report `amount: "0"`. This lets a merchant
+repair local state without reporting the same token movement twice.
 
 Deposit (`amount` is the amount deposited or topped up):
 
@@ -1489,21 +1510,26 @@ idempotency:
   the authoritative replay defense. The same authorization MUST NOT execute the
   resource handler more than once.
 - **Client-supplied transactions.** For `deposit` and `refund`, the facilitator
-  SHOULD maintain a short-lived in-flight cache keyed by the exact serialized
-  transaction or its first signature. Concurrent `/settle` calls for the same
+  MUST preserve the broadcast signature under a deterministic key until it can
+  observe the operation-specific postcondition and durably record completion.
+  Concurrent `/settle` calls for the same
   transaction MUST be coalesced to one broadcast and one result or rejected
   with `duplicate_settlement`; they MUST NOT produce independent successful
-  settlements. The entry MAY be evicted once the transaction's blockhash is no
-  longer valid. A refund retry after `request_close` confirms MUST return the
-  observed `Closing` state rather than attempt a second transition.
+  settlements. A refund retry after `request_close` confirms MUST return the
+  original signature and observed `Closing` or later terminal state rather than
+  attempt a second transition. An absent account after cleanup is also success
+  for a recorded close transaction.
 - **Claims.** Program `settle` requires a strictly increasing watermark, so the
-  same claim cannot advance accounting twice. A facilitator MAY coalesce
-  in-flight `(channelId, maxClaimableAmount)` claims to avoid a predictable
-  second transaction failure; no durable duplicate cache is required.
+  same claim cannot advance accounting twice. The facilitator MUST durably bind
+  the exact `(channelId, maxClaimableAmount)` batch to its transaction signature
+  before awaiting confirmation. A retry reconciles that signature and returns
+  the confirmed claim watermarks. It MUST NOT treat an advanced watermark alone
+  as proof that an unrecorded request succeeded.
 - **Open-channel distributions.** `distribute` advances `payout_watermark` to
-  `settled`; a repeat cannot pay the same delta again. A facilitator MAY
-  coalesce concurrent distributions for the same channel and observed
-  watermark.
+  `settled`; a repeat cannot pay the same delta again. The facilitator MUST bind
+  each exact `(channelId, payoutWatermark, settled)` batch to its transaction
+  signature and preserve a completed result for retries. Recovered and repeated
+  responses report zero new amount and return the confirmed payout watermark.
 - **Refunds.** The facilitator MUST coalesce retries of the same
   `request_close` transaction into one broadcast and one initiation result.
   Once `Closing`, later retries return the observed channel state. A client
@@ -1516,6 +1542,14 @@ idempotency:
 - **Reclaim.** A channel can transition from `Distributed` to deallocated only
   once. Concurrent reclaim attempts require no additional replay mitigation;
   later attempts observe an absent account or invalid status.
+
+Transaction confirmation and channel-account visibility can lag independently
+across RPC nodes. After confirmation, facilitators MUST retry stale account
+reads before returning pending. If the postcondition remains unavailable, they
+MUST retain the transaction identity and return `settlement_pending`; a later
+request or a restarted process using the same durable store resumes recovery
+without broadcasting again. Completion MUST be persisted before the pending
+record is removed.
 
 ## 6. Asynchronous Recovery and Channel Discovery
 

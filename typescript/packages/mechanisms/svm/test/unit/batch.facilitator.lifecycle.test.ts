@@ -136,6 +136,8 @@ type FacilitatorInternals = {
   }>;
   deriveChannelId: ReturnType<typeof vi.fn>;
   fetchChannel: ReturnType<typeof vi.fn>;
+  fetchChannelUntil: ReturnType<typeof vi.fn>;
+  fetchChannelsUntil: ReturnType<typeof vi.fn>;
   trackChannel: ReturnType<typeof vi.fn>;
   submitRedemption: ReturnType<typeof vi.fn>;
   distributeInstruction: ReturnType<typeof vi.fn>;
@@ -147,6 +149,7 @@ type FacilitatorInternals = {
   ): Promise<unknown>;
   validateDeposit: ReturnType<typeof vi.fn>;
   validateRefund: ReturnType<typeof vi.fn>;
+  prepareRefund: ReturnType<typeof vi.fn>;
   validateVoucherOnly: ReturnType<typeof vi.fn>;
   settleDeposit(
     payment: PaymentPayload,
@@ -573,7 +576,10 @@ describe("batch facilitator lifecycle", () => {
               type,
             }
           : type === "settle"
-            ? { channels: [{ channelConfig, channelId }], type }
+            ? {
+                channels: [{ channelConfig, channelId, payoutWatermark: "0", settled: "1" }],
+                type,
+              }
             : type === "refund"
               ? { channelConfig, transaction: "x", type }
               : type === "deposit"
@@ -684,7 +690,9 @@ describe("batch facilitator lifecycle", () => {
     });
     api.readChannel = vi.fn().mockResolvedValue(undefined);
     api.trackChannel = vi.fn().mockResolvedValue(undefined);
-    api.broadcastDurably = vi.fn().mockResolvedValue({ ok: true, signature: SIGNATURE });
+    api.broadcastDurably = vi
+      .fn()
+      .mockResolvedValue({ ok: true, replayed: false, signature: SIGNATURE });
     api.fetchChannel = vi.fn().mockResolvedValue(channel({ deposit: 11_000n }));
     api.assertClaimChannel = vi.fn();
     await expect(
@@ -727,11 +735,10 @@ describe("batch facilitator lifecycle", () => {
     ).resolves.toMatchObject({ success: false, errorReason: BatchError.PAYLOAD_TYPE });
 
     const refund = { channelConfig, transaction: "close", type: "refund" as const };
-    api.validateRefund = vi.fn().mockResolvedValue({
-      channel: channel({ closureStartedAt: 20n, status: ChannelStatus.Closing }),
-      channelId,
-      terms,
-    });
+    api.prepareRefund = vi.fn().mockResolvedValue({ channelId, terms });
+    api.fetchChannel = vi
+      .fn()
+      .mockResolvedValue(channel({ closureStartedAt: 20n, status: ChannelStatus.Closing }));
     await expect(
       api.settleRefund(
         { accepted: requirements(), payload: refund, x402Version: 2 } as never,
@@ -744,9 +751,11 @@ describe("batch facilitator lifecycle", () => {
       extra: { channelState: { withdrawRequestedAt: 20 } },
     });
 
-    api.validateRefund = vi.fn().mockResolvedValue({ channel: channel(), channelId, terms });
-    api.broadcastDurably = vi.fn().mockResolvedValue({ ok: true, signature: SIGNATURE });
-    api.fetchChannel = vi
+    api.fetchChannel = vi.fn().mockResolvedValue(channel());
+    api.broadcastDurably = vi
+      .fn()
+      .mockResolvedValue({ ok: true, replayed: false, signature: SIGNATURE });
+    api.fetchChannelUntil = vi
       .fn()
       .mockResolvedValue(channel({ closureStartedAt: 20n, status: ChannelStatus.Closing }));
     await expect(
@@ -887,12 +896,14 @@ describe("batch facilitator lifecycle", () => {
       withdrawDelay: 900,
     });
     privateApi.deriveChannelId = vi.fn().mockResolvedValue(channelId);
-    privateApi.fetchChannel = vi
+    privateApi.fetchChannel = vi.fn().mockResolvedValue(channel());
+    privateApi.fetchChannelsUntil = vi
       .fn()
-      .mockResolvedValueOnce(channel())
-      .mockResolvedValueOnce(channel({ settlement: { payoutWatermark: 0n, settled: 1_000n } }));
+      .mockResolvedValue([channel({ settlement: { payoutWatermark: 0n, settled: 1_000n } })]);
     privateApi.trackChannel = vi.fn().mockResolvedValue(undefined);
-    privateApi.submitRedemption = vi.fn().mockResolvedValue({ ok: true, signature: SIGNATURE });
+    privateApi.submitRedemption = vi
+      .fn()
+      .mockResolvedValue({ ok: true, replayed: false, signature: SIGNATURE });
 
     const signed = await signBatchVoucher(payer, {
       channelId,
@@ -960,8 +971,13 @@ describe("batch facilitator lifecycle", () => {
       });
       api.deriveChannelId = vi.fn().mockResolvedValue(channelId);
       api.fetchChannel = vi.fn().mockResolvedValue(channel());
+      api.fetchChannelsUntil = vi
+        .fn()
+        .mockResolvedValue([channel({ settlement: { payoutWatermark: 0n, settled: 1_000n } })]);
       api.trackChannel = vi.fn().mockResolvedValue(undefined);
-      api.submitRedemption = vi.fn().mockResolvedValue({ ok: true, signature: SIGNATURE });
+      api.submitRedemption = vi
+        .fn()
+        .mockResolvedValue({ ok: true, replayed: false, signature: SIGNATURE });
       return { api, scheme };
     };
     const settle = (scheme: BatchSvmScheme, payload: BatchClaimPayload) =>
@@ -975,9 +991,17 @@ describe("batch facilitator lifecycle", () => {
     mismatch.api.deriveChannelId = vi.fn().mockResolvedValue(payer.address);
     await expect(settle(mismatch.scheme, claim())).rejects.toThrow(BatchError.CHANNEL_ID_MISMATCH);
 
-    for (const value of ["0", "10001"]) {
+    for (const value of [0n, 10_001n]) {
       const bounds = configured();
-      await expect(settle(bounds.scheme, claim({ maxClaimableAmount: value }))).rejects.toThrow(
+      const boundedClaim = claim({ maxClaimableAmount: value.toString() });
+      boundedClaim.claims[0]!.signature = (
+        await signBatchVoucher(payer, {
+          channelId,
+          expiresAt: 0,
+          maxClaimableAmount: value,
+        })
+      ).signature;
+      await expect(settle(bounds.scheme, boundedClaim)).rejects.toThrow(
         BatchError.CUMULATIVE_AMOUNT_MISMATCH,
       );
     }
@@ -997,11 +1021,12 @@ describe("batch facilitator lifecycle", () => {
     });
 
     const unconfirmed = configured();
-    unconfirmed.api.fetchChannel = vi
-      .fn()
-      .mockResolvedValueOnce(channel())
-      .mockResolvedValueOnce(channel({ settlement: { payoutWatermark: 0n, settled: 999n } }));
-    await expect(settle(unconfirmed.scheme, claim())).rejects.toThrow(BatchError.CHANNEL_STATE);
+    unconfirmed.api.fetchChannelsUntil = vi.fn().mockResolvedValue(undefined);
+    await expect(settle(unconfirmed.scheme, claim())).resolves.toMatchObject({
+      errorReason: "settlement_pending",
+      success: false,
+      transaction: SIGNATURE,
+    });
 
     const split = configured();
     split.api.assertClaimChannel = vi.fn();
@@ -1036,17 +1061,21 @@ describe("batch facilitator lifecycle", () => {
     privateApi.deriveChannelId = vi.fn().mockResolvedValue(channelId);
     privateApi.fetchChannel = vi
       .fn()
-      .mockResolvedValueOnce(channel({ settlement: { payoutWatermark: 200n, settled: 1_000n } }))
-      .mockResolvedValueOnce(channel({ settlement: { payoutWatermark: 1_000n, settled: 1_000n } }));
+      .mockResolvedValue(channel({ settlement: { payoutWatermark: 200n, settled: 1_000n } }));
+    privateApi.fetchChannelsUntil = vi
+      .fn()
+      .mockResolvedValue([channel({ settlement: { payoutWatermark: 1_000n, settled: 1_000n } })]);
     privateApi.distributeInstruction = vi.fn().mockResolvedValue({
       accounts: [],
       data: new Uint8Array([7]),
       programAddress: address(USDC_MAINNET_ADDRESS),
     });
-    privateApi.submitRedemption = vi.fn().mockResolvedValue({ ok: true, signature: SIGNATURE });
+    privateApi.submitRedemption = vi
+      .fn()
+      .mockResolvedValue({ ok: true, replayed: false, signature: SIGNATURE });
     const payload: BatchSettlePayload = {
       type: "settle",
-      channels: [{ channelConfig, channelId }],
+      channels: [{ channelConfig, channelId, payoutWatermark: "200", settled: "1000" }],
     };
     await expect(
       scheme.settleDistributions(
@@ -1060,7 +1089,7 @@ describe("batch facilitator lifecycle", () => {
   it("rejects invalid distribution batches at each lifecycle boundary", async () => {
     const payload: BatchSettlePayload = {
       type: "settle",
-      channels: [{ channelConfig, channelId }],
+      channels: [{ channelConfig, channelId, payoutWatermark: "0", settled: "1000" }],
     };
     const configured = () => {
       const scheme = new BatchSvmScheme(signer() as never);
@@ -1075,12 +1104,17 @@ describe("batch facilitator lifecycle", () => {
       api.fetchChannel = vi
         .fn()
         .mockResolvedValue(channel({ settlement: { payoutWatermark: 0n, settled: 1_000n } }));
+      api.fetchChannelsUntil = vi
+        .fn()
+        .mockResolvedValue([channel({ settlement: { payoutWatermark: 1_000n, settled: 1_000n } })]);
       api.distributeInstruction = vi.fn().mockResolvedValue({
         accounts: [],
         data: new Uint8Array([7]),
         programAddress: address(RECEIVER),
       });
-      api.submitRedemption = vi.fn().mockResolvedValue({ ok: true, signature: SIGNATURE });
+      api.submitRedemption = vi
+        .fn()
+        .mockResolvedValue({ ok: true, replayed: false, signature: SIGNATURE });
       return { api, scheme };
     };
     const settle = (scheme: BatchSvmScheme, value = payload) =>
@@ -1101,11 +1135,12 @@ describe("batch facilitator lifecycle", () => {
     await expect(settle(rejected.scheme)).resolves.toMatchObject({ success: false });
 
     const unconfirmed = configured();
-    unconfirmed.api.fetchChannel = vi
-      .fn()
-      .mockResolvedValueOnce(channel({ settlement: { payoutWatermark: 0n, settled: 1_000n } }))
-      .mockResolvedValueOnce(channel({ settlement: { payoutWatermark: 999n, settled: 1_000n } }));
-    await expect(settle(unconfirmed.scheme)).rejects.toThrow(/watermark did not advance/);
+    unconfirmed.api.fetchChannelsUntil = vi.fn().mockResolvedValue(undefined);
+    await expect(settle(unconfirmed.scheme)).resolves.toMatchObject({
+      errorReason: "settlement_pending",
+      success: false,
+      transaction: SIGNATURE,
+    });
 
     const split = configured();
     split.api.assertClaimChannel = vi.fn();
@@ -1144,6 +1179,8 @@ describe("batch facilitator lifecycle", () => {
       channels: Array.from({ length: MAX_CHANNELS_PER_SETTLE_TX + 1 }, () => ({
         channelConfig,
         channelId,
+        payoutWatermark: "0",
+        settled: "1",
       })),
     };
     await expect(
@@ -1168,11 +1205,15 @@ describe("batch facilitator lifecycle", () => {
         return SIGNATURE;
       },
     );
-    expect(first).toEqual({ ok: true, signature: SIGNATURE });
+    expect(first).toEqual({ ok: true, replayed: false, signature: SIGNATURE });
 
     const pendingStore = {
       delete: vi.fn().mockResolvedValue(undefined),
-      get: vi.fn().mockResolvedValue(SIGNATURE),
+      get: vi
+        .fn()
+        .mockImplementation(async (key: string) =>
+          key.endsWith(":completed") ? undefined : SIGNATURE,
+        ),
       set: vi.fn().mockResolvedValue(undefined),
     };
     const recovering = new BatchSvmScheme(facilitatorSigner as never, {
@@ -1180,9 +1221,9 @@ describe("batch facilitator lifecycle", () => {
     });
     await expect(
       internals(recovering).broadcastDurably("key", NETWORK, payer.address, vi.fn()),
-    ).resolves.toEqual({ ok: true, signature: SIGNATURE });
+    ).resolves.toEqual({ ok: true, replayed: false, signature: SIGNATURE });
     expect(facilitatorSigner.confirmTransaction).toHaveBeenCalledWith(SIGNATURE, NETWORK);
-    expect(pendingStore.delete).toHaveBeenCalledWith("key");
+    expect(pendingStore.delete).not.toHaveBeenCalled();
   });
 
   it("distinguishes pre-broadcast, pending, and onchain-terminal failures", async () => {
@@ -1204,7 +1245,11 @@ describe("batch facilitator lifecycle", () => {
 
     const terminalStore = {
       delete: vi.fn().mockResolvedValue(undefined),
-      get: vi.fn().mockResolvedValue(SIGNATURE),
+      get: vi
+        .fn()
+        .mockImplementation(async (key: string) =>
+          key.endsWith(":completed") ? undefined : SIGNATURE,
+        ),
       set: vi.fn().mockResolvedValue(undefined),
     };
     const terminal = new BatchSvmScheme(
@@ -1223,7 +1268,11 @@ describe("batch facilitator lifecycle", () => {
 
     const retryStore = {
       delete: vi.fn().mockRejectedValue(new Error("delete failed")),
-      get: vi.fn().mockResolvedValue(SIGNATURE),
+      get: vi
+        .fn()
+        .mockImplementation(async (key: string) =>
+          key.endsWith(":completed") ? undefined : SIGNATURE,
+        ),
       set: vi.fn().mockResolvedValue(undefined),
     };
     const retry = new BatchSvmScheme(
