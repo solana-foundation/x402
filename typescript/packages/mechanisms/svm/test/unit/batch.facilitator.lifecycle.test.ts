@@ -1212,7 +1212,9 @@ describe("batch facilitator lifecycle", () => {
     await expect(
       internals(recovering).broadcastDurably("key", NETWORK, payer.address, vi.fn()),
     ).resolves.toMatchObject({ ok: true, signature: SIGNATURE });
-    expect(facilitatorSigner.confirmTransaction).toHaveBeenCalledWith(SIGNATURE, NETWORK);
+    expect(facilitatorSigner.confirmTransaction).toHaveBeenCalledWith(SIGNATURE, NETWORK, {
+      searchTransactionHistory: true,
+    });
     expect(pendingStore.delete).not.toHaveBeenCalled();
   });
 

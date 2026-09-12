@@ -13,3 +13,11 @@ Distribution `amount` describes the actual receiver token credit in the identifi
 Custom signers should return the execution slot from `confirmTransaction`, honor `minContextSlot`, and implement `getConfirmedTransaction` with confirmed token-balance metadata. The default adapter implements these capabilities. Missing metadata returns pending with the original signature, not an estimated payout.
 
 A limitation remains when closing a channel whose receiver is also the refund recipient or protocol treasury: aggregate token balances can combine merchant earnings with a refund or treasury sweep. The SDK keeps that operation pending for reconciliation rather than reporting the combined amount as merchant earnings. Ordinary separate customer and merchant wallets are unaffected. This is an attribution limitation; the transaction may already have completed and must not be repeated as a replacement payment.
+
+## RPC and latency budget
+
+The ordinary metered-request server path is unchanged. Fresh channel transactions capture the execution slot from their existing confirmation call, with no additional successful confirmation lookup. Older-history status searches are opt-in for recovery, not enabled for every fresh confirmation across other schemes.
+
+Distribution uses one confirmed-transaction metadata read per new payout (retried when indexing lags). This replaces the facilitator’s former post-distribution per-channel checks; the merchant manager separately reads the paid watermark per channel before updating its records. Run redemption outside the inference request path. Channel opening/top-ups still await recovery storage before broadcast; the reference store is in memory, while durable adapters add storage latency. The first recovered receipt after client restart can require a mint read and local state hydration.
+
+Postcondition/metadata polling makes up to five attempts, with 200/400/800/1600 ms backoff: up to three seconds of sleep plus RPC time in that loop. There is no artificial delay on a successful first read. These are code-level call counts, not a measured production latency benchmark.

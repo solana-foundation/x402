@@ -27,6 +27,22 @@ import { SOLANA_DEVNET_CAIP2, SOLANA_MAINNET_CAIP2 } from "../../src/constants";
 import { encodeSignedTransaction, placeholderFeePayerSignature } from "./helpers/signedTransaction";
 
 describe("SVM Signer Converters", () => {
+  it("searches older history only when recovery requests it", async () => {
+    const getSignatureStatuses = vi
+      .fn()
+      .mockReturnValue({
+        send: async () => ({ value: [{ slot: 55n, confirmationStatus: "confirmed", err: null }] }),
+      });
+    const caps = createRpcCapabilitiesFromRpc({ getSignatureStatuses } as never);
+    await caps.confirmTransaction("fresh");
+    expect(getSignatureStatuses).toHaveBeenLastCalledWith(["fresh"]);
+    await caps.confirmTransaction("recover", { searchTransactionHistory: true });
+    expect(getSignatureStatuses).toHaveBeenLastCalledWith(["recover"], {
+      searchTransactionHistory: true,
+    });
+    expect(getSignatureStatuses).toHaveBeenCalledTimes(2);
+  });
+
   describe("toClientSvmSigner", () => {
     it("should return the same signer (identity function)", () => {
       const mockSigner: ClientSvmSigner = {

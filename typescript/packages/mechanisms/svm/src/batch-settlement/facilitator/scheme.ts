@@ -900,7 +900,7 @@ export class BatchSvmScheme implements SchemeNetworkFacilitator {
       async onBroadcast => {
         try {
           return await broadcastOpen(
-            this.signer,
+            this.submissionSigner(),
             address(terms.feePayer),
             requirements.network,
             payload.deposit.transaction,
@@ -1155,7 +1155,7 @@ export class BatchSvmScheme implements SchemeNetworkFacilitator {
           // across signer backends that will not sign twice.
           await this.signer.simulateTransaction(payload.transaction, requirements.network);
           return await broadcastOpen(
-            this.signer,
+            this.submissionSigner(),
             address(terms.feePayer),
             requirements.network,
             payload.transaction,
@@ -1378,7 +1378,30 @@ export class BatchSvmScheme implements SchemeNetworkFacilitator {
     // Keep the signature until the caller observes the operation-specific
     // postcondition. Confirmation can precede a fresh account view when RPC
     // requests are load-balanced across nodes.
-    return this.reconcileBroadcast(key, signature, network, payer, false);
+    // Submission helpers already confirmed and captured the execution slot.
+    // Do not add another status RPC to successful opens, top-ups or redemptions.
+    return { ok: true, replayed: false, signature };
+  }
+
+  /**
+   * Wrap submission confirmation so its existing RPC also supplies the read floor.
+   *
+   * @returns Submission transport with slot capture and no extra confirmation lookup
+   */
+  private submissionSigner() {
+    return {
+      signTransaction: this.signer.signTransaction.bind(this.signer),
+      ...(this.signer.getLatestBlockhash
+        ? { getLatestBlockhash: this.signer.getLatestBlockhash.bind(this.signer) }
+        : {}),
+      simulateTransaction: this.signer.simulateTransaction.bind(this.signer),
+      sendTransaction: this.signer.sendTransaction.bind(this.signer),
+      confirmTransaction: async (signature: string, network: string) => {
+        const status = await this.signer.confirmTransaction(signature, network);
+        if (status?.slot !== undefined) this.rememberSlot(network, BigInt(status.slot));
+        return status;
+      },
+    };
   }
 
   /**
@@ -1409,7 +1432,9 @@ export class BatchSvmScheme implements SchemeNetworkFacilitator {
           /* confirm by identity */
         }
       }
-      const status = await this.signer.confirmTransaction(signature, network);
+      const status = await this.signer.confirmTransaction(signature, network, {
+        searchTransactionHistory: true,
+      });
       if (status && status.slot !== undefined) {
         const slot = BigInt(status.slot);
         if (slot > (this.confirmationSlots.get(network) ?? 0n))
@@ -1557,7 +1582,7 @@ export class BatchSvmScheme implements SchemeNetworkFacilitator {
       try {
         return await submitChannelTransactionWithSigner(
           this.resolveFeePayer(feePayer),
-          this.signer,
+          this.submissionSigner(),
           network,
           instructions,
           { onPrepared: onBroadcast },

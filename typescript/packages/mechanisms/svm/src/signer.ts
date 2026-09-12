@@ -100,7 +100,10 @@ export type FacilitatorRpcCapabilities = {
    * @param signature - Transaction signature
    * @returns Confirmation result
    */
-  confirmTransaction(signature: string): Promise<unknown>;
+  confirmTransaction(
+    signature: string,
+    options?: { searchTransactionHistory?: boolean },
+  ): Promise<unknown>;
 
   /**
    * Fetch token mint information
@@ -205,7 +208,11 @@ export type FacilitatorSvmSigner = {
    * @throws Error for any other confirmation failure, e.g. a wait timeout (non-terminal —
    *   the outcome is unknown, so callers must not treat it as a definite failure)
    */
-  confirmTransaction(signature: string, network: string): Promise<{ slot: bigint | number } | void>;
+  confirmTransaction(
+    signature: string,
+    network: string,
+    options?: { searchTransactionHistory?: boolean },
+  ): Promise<{ slot: bigint | number } | void>;
 
   /**
    * Simulate a transaction and return inner instructions (CPI calls).
@@ -426,7 +433,7 @@ export function createRpcCapabilitiesFromRpc(
         })
         .send();
     },
-    confirmTransaction: async signature => {
+    confirmTransaction: async (signature, options) => {
       // Poll at 250ms for the first ~2s (Solana slots are ~400ms), then 1s,
       // keeping the same ~30s confirmation budget as the previous 30×1s loop.
       const initialDelayMs = 250;
@@ -436,9 +443,11 @@ export function createRpcCapabilitiesFromRpc(
       const startedAt = Date.now();
 
       while (Date.now() - startedAt < maxWaitMs) {
-        const status = await rpc
-          .getSignatureStatuses([signature as never], { searchTransactionHistory: true })
-          .send();
+        const status = await (
+          options?.searchTransactionHistory
+            ? rpc.getSignatureStatuses([signature as never], { searchTransactionHistory: true })
+            : rpc.getSignatureStatuses([signature as never])
+        ).send();
         const entry = status.value[0];
 
         if (
@@ -625,10 +634,12 @@ export function toFacilitatorSvmSigner(
         .send();
     },
 
-    confirmTransaction: async (signature: string, network: string) => {
+    confirmTransaction: async (signature: string, network: string, options) => {
       const rpc = getRpcForNetwork(network);
       const rpcCapabilities = createRpcCapabilitiesFromRpc(rpc);
-      return (await rpcCapabilities.confirmTransaction(signature)) as { slot: bigint | number };
+      return (await rpcCapabilities.confirmTransaction(signature, options)) as {
+        slot: bigint | number;
+      };
     },
 
     simulateTransactionWithInnerInstructions: async (transaction: string, network: string) => {
