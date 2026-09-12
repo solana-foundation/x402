@@ -292,7 +292,7 @@ describe("SVM Signer Converters", () => {
 
       await expect(
         facilitator.confirmTransaction("okSignature", SOLANA_DEVNET_CAIP2),
-      ).resolves.toBeUndefined();
+      ).resolves.toMatchObject({ confirmationStatus: "finalized", err: null });
     });
 
     it("should simulate with sigVerify disabled", async () => {

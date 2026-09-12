@@ -559,12 +559,23 @@ export class BatchSvmScheme implements SchemeNetworkClient {
         : payload.type === "deposit"
           ? payload.voucher?.channelId
           : undefined;
-    const pending = [...this.pending.values()].find(candidate =>
-      idempotencyKey
-        ? candidate.payment.payload.type !== "voucher" &&
-          candidate.payment.payload.idempotencyKey === idempotencyKey
-        : candidate.tracker.channelId === voucherChannelId,
-    );
+    const findPending = () =>
+      [...this.pending.values()].find(candidate =>
+        idempotencyKey
+          ? candidate.payment.payload.type !== "voucher" &&
+            candidate.payment.payload.idempotencyKey === idempotencyKey
+          : candidate.tracker.channelId === voucherChannelId,
+      );
+    let pending = findPending();
+    if (!pending && this.config.channelStorage) {
+      // A recovered HTTP response can be the first call on a fresh client.
+      // Restore its exact pending allocation without creating another request.
+      const terms = await this.resolveTerms(ctx.requirements);
+      await this.loadChannel(
+        this.channelKey(ctx.requirements, terms.feePayer, terms.withdrawDelay),
+      );
+      pending = findPending();
+    }
     if (!pending) return false;
     this.pending.delete(pending.operationKey);
 

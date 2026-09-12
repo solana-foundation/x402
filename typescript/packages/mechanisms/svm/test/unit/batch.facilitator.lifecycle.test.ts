@@ -1,3 +1,4 @@
+import { findAssociatedTokenPda } from "@solana-program/token-2022";
 import { address, generateKeyPairSigner, type Signature } from "@solana/kit";
 import type { PaymentPayload, PaymentRequirements } from "@x402/core/types";
 import { beforeAll, describe, expect, it, vi } from "vitest";
@@ -115,6 +116,7 @@ function signer(overrides: Record<string, unknown> = {}) {
   return {
     confirmTransaction: vi.fn().mockResolvedValue(undefined),
     getAccountInfo: vi.fn().mockResolvedValue({ owner: TOKEN_PROGRAM_ADDRESS }),
+    getConfirmedTransaction: vi.fn(() => payoutEvidence()),
     getAddresses: vi.fn(() => [feePayer.address]),
     getSigner: vi.fn(() => feePayer),
     sendTransaction: vi.fn().mockResolvedValue(SIGNATURE),
@@ -136,6 +138,8 @@ type FacilitatorInternals = {
   }>;
   deriveChannelId: ReturnType<typeof vi.fn>;
   fetchChannel: ReturnType<typeof vi.fn>;
+  fetchChannelUntil: ReturnType<typeof vi.fn>;
+  fetchChannelsUntil: ReturnType<typeof vi.fn>;
   trackChannel: ReturnType<typeof vi.fn>;
   submitRedemption: ReturnType<typeof vi.fn>;
   distributeInstruction: ReturnType<typeof vi.fn>;
@@ -147,6 +151,7 @@ type FacilitatorInternals = {
   ): Promise<unknown>;
   validateDeposit: ReturnType<typeof vi.fn>;
   validateRefund: ReturnType<typeof vi.fn>;
+  prepareRefund: ReturnType<typeof vi.fn>;
   validateVoucherOnly: ReturnType<typeof vi.fn>;
   settleDeposit(
     payment: PaymentPayload,
@@ -573,7 +578,10 @@ describe("batch facilitator lifecycle", () => {
               type,
             }
           : type === "settle"
-            ? { channels: [{ channelConfig, channelId }], type }
+            ? {
+                channels: [{ channelConfig, channelId }],
+                type,
+              }
             : type === "refund"
               ? { channelConfig, transaction: "x", type }
               : type === "deposit"
@@ -727,11 +735,10 @@ describe("batch facilitator lifecycle", () => {
     ).resolves.toMatchObject({ success: false, errorReason: BatchError.PAYLOAD_TYPE });
 
     const refund = { channelConfig, transaction: "close", type: "refund" as const };
-    api.validateRefund = vi.fn().mockResolvedValue({
-      channel: channel({ closureStartedAt: 20n, status: ChannelStatus.Closing }),
-      channelId,
-      terms,
-    });
+    api.prepareRefund = vi.fn().mockResolvedValue({ channelId, terms });
+    api.fetchChannel = vi
+      .fn()
+      .mockResolvedValue(channel({ closureStartedAt: 20n, status: ChannelStatus.Closing }));
     await expect(
       api.settleRefund(
         { accepted: requirements(), payload: refund, x402Version: 2 } as never,
@@ -744,9 +751,9 @@ describe("batch facilitator lifecycle", () => {
       extra: { channelState: { withdrawRequestedAt: 20 } },
     });
 
-    api.validateRefund = vi.fn().mockResolvedValue({ channel: channel(), channelId, terms });
+    api.fetchChannel = vi.fn().mockResolvedValue(channel());
     api.broadcastDurably = vi.fn().mockResolvedValue({ ok: true, signature: SIGNATURE });
-    api.fetchChannel = vi
+    api.fetchChannelUntil = vi
       .fn()
       .mockResolvedValue(channel({ closureStartedAt: 20n, status: ChannelStatus.Closing }));
     await expect(
@@ -887,10 +894,10 @@ describe("batch facilitator lifecycle", () => {
       withdrawDelay: 900,
     });
     privateApi.deriveChannelId = vi.fn().mockResolvedValue(channelId);
-    privateApi.fetchChannel = vi
+    privateApi.fetchChannel = vi.fn().mockResolvedValue(channel());
+    privateApi.fetchChannelsUntil = vi
       .fn()
-      .mockResolvedValueOnce(channel())
-      .mockResolvedValueOnce(channel({ settlement: { payoutWatermark: 0n, settled: 1_000n } }));
+      .mockResolvedValue([channel({ settlement: { payoutWatermark: 0n, settled: 1_000n } })]);
     privateApi.trackChannel = vi.fn().mockResolvedValue(undefined);
     privateApi.submitRedemption = vi.fn().mockResolvedValue({ ok: true, signature: SIGNATURE });
 
@@ -960,6 +967,9 @@ describe("batch facilitator lifecycle", () => {
       });
       api.deriveChannelId = vi.fn().mockResolvedValue(channelId);
       api.fetchChannel = vi.fn().mockResolvedValue(channel());
+      api.fetchChannelsUntil = vi
+        .fn()
+        .mockResolvedValue([channel({ settlement: { payoutWatermark: 0n, settled: 1_000n } })]);
       api.trackChannel = vi.fn().mockResolvedValue(undefined);
       api.submitRedemption = vi.fn().mockResolvedValue({ ok: true, signature: SIGNATURE });
       return { api, scheme };
@@ -975,9 +985,17 @@ describe("batch facilitator lifecycle", () => {
     mismatch.api.deriveChannelId = vi.fn().mockResolvedValue(payer.address);
     await expect(settle(mismatch.scheme, claim())).rejects.toThrow(BatchError.CHANNEL_ID_MISMATCH);
 
-    for (const value of ["0", "10001"]) {
+    for (const value of [0n, 10_001n]) {
       const bounds = configured();
-      await expect(settle(bounds.scheme, claim({ maxClaimableAmount: value }))).rejects.toThrow(
+      const boundedClaim = claim({ maxClaimableAmount: value.toString() });
+      boundedClaim.claims[0]!.signature = (
+        await signBatchVoucher(payer, {
+          channelId,
+          expiresAt: 0,
+          maxClaimableAmount: value,
+        })
+      ).signature;
+      await expect(settle(bounds.scheme, boundedClaim)).rejects.toThrow(
         BatchError.CUMULATIVE_AMOUNT_MISMATCH,
       );
     }
@@ -997,11 +1015,12 @@ describe("batch facilitator lifecycle", () => {
     });
 
     const unconfirmed = configured();
-    unconfirmed.api.fetchChannel = vi
-      .fn()
-      .mockResolvedValueOnce(channel())
-      .mockResolvedValueOnce(channel({ settlement: { payoutWatermark: 0n, settled: 999n } }));
-    await expect(settle(unconfirmed.scheme, claim())).rejects.toThrow(BatchError.CHANNEL_STATE);
+    unconfirmed.api.fetchChannelsUntil = vi.fn().mockResolvedValue(undefined);
+    await expect(settle(unconfirmed.scheme, claim())).resolves.toMatchObject({
+      errorReason: "settlement_pending",
+      success: false,
+      transaction: SIGNATURE,
+    });
 
     const split = configured();
     split.api.assertClaimChannel = vi.fn();
@@ -1036,8 +1055,10 @@ describe("batch facilitator lifecycle", () => {
     privateApi.deriveChannelId = vi.fn().mockResolvedValue(channelId);
     privateApi.fetchChannel = vi
       .fn()
-      .mockResolvedValueOnce(channel({ settlement: { payoutWatermark: 200n, settled: 1_000n } }))
-      .mockResolvedValueOnce(channel({ settlement: { payoutWatermark: 1_000n, settled: 1_000n } }));
+      .mockResolvedValue(channel({ settlement: { payoutWatermark: 200n, settled: 1_000n } }));
+    privateApi.fetchChannelsUntil = vi
+      .fn()
+      .mockResolvedValue([channel({ settlement: { payoutWatermark: 1_000n, settled: 1_000n } })]);
     privateApi.distributeInstruction = vi.fn().mockResolvedValue({
       accounts: [],
       data: new Uint8Array([7]),
@@ -1075,6 +1096,9 @@ describe("batch facilitator lifecycle", () => {
       api.fetchChannel = vi
         .fn()
         .mockResolvedValue(channel({ settlement: { payoutWatermark: 0n, settled: 1_000n } }));
+      api.fetchChannelsUntil = vi
+        .fn()
+        .mockResolvedValue([channel({ settlement: { payoutWatermark: 1_000n, settled: 1_000n } })]);
       api.distributeInstruction = vi.fn().mockResolvedValue({
         accounts: [],
         data: new Uint8Array([7]),
@@ -1101,11 +1125,12 @@ describe("batch facilitator lifecycle", () => {
     await expect(settle(rejected.scheme)).resolves.toMatchObject({ success: false });
 
     const unconfirmed = configured();
-    unconfirmed.api.fetchChannel = vi
-      .fn()
-      .mockResolvedValueOnce(channel({ settlement: { payoutWatermark: 0n, settled: 1_000n } }))
-      .mockResolvedValueOnce(channel({ settlement: { payoutWatermark: 999n, settled: 1_000n } }));
-    await expect(settle(unconfirmed.scheme)).rejects.toThrow(/watermark did not advance/);
+    unconfirmed.api.fetchChannelsUntil = vi.fn().mockResolvedValue(undefined);
+    await expect(settle(unconfirmed.scheme)).resolves.toMatchObject({
+      amount: "800",
+      success: true,
+      transaction: SIGNATURE,
+    });
 
     const split = configured();
     split.api.assertClaimChannel = vi.fn();
@@ -1125,7 +1150,7 @@ describe("batch facilitator lifecycle", () => {
       });
     await expect(
       settle(split.scheme, { ...payload, channels: [...payload.channels, ...payload.channels] }),
-    ).rejects.toThrow(BatchError.FEE_PAYER_MISMATCH);
+    ).rejects.toThrow(BatchError.PAYLOAD_TYPE);
   });
 
   it("rejects empty and oversized redemption batches", async () => {
@@ -1144,6 +1169,8 @@ describe("batch facilitator lifecycle", () => {
       channels: Array.from({ length: MAX_CHANNELS_PER_SETTLE_TX + 1 }, () => ({
         channelConfig,
         channelId,
+        payoutWatermark: "0",
+        settled: "1",
       })),
     };
     await expect(
@@ -1152,7 +1179,7 @@ describe("batch facilitator lifecycle", () => {
         oversized,
         requirements(),
       ),
-    ).rejects.toThrow(/too many channels/);
+    ).rejects.toThrow(/invalid channel batch/);
   });
 
   it("persists, reconciles, and forgets durable broadcast signatures", async () => {
@@ -1164,15 +1191,19 @@ describe("batch facilitator lifecycle", () => {
       NETWORK,
       payer.address,
       async onBroadcast => {
-        await onBroadcast(SIGNATURE);
+        await onBroadcast(SIGNATURE, "signed-wire");
         return SIGNATURE;
       },
     );
-    expect(first).toEqual({ ok: true, signature: SIGNATURE });
+    expect(first).toMatchObject({ ok: true, signature: SIGNATURE });
 
     const pendingStore = {
       delete: vi.fn().mockResolvedValue(undefined),
-      get: vi.fn().mockResolvedValue(SIGNATURE),
+      get: vi
+        .fn()
+        .mockImplementation(async (key: string) =>
+          key.endsWith(":completed") ? undefined : SIGNATURE,
+        ),
       set: vi.fn().mockResolvedValue(undefined),
     };
     const recovering = new BatchSvmScheme(facilitatorSigner as never, {
@@ -1180,9 +1211,9 @@ describe("batch facilitator lifecycle", () => {
     });
     await expect(
       internals(recovering).broadcastDurably("key", NETWORK, payer.address, vi.fn()),
-    ).resolves.toEqual({ ok: true, signature: SIGNATURE });
+    ).resolves.toMatchObject({ ok: true, signature: SIGNATURE });
     expect(facilitatorSigner.confirmTransaction).toHaveBeenCalledWith(SIGNATURE, NETWORK);
-    expect(pendingStore.delete).toHaveBeenCalledWith("key");
+    expect(pendingStore.delete).not.toHaveBeenCalled();
   });
 
   it("distinguishes pre-broadcast, pending, and onchain-terminal failures", async () => {
@@ -1204,7 +1235,11 @@ describe("batch facilitator lifecycle", () => {
 
     const terminalStore = {
       delete: vi.fn().mockResolvedValue(undefined),
-      get: vi.fn().mockResolvedValue(SIGNATURE),
+      get: vi
+        .fn()
+        .mockImplementation(async (key: string) =>
+          key.endsWith(":completed") ? undefined : SIGNATURE,
+        ),
       set: vi.fn().mockResolvedValue(undefined),
     };
     const terminal = new BatchSvmScheme(
@@ -1223,7 +1258,11 @@ describe("batch facilitator lifecycle", () => {
 
     const retryStore = {
       delete: vi.fn().mockRejectedValue(new Error("delete failed")),
-      get: vi.fn().mockResolvedValue(SIGNATURE),
+      get: vi
+        .fn()
+        .mockImplementation(async (key: string) =>
+          key.endsWith(":completed") ? undefined : SIGNATURE,
+        ),
       set: vi.fn().mockResolvedValue(undefined),
     };
     const retry = new BatchSvmScheme(
@@ -1264,3 +1303,31 @@ describe("batch facilitator lifecycle", () => {
     );
   });
 });
+
+async function payoutEvidence(before = "200", after = "1000") {
+  const [recipient] = await findAssociatedTokenPda({
+    mint: address(MINT),
+    owner: address(RECEIVER),
+    tokenProgram: TOKEN_PROGRAM_ADDRESS,
+  });
+  const [escrow] = await findAssociatedTokenPda({
+    mint: address(MINT),
+    owner: address(channelId),
+    tokenProgram: TOKEN_PROGRAM_ADDRESS,
+  });
+  const token = (accountIndex: number, owner: string, amount: string) => ({
+    accountIndex,
+    mint: MINT,
+    owner,
+    uiTokenAmount: { amount },
+  });
+  return {
+    slot: 100n,
+    transaction: { message: { accountKeys: [recipient, escrow] } },
+    meta: {
+      err: null,
+      preTokenBalances: [token(0, RECEIVER, before), token(1, channelId, "9800")],
+      postTokenBalances: [token(0, RECEIVER, after), token(1, channelId, "9000")],
+    },
+  };
+}

@@ -16,7 +16,8 @@ type Durable = {
     network: string,
     payer: string,
     broadcast: (onBroadcast: (signature: string) => Promise<void>) => Promise<string>,
-  ): Promise<{ ok: true; signature: string } | { ok: false; response: unknown }>;
+  ): Promise<{ ok: true; replayed: boolean; signature: string } | { ok: false; response: unknown }>;
+  completeBroadcast(key: string, signature: string): Promise<void>;
 };
 
 describe("batch-settlement pending settlement", () => {
@@ -56,8 +57,9 @@ describe("batch-settlement pending settlement", () => {
 
     expect(result).toMatchObject({ ok: true, signature: "recorded-signature" });
     expect(broadcasts, "the recorded transaction is confirmed, never resent").toBe(0);
-    // Confirmed, so the record is gone and the next attempt starts clean.
-    expect(await store.get(KEY)).toBeUndefined();
+    // Confirmation alone is not the operation outcome: its identity remains
+    // recoverable until the claim/distribution/close postcondition is visible.
+    expect(await store.get(KEY)).toBe("recorded-signature");
   });
 
   it("keeps the record until the reconcile knows the outcome", async () => {
@@ -99,8 +101,10 @@ describe("batch-settlement pending settlement", () => {
     );
     expect(result).toMatchObject({ ok: true, signature: "recorded-signature" });
     expect(broadcasts).toBe(0);
-    // Only once the outcome is known does the record go.
+    expect(await store.get(KEY)).toBe("recorded-signature");
+    await (scheme as unknown as Durable).completeBroadcast(KEY, "recorded-signature");
     expect(await store.get(KEY)).toBeUndefined();
+    expect(await store.get(`${KEY}:completed`)).toBe("recorded-signature");
   });
 
   it("has both concurrent retries reconcile rather than rebroadcast", async () => {
@@ -135,7 +139,6 @@ describe("batch-settlement pending settlement", () => {
     });
 
     expect(recordedMidFlight).toBe("in-flight-signature");
-    // Confirmed, so it is cleaned up afterwards.
-    expect(await store.get(KEY)).toBeUndefined();
+    expect(await store.get(KEY)).toBe("in-flight-signature");
   });
 });

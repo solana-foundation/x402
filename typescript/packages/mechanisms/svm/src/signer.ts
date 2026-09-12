@@ -205,7 +205,7 @@ export type FacilitatorSvmSigner = {
    * @throws Error for any other confirmation failure, e.g. a wait timeout (non-terminal —
    *   the outcome is unknown, so callers must not treat it as a definite failure)
    */
-  confirmTransaction(signature: string, network: string): Promise<void>;
+  confirmTransaction(signature: string, network: string): Promise<{ slot: bigint | number } | void>;
 
   /**
    * Simulate a transaction and return inner instructions (CPI calls).
@@ -237,6 +237,12 @@ export type FacilitatorSvmSigner = {
    * @param network - CAIP-2 network identifier
    * @returns Inner instructions from the confirmed transaction, or null if not yet indexed
    */
+  /** Confirmed transaction evidence used to attribute batch payouts. */
+  getConfirmedTransaction?(
+    signature: string,
+    network: string,
+  ): Promise<FacilitatorConfirmedTransaction | null>;
+
   getConfirmedTransactionInnerInstructions?(
     signature: string,
     network: string,
@@ -279,7 +285,7 @@ export type FacilitatorSvmSigner = {
   getAccountInfo?(
     accountAddress: string,
     network: string,
-    options?: { commitment?: string; encoding?: string },
+    options?: { commitment?: string; encoding?: string; minContextSlot?: bigint },
   ): Promise<FacilitatorAccountInfo | null>;
 
   /**
@@ -310,6 +316,25 @@ export type FacilitatorSvmSigner = {
       filters?: readonly unknown[];
     },
   ): Promise<readonly FacilitatorProgramAccount[]>;
+};
+
+/** Token balances from this transaction, never a later account snapshot. */
+export type FacilitatorTokenBalance = {
+  accountIndex: number;
+  mint: string;
+  owner?: string;
+  uiTokenAmount: { amount: string };
+};
+
+/** Minimal transaction metadata needed by batch payout reconciliation. */
+export type FacilitatorConfirmedTransaction = {
+  slot: bigint | number;
+  meta: {
+    err: unknown;
+    preTokenBalances?: readonly FacilitatorTokenBalance[] | null;
+    postTokenBalances?: readonly FacilitatorTokenBalance[] | null;
+  } | null;
+  transaction: { message: { accountKeys: readonly (string | { pubkey: string })[] } };
 };
 
 /** Account info returned by {@link FacilitatorSvmSigner.getAccountInfo}. */
@@ -411,7 +436,9 @@ export function createRpcCapabilitiesFromRpc(
       const startedAt = Date.now();
 
       while (Date.now() - startedAt < maxWaitMs) {
-        const status = await rpc.getSignatureStatuses([signature as never]).send();
+        const status = await rpc
+          .getSignatureStatuses([signature as never], { searchTransactionHistory: true })
+          .send();
         const entry = status.value[0];
 
         if (
@@ -601,7 +628,7 @@ export function toFacilitatorSvmSigner(
     confirmTransaction: async (signature: string, network: string) => {
       const rpc = getRpcForNetwork(network);
       const rpcCapabilities = createRpcCapabilitiesFromRpc(rpc);
-      await rpcCapabilities.confirmTransaction(signature);
+      return (await rpcCapabilities.confirmTransaction(signature)) as { slot: bigint | number };
     },
 
     simulateTransactionWithInnerInstructions: async (transaction: string, network: string) => {
@@ -652,6 +679,20 @@ export function toFacilitatorSvmSigner(
       }
 
       return { innerInstructions: value.innerInstructions ?? null };
+    },
+
+    getConfirmedTransaction: async (signature, network) => {
+      const result = await getRpcForNetwork(network)
+        .getTransaction(
+          signature as never,
+          {
+            commitment: "confirmed",
+            maxSupportedTransactionVersion: 0,
+            encoding: "jsonParsed",
+          } as never,
+        )
+        .send();
+      return result as unknown as FacilitatorConfirmedTransaction | null;
     },
 
     getConfirmedTransactionInnerInstructions: async (
@@ -734,6 +775,9 @@ export function toFacilitatorSvmSigner(
         .getAccountInfo(accountAddress as never, {
           commitment: (options?.commitment ?? "confirmed") as never,
           encoding: (options?.encoding ?? "base64") as never,
+          ...(options?.minContextSlot !== undefined
+            ? { minContextSlot: options.minContextSlot }
+            : {}),
         })
         .send();
       const value = result.value as FacilitatorAccountInfo | null;
