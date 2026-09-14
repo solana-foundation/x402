@@ -1310,9 +1310,11 @@ the request path:
 
 - **Claim (`type: "claim"`).** For each channel, build an Ed25519 precompile
   instruction for the latest stored voucher followed by program `settle`. Pack
-  no more than four channels into one transaction and do not silently drop
-  channels from a full batch. Program `settle` advances onchain `settled` to
-  the voucher's exact `maxClaimableAmount`.
+  as many channels as the transaction's serialized size and account limits
+  allow (four in a legacy or version-0 transaction, see
+  [Facilitator-built transactions](#facilitator-built-transactions-and-batching-capacity))
+  and do not silently drop channels from a full batch. Program `settle`
+  advances onchain `settled` to the voucher's exact `maxClaimableAmount`.
 - **Settle (`type: "settle"`).** Call program `distribute` to pay the newly
   claimed delta to `payTo` and advance `payout_watermark`. The channel remains
   open.
@@ -1328,6 +1330,47 @@ the request path:
 - **Rent cleanup.** If final `distribute` leaves the channel in `Distributed`,
   anyone can later call `reclaim` after the open-slot window to return remaining
   PDA rent to `rent_payer`.
+
+#### Facilitator-built transactions and batching capacity
+
+`extra.transactionVersions` governs only the client-supplied `open`, `top_up`
+and `request_close` messages. The redemption transactions above are built and
+signed by the facilitator alone, so their message version is the facilitator's
+choice:
+
+- The facilitator MAY build any message version the network supports. It MUST
+  NOT build version `1` unless the `enable_tx_v1` feature gate is active on
+  `network`, and a version-1 transaction it builds MUST set both
+  `computeUnitLimit` and `loadedAccountsDataSizeLimit` in its
+  `TransactionConfig` (an unset field is budgeted zero). It SHOULD set them to
+  values sized for the batch rather than the runtime maxima.
+- Batch size MUST be derived from the serialized transaction (1232 bytes for
+  legacy and version 0, 4096 bytes for version 1), the 64 static account keys
+  a message may carry, and the 64 top-level instruction limit, never from a
+  fixed count. A batch that does not fit is split, never truncated.
+
+The table is informative. Per-channel costs are the bytes a further channel
+adds to the message once the shared accounts (fee payer, programs, sysvars,
+mint, payee and treasury token accounts) are already present; the shared
+overhead is about 230 bytes for the claim shape and about 400 bytes for
+`distribute`. Capacities are the binding limit of size, accounts and
+instruction count.
+
+| Instruction | Per channel | Legacy / v0 (1232 B) | Version 1 (4096 B) | Binding limit for v1 |
+|---|---|---|---|---|
+| `settle` claim: Ed25519 precompile + `settle` | 1 account, 2 instructions, ~205 B | 4 | 18 | size |
+| `distribute` (open or sealed) | 4 accounts, 1 instruction, ~143 B | 5 | 13 | 64 account keys |
+| `reclaim` | 1 account, 1 instruction, ~38 B | ~26 | ~61 | 64 account keys |
+| `settle_and_seal` + sealed `distribute` (refund) | one channel per transaction | 1 | 1 | not batched |
+| `open`, `top_up`, `request_close` | client-built, one channel per transaction | 1 | 1 | not batched |
+
+Measured on devnet (2026-09-14, facilitator `9kFUaGsHjrGRDnF2tCWvbmqUQau1vNqePUCp7NK9fPmV`): a four-channel claim
+serializes to 1,046 bytes as a legacy message and 1,070 bytes as version 1,
+executes in 1,696 compute units (Ed25519 verification is charged separately by
+the precompile), and costs 25,000 lamports. The fee is per transaction, so the
+saving from version 1 comes from packing: 18 channels per claim instead of 4
+divides the network fee per settled channel by about 4.5. A version-1 batch
+packed at 4 channels, as in that run, saves nothing.
 
 The close authorization is required only for the optional immediate
 cooperative-close optimization. It does not remove the facilitator's
