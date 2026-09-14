@@ -238,6 +238,9 @@ func BroadcastOpen(
 	if err != nil {
 		return "", err
 	}
+	if !svm.IsAcceptedTransactionVersion(tx.Message.GetVersion()) {
+		return "", fmt.Errorf("%s: unsupported transaction message version %d", svm.ErrUnsupportedTransactionVersion, int(tx.Message.GetVersion())-1)
+	}
 	if err := signer.SignTransaction(ctx, tx, feePayer, network); err != nil {
 		return "", err
 	}
@@ -300,6 +303,9 @@ func SimulateOpenSettleDistribute(
 	openTx, err := svm.DecodeTransaction(openTransactionBase64)
 	if err != nil {
 		return err
+	}
+	if !svm.IsAcceptedTransactionVersion(openTx.Message.GetVersion()) {
+		return fmt.Errorf("%s: unsupported transaction message version %d", svm.ErrUnsupportedTransactionVersion, int(openTx.Message.GetVersion())-1)
 	}
 	computeLimitIx, err := computebudget.NewSetComputeUnitLimitInstructionBuilder().
 		SetUnits(maxTransactionComputeUnits).
