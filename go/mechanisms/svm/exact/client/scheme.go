@@ -199,10 +199,15 @@ func (c *ExactSvmScheme) CreatePaymentPayload(
 		return types.PaymentPayload{}, fmt.Errorf(ErrFailedToCreateTransaction+": %w", err)
 	}
 
-	// Set message version to V0 (versioned transaction) for cross-platform compatibility
-	// This ensures the transaction can be correctly signed by facilitators in all languages
-	// (TypeScript, Python, Go) as they all expect versioned transactions
-	tx.Message.SetVersion(solana.MessageVersionV0)
+	// Build the message version the facilitator advertised in
+	// extra.transactionVersions (version 0 when absent). This client only
+	// produces version 0; a facilitator that accepts no version it can build
+	// is reported before signing.
+	version, err := svm.ResolveTransactionVersion(requirements.Extra)
+	if err != nil {
+		return types.PaymentPayload{}, err
+	}
+	tx.Message.SetVersion(version)
 
 	// Partially sign with client's key
 	if err := c.signer.SignTransaction(ctx, tx); err != nil {
