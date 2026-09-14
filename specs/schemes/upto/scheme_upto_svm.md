@@ -753,6 +753,28 @@ the confirmed transaction containing that final `distribute`. For the
 `actual == 0` refund path, `distribute` moves no funds to `payTo` and returns
 the full deposit to the client.
 
+#### Facilitator-built transactions
+
+`extra.transactionVersions` governs only the client-supplied `open` message.
+The claim settlement (`settle_and_seal` + `distribute`) and the later
+`reclaim` are built and signed by the facilitator alone, so their message
+version is the facilitator's choice:
+
+- The facilitator MAY build any message version the network supports. It MUST
+  NOT build version `1` unless the `enable_tx_v1` feature gate is active on
+  `network`, and a version-1 transaction it builds MUST set both
+  `computeUnitLimit` and `loadedAccountsDataSizeLimit` in its
+  `TransactionConfig` (an unset field is budgeted zero). It SHOULD set them to
+  values sized for the transaction rather than the runtime maxima.
+- The claim settlement carries one channel per transaction and fits either
+  version. Only `reclaim` batches: its size MUST be derived from the serialized
+  transaction (1232 bytes for legacy and version 0, 4096 bytes for version 1),
+  the 64 static account keys and the 64 top-level instruction limit, never
+  from a fixed count. Informative capacity, with the fee payer, program and
+  `rent_payer` shared: each `reclaim` adds one account and one instruction
+  (~38 bytes), for about 26 channels per legacy or version-0 transaction and
+  about 61 per version-1 transaction, where the account-key limit binds.
+
 ### Duplicate Settlement Mitigation
 
 Exact SVM replays a client-built transfer transaction. Concurrent `/settle`
