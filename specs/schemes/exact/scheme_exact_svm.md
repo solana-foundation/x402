@@ -75,7 +75,7 @@ In addition to the standard x402 `PaymentRequirements` fields, the `exact` schem
 - `extra.memo` (optional): A seller-defined UTF-8 string to include in the transaction's Memo instruction. When present, the client MUST use this value as the Memo instruction data instead of a random nonce. Maximum 256 bytes. This enables sellers to attach payment references (e.g., invoice IDs) to on-chain transactions for reconciliation without requiring unique deposit addresses.
 - `extra.recentBlockhash` (optional): A recent blockhash for the Client to use as the transaction's lifetime, supplied by the Resource Server. When present and valid, the Client SHOULD use it instead of fetching its own via `getLatestBlockhash`, saving an RPC round-trip and pinning the transaction to a blockhash the settling RPC has observed. When absent or malformed, the Client MUST fetch a recent blockhash itself. A Resource Server SHOULD only set this when it has an RPC endpoint whose view of recent blockhashes matches the settling Sponsor's; a stale or fork-divergent blockhash will cause the transaction to expire or fail to land.
 - `extra.lastValidBlockHeight` (optional): The last block height at which `extra.recentBlockhash` is valid, as a decimal string. This informational hint is not serialized into the transaction and MAY be ignored by the Client or Sponsor. It is ignored when `recentBlockhash` is absent.
-- `extra.transactionVersions` (optional): The transaction message versions the sponsor accepts, as an array of `0` and/or `1`. Copied by the Resource Server from the facilitator's `/supported` `extra`. When absent, only version `0` is accepted; legacy messages are not supported. See §1.5.
+- `extra.transactionVersions` (optional): The transaction message versions the sponsor accepts, as an array of `0` and/or `1`. Copied by the Resource Server from the facilitator's `/supported` `extra`. When absent, the accepted set is `[0]`. See §1.5.
 
 These optional fields are transaction-construction hints. They do not bind the submitted transaction to the hinted blockhash, and the facilitator's verification does not compare the transaction blockhash with `extra.recentBlockhash`.
 
@@ -89,7 +89,7 @@ The `payload` field of the `PaymentPayload` contains:
 }
 ```
 
-The `transaction` field contains the base64-encoded, serialized, **partially-signed** versioned Solana transaction. Its message version MUST be one the requirements advertise in `extra.transactionVersions`, or version `0` when that field is absent; legacy messages are rejected (see §1.5).
+The `transaction` field contains the base64-encoded, serialized, **partially-signed** versioned Solana transaction. Its message version MUST be one the requirements advertise in `extra.transactionVersions`, or version `0` when that field is absent (see §1.5).
 
 Full `PaymentPayload` object:
 
@@ -197,25 +197,33 @@ carry the compute budget in the message header). The facilitator advertises
 the versions it accepts as `extra.transactionVersions` in `/supported`, and the
 server MUST copy that value into `PaymentRequirements.extra.transactionVersions`.
 Entries are the integers `0` and `1`, the Wallet Standard
-`supportedTransactionVersions` vocabulary. Legacy messages are not supported:
-`"legacy"` MUST NOT be advertised, and a legacy message MUST be rejected.
-When the field is absent, the accepted set is `[0]`.
+`supportedTransactionVersions` vocabulary. When the field is absent, the
+accepted set is `[0]`.
+
+Legacy (unversioned) messages are deprecated. They are never advertised in
+`extra.transactionVersions` and clients MUST NOT build them. A facilitator MAY
+keep accepting legacy messages from existing clients for backward
+compatibility; that tolerance will be removed in a future revision of this
+scheme.
 
 - The facilitator MUST NOT advertise `1` unless the `enable_tx_v1` feature gate
   (`txv1aq4pp281K9um3tnPgkfX8UqtFT6wcVW3hNezGLL`) is active on `network`.
-- The client MUST build one of the advertised versions and SHOULD build the
-  highest one its signer can produce. When the field is absent it SHOULD build
-  version `0`. The client MUST NOT use Address Lookup Tables.
-- The verifier MUST reject any other message version, before inspecting any
-  instruction, with `unsupported_transaction_version`.
-- A version-0 transaction MUST NOT exceed 1232 serialized bytes; a version-1
+- The client MUST build one of the advertised versions (`0` when the field
+  is absent) and SHOULD build version `0` whenever it is accepted.
+  It MAY build version `1` when `1` is advertised and its signer supports it.
+  The client MUST NOT use Address Lookup Tables.
+- The sponsor MUST reject a message whose version is outside the set it
+  accepts, before inspecting any instruction, with
+  `unsupported_transaction_version`. The sponsor enforces its own accepted
+  set; it does not read `PaymentRequirements.extra.transactionVersions`.
+- A legacy or version-0 transaction MUST NOT exceed 1232 serialized bytes; a version-1
   transaction MUST NOT exceed 4096 serialized bytes.
 - A version-1 transaction carries its compute budget in the message
   `TransactionConfig`. It MUST set `computeUnitLimit` and
   `loadedAccountsDataSizeLimit` (a version-1 transaction that omits either is
   budgeted zero and cannot execute), it MUST NOT contain Compute Budget program
   instructions, and its `priorityFee` is a total in lamports, evaluated against
-  a per-compute-unit cap as `priorityFee * 1000000 <= maxPriceMicroLamports *
+  a per-compute-unit cap as `priorityFee * 1000000 <= maxPriorityFeeMicroLamports *
   computeUnitLimit`.
 
 ## 2. Sponsor Acceptance Policy (Reference)
