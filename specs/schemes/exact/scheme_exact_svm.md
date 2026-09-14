@@ -206,8 +206,6 @@ keep accepting legacy messages from existing clients for backward
 compatibility; that tolerance will be removed in a future revision of this
 scheme.
 
-- The facilitator MUST NOT advertise `1` unless the `enable_tx_v1` feature gate
-  (`txv1aq4pp281K9um3tnPgkfX8UqtFT6wcVW3hNezGLL`) is active on `network`.
 - The client MUST build one of the advertised versions (`0` when the field
   is absent) and SHOULD build version `0` whenever it is accepted.
   It MAY build version `1` when `1` is advertised and its signer supports it.

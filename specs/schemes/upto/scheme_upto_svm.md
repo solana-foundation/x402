@@ -418,8 +418,6 @@ keep accepting legacy messages from existing clients for backward
 compatibility; that tolerance will be removed in a future revision of this
 scheme.
 
-- The facilitator MUST NOT advertise `1` unless the `enable_tx_v1` feature gate
-  (`txv1aq4pp281K9um3tnPgkfX8UqtFT6wcVW3hNezGLL`) is active on `network`.
 - The client MUST build one of the advertised versions (`0` when the field
   is absent) and SHOULD build version `0` whenever it is accepted.
   It MAY build version `1` when `1` is advertised and its signer supports it.
@@ -760,11 +758,10 @@ The claim settlement (`settle_and_seal` + `distribute`) and the later
 `reclaim` are built and signed by the facilitator alone, so their message
 version is the facilitator's choice:
 
-- The facilitator MAY build any message version the network supports. It MUST
-  NOT build version `1` unless the `enable_tx_v1` feature gate is active on
-  `network`, and a version-1 transaction it builds MUST set both
-  `computeUnitLimit` and `loadedAccountsDataSizeLimit` in its
-  `TransactionConfig` (an unset field is budgeted zero). It SHOULD set them to
+- The facilitator MAY build any message version the network supports. A
+  version-1 transaction it builds MUST set both `computeUnitLimit` and
+  `loadedAccountsDataSizeLimit` in its `TransactionConfig` (an unset field is
+  budgeted zero). It SHOULD set them to
   values sized for the transaction rather than the runtime maxima.
 - The claim settlement carries one channel per transaction and fits either
   version. Only `reclaim` batches: its size MUST be derived from the serialized
