@@ -26,16 +26,19 @@ import type {
 } from "@x402/core/types";
 import type { PaymentPayloadV1, PaymentRequirementsV1 } from "@x402/core/types/v1";
 import {
+  ADVERTISED_TRANSACTION_VERSIONS,
   LIGHTHOUSE_PROGRAM_ADDRESS,
   MAX_COMPUTE_UNIT_PRICE_MICROLAMPORTS,
   MEMO_PROGRAM_ADDRESS,
 } from "../../../constants";
+import { ErrUnsupportedTransactionVersion } from "../../facilitator/errors";
 import { SettlementCache } from "../../../settlement-cache";
 import type { FacilitatorSvmSigner } from "../../../signer";
 import type { ExactSvmPayloadV1 } from "../../../types";
 import {
   decodeTransactionFromPayload,
   getTokenPayerFromTransaction,
+  isAcceptedTransactionVersion,
   transactionMessageHash,
 } from "../../../utils";
 import { verifyRequiredSignatures } from "../../facilitator/signatureVerification";
@@ -82,6 +85,7 @@ export class ExactSvmSchemeV1 implements SchemeNetworkFacilitator {
 
     return {
       feePayer: addresses[randomIndex],
+      transactionVersions: [...ADVERTISED_TRANSACTION_VERSIONS],
     };
   }
 
@@ -165,6 +169,17 @@ export class ExactSvmSchemeV1 implements SchemeNetworkFacilitator {
       return {
         isValid: false,
         invalidReason: "invalid_exact_svm_payload_transaction_could_not_be_decoded",
+        payer: "",
+      };
+    }
+
+    // Reject any message version this verifier does not model before touching
+    // signatures or instructions (its compute budget checks assume the
+    // ComputeBudget instruction pair of legacy and version 0 messages).
+    if (!isAcceptedTransactionVersion(compiled.version)) {
+      return {
+        isValid: false,
+        invalidReason: ErrUnsupportedTransactionVersion,
         payer: "",
       };
     }

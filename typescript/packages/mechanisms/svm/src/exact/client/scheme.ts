@@ -28,7 +28,7 @@ import {
 } from "../../constants";
 import type { ClientSvmConfig, ClientSvmSigner } from "../../signer";
 import type { ExactSvmPayloadV2 } from "../../types";
-import { createRpcClient, resolveBlockhash } from "../../utils";
+import { createRpcClient, resolveBlockhash, resolveTransactionVersion } from "../../utils";
 import { getCachedMintMetadata, type MintMetadataCache } from "../../mint-cache";
 import { findDefaultAsset } from "../../defaultAssets";
 
@@ -133,8 +133,11 @@ export class ExactSvmScheme implements SchemeNetworkClient {
       data: memoData,
     };
 
+    // Build one of the message versions the facilitator advertised in
+    // `extra.transactionVersions` (version 0 when the field is absent).
+    const transactionVersion = resolveTransactionVersion(paymentRequirements.extra);
     const tx = pipe(
-      createTransactionMessage({ version: 0 }),
+      createTransactionMessage({ version: transactionVersion }),
       tx => setTransactionMessageComputeUnitPrice(DEFAULT_COMPUTE_UNIT_PRICE_MICROLAMPORTS, tx),
       tx => setTransactionMessageFeePayer(feePayer, tx),
       tx =>
