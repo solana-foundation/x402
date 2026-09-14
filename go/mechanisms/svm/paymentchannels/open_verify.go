@@ -70,6 +70,14 @@ func VerifyOpenTransaction(transactionBase64 string, expected VerifyOpenExpected
 	}
 	message := &tx.Message
 
+	// Every check below reads the ComputeBudget instruction prefix and the
+	// static account list, which only legacy and v0 messages carry in the
+	// shape this verifier models. Reject any other version before looking at
+	// a single instruction so nothing can pass vacuously.
+	if !svm.IsAcceptedTransactionVersion(message.GetVersion()) {
+		return nil, fmt.Errorf("%s: verifyOpenTransaction: unsupported transaction message version %d; open transactions must be legacy or version 0", svm.ErrUnsupportedTransactionVersion, message.GetVersion())
+	}
+
 	// Address Lookup Tables hide instruction programs and accounts from the
 	// static key list, so every program must be visible before signing.
 	if len(message.AddressTableLookups) > 0 {
