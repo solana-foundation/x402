@@ -294,6 +294,28 @@ describe("upto SVM scheme", () => {
       });
     });
 
+    it("forwards the facilitator's transactionVersions to the client", async () => {
+      const result = await server.enhancePaymentRequirements(
+        {
+          scheme: "upto",
+          network: SOLANA_DEVNET_CAIP2,
+          asset: MINT,
+          amount: "1000000",
+          payTo: PAY_TO,
+          maxTimeoutSeconds: 300,
+          extra: {},
+        } as PaymentRequirements,
+        {
+          x402Version: 2,
+          scheme: "upto",
+          network: SOLANA_DEVNET_CAIP2,
+          extra: { feePayer: "FeePayer1111111111111111111111111111", transactionVersions: [0] },
+        },
+        [],
+      );
+      expect(result.extra.transactionVersions).toEqual([0]);
+    });
+
     it("rejects a facilitator without a valid feePayer", () => {
       const problem = server.validateFacilitatorSupport?.(
         SOLANA_DEVNET_CAIP2,
@@ -3092,7 +3114,10 @@ describe("upto SVM scheme", () => {
     it("exposes only feePayer from a single signer", async () => {
       const feePayer = await generateKeyPairSigner();
       const facilitator = new UptoFacilitatorScheme(toFacilitatorSvmSigner(feePayer));
-      expect(facilitator.getExtra(SOLANA_DEVNET_CAIP2)).toEqual({ feePayer: feePayer.address });
+      expect(facilitator.getExtra(SOLANA_DEVNET_CAIP2)).toEqual({
+        feePayer: feePayer.address,
+        transactionVersions: [0],
+      });
       expect(facilitator.getSigners(SOLANA_DEVNET_CAIP2)).toEqual([feePayer.address]);
     });
 
@@ -3126,9 +3151,15 @@ describe("upto SVM scheme", () => {
       const randomSpy = vi.spyOn(Math, "random");
       try {
         randomSpy.mockReturnValueOnce(0);
-        expect(facilitator.getExtra(SOLANA_DEVNET_CAIP2)).toEqual({ feePayer: feePayerA.address });
+        expect(facilitator.getExtra(SOLANA_DEVNET_CAIP2)).toEqual({
+          feePayer: feePayerA.address,
+          transactionVersions: [0],
+        });
         randomSpy.mockReturnValueOnce(0.99);
-        expect(facilitator.getExtra(SOLANA_DEVNET_CAIP2)).toEqual({ feePayer: feePayerB.address });
+        expect(facilitator.getExtra(SOLANA_DEVNET_CAIP2)).toEqual({
+          feePayer: feePayerB.address,
+          transactionVersions: [0],
+        });
       } finally {
         randomSpy.mockRestore();
       }

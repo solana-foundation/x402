@@ -50,7 +50,8 @@ import {
 } from "../../payment-channels/onchain";
 import type { ChannelSplit } from "../../payment-channels/open";
 import type { FacilitatorSvmSigner } from "../../signer";
-import { TransactionOnchainFailureError } from "../../utils";
+import { ErrUnsupportedTransactionVersion } from "../../exact/facilitator/errors";
+import { isAcceptedTransactionVersion, TransactionOnchainFailureError } from "../../utils";
 import { STATE_COMMITMENT } from "../shared";
 import type { UptoFacilitatorSigner } from "./signer";
 
@@ -442,6 +443,11 @@ export async function simulateOpenSettleDistribute(
   const { channel, openTransactionBase64 } = args;
   const tx = getTransactionDecoder().decode(getBase64Codec().encode(openTransactionBase64));
   const compiled = getCompiledTransactionMessageDecoder().decode(tx.messageBytes);
+  if (!isAcceptedTransactionVersion(compiled.version)) {
+    throw new Error(
+      `${ErrUnsupportedTransactionVersion}: simulateOpenSettleDistribute: transaction message version ${String(compiled.version)} is not accepted`,
+    );
+  }
   const decompiled = decompileTransactionMessage(compiled);
   const openInstructions = (decompiled.instructions ?? []) as Instruction[];
 

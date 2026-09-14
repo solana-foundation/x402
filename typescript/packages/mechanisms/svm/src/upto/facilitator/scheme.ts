@@ -26,6 +26,7 @@ import {
 } from "../../payment-channels/voucher";
 import { SettlementCache } from "../../settlement-cache";
 import type { FacilitatorSigningCapabilities, FacilitatorSvmSigner } from "../../signer";
+import { ADVERTISED_TRANSACTION_VERSIONS } from "../../constants";
 import { isUptoSvmPayload, type UptoSvmPayloadV2 } from "../../types";
 import {
   decodeTransactionFromPayload,
@@ -381,7 +382,10 @@ export class UptoSvmScheme implements SchemeNetworkFacilitator {
   getExtra(_: Network): Record<string, unknown> | undefined {
     const addresses = this.signer.getAddresses();
     const randomIndex = Math.floor(Math.random() * addresses.length);
-    const extra: Record<string, unknown> = { feePayer: addresses[randomIndex] };
+    const extra: Record<string, unknown> = {
+      feePayer: addresses[randomIndex],
+      transactionVersions: [...ADVERTISED_TRANSACTION_VERSIONS],
+    };
     if (this.authorizerSigner) {
       extra.receiverAuthorizer = this.authorizerSigner.address;
     }

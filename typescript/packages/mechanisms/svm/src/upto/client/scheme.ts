@@ -7,7 +7,12 @@ import { findDefaultAsset } from "../../defaultAssets";
 import { buildOpenPaymentChannelTransaction } from "../../payment-channels/open";
 import type { ClientSvmConfig, ClientSvmSigner } from "../../signer";
 import { type UptoSvmPayloadV2 } from "../../types";
-import { createRpcClient, resolveBlockhash, resolveOpenSlot } from "../../utils";
+import {
+  createRpcClient,
+  resolveBlockhash,
+  resolveOpenSlot,
+  resolveTransactionVersion,
+} from "../../utils";
 import {
   parseTokenProgramHint,
   resolveUptoSvmMemo,
@@ -90,6 +95,7 @@ export class UptoSvmScheme implements SchemeNetworkClient {
       payer: this.signer,
       recipients: channelConfig.splits,
       tokenProgram,
+      transactionVersion: resolveTransactionVersion(paymentRequirements.extra),
     });
 
     const now = Math.floor(Date.now() / 1000);

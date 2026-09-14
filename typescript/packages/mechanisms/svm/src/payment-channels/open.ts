@@ -45,6 +45,8 @@ import {
   MAX_MEMO_BYTES,
   MEMO_PROGRAM_ADDRESS,
 } from "../constants";
+import { ErrUnsupportedTransactionVersion } from "../exact/facilitator/errors";
+import { isAcceptedTransactionVersion } from "../utils";
 import {
   getOpenInstruction,
   getOpenInstructionDataDecoder,
@@ -149,6 +151,12 @@ export interface BuildOpenArgs {
    * facilitators may enforce a stricter `maxPriorityFeeMicroLamports`.
    */
   computeUnitPriceMicroLamports?: number | undefined;
+  /**
+   * Transaction message version to build, resolved from the challenge's
+   * `extra.transactionVersions` via `resolveTransactionVersion`. This builder
+   * only produces version 0; defaults to `0`.
+   */
+  transactionVersion?: 0 | undefined;
 }
 
 /** Result of {@link buildOpenPaymentChannelTransaction}. */
@@ -332,7 +340,7 @@ export async function buildOpenPaymentChannelTransaction(args: BuildOpenArgs): P
   ];
 
   const message = pipe(
-    createTransactionMessage({ version: 0 }),
+    createTransactionMessage({ version: args.transactionVersion ?? 0 }),
     msg => setTransactionMessageFeePayer(feePayer, msg),
     msg =>
       setTransactionMessageLifetimeUsingBlockhash(
@@ -422,6 +430,7 @@ export interface VerifyOpenResult {
 
 type CompiledOpenMessage = {
   addressTableLookups?: readonly unknown[];
+  version: number | string;
   header: {
     numReadonlyNonSignerAccounts: number;
     numReadonlySignerAccounts: number;
@@ -472,6 +481,15 @@ export async function verifyOpenTransaction(
   //   2. Allow only the spec's top-level layout: optional ComputeBudget prefix,
   //      exactly one payment-channels `open`, optional Lighthouse/Memo suffix.
   //      Wallets like Phantom/Solflare inject Lighthouse around the client open.
+  // Every check below scans the message's instruction list for the
+  // ComputeBudget prefix and the canonical open. A message version that keeps
+  // its budget elsewhere (transaction v1's `message.config`) would pass those
+  // scans vacuously, so reject any version this verifier does not model first.
+  if (!isAcceptedTransactionVersion(message.version)) {
+    throw new Error(
+      `${ErrUnsupportedTransactionVersion}: verifyOpenTransaction: transaction message version ${String(message.version)} is not accepted; open transactions must be legacy or version 0`,
+    );
+  }
   if (message.addressTableLookups && message.addressTableLookups.length > 0) {
     throw new Error(
       "verifyOpenTransaction: address lookup tables are not permitted in an open transaction",
