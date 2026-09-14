@@ -1361,13 +1361,13 @@ instruction count.
 | `settle_and_seal` + sealed `distribute` (refund) | one channel per transaction | 1 | 1 | not batched |
 | `open`, `top_up`, `request_close` | client-built, one channel per transaction | 1 | 1 | not batched |
 
-Measured on devnet (2026-09-14, facilitator `9kFUaGsHjrGRDnF2tCWvbmqUQau1vNqePUCp7NK9fPmV`): a four-channel claim
-serializes to 1,046 bytes as a legacy message and 1,070 bytes as version 1,
-executes in 1,696 compute units (Ed25519 verification is charged separately by
-the precompile), and costs 25,000 lamports. The fee is per transaction, so the
-saving from version 1 comes from packing: 18 channels per claim instead of 4
-divides the network fee per settled channel by about 4.5. A version-1 batch
-packed at 4 channels, as in that run, saves nothing.
+In a devnet measurement, a four-channel claim serializes to 1,046 bytes as a
+legacy message and 1,070 bytes as version 1, executes in 1,696 compute units
+(Ed25519 verification is charged separately by the precompile), and costs
+25,000 lamports. The fee is per transaction, so the saving from version 1 comes
+from packing: 18 channels per claim instead of 4 divides the network fee per
+settled channel by about 4.5. A version-1 batch packed at 4 channels saves
+nothing.
 
 The close authorization is required only for the optional immediate
 cooperative-close optimization. It does not remove the facilitator's
