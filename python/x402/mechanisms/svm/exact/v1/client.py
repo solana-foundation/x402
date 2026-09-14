@@ -30,7 +30,12 @@ from ...default_assets import find_default_asset
 from ...mint_cache import MintMetadataCache, get_cached_mint_metadata
 from ...signer import ClientSvmSigner
 from ...types import ExactSvmPayload
-from ...utils import derive_ata, get_network_config, normalize_network
+from ...utils import (
+    derive_ata,
+    get_network_config,
+    normalize_network,
+    resolve_transaction_version,
+)
 
 
 class ExactSvmSchemeV1:
@@ -179,6 +184,11 @@ class ExactSvmSchemeV1:
         # Get latest blockhash
         blockhash_resp = client.get_latest_blockhash()
         blockhash = blockhash_resp.value.blockhash
+
+        # The facilitator advertises the message versions it accepts in
+        # extra.transactionVersions (version 0 when absent); this client only
+        # builds version 0 and fails fast when that is not among them.
+        resolve_transaction_version(extra)
 
         # Build message
         message = MessageV0.try_compile(
