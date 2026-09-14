@@ -54,7 +54,12 @@ import {
 import type { ChannelSplit } from "./open";
 import type { FacilitatorSvmSigner } from "../signer";
 import { BLOCKHASH_COMMITMENT, STATE_COMMITMENT } from "./commitments";
-import { createRpcClient, TransactionOnchainFailureError } from "../utils";
+import { ErrUnsupportedTransactionVersion } from "../exact/facilitator/errors";
+import {
+  createRpcClient,
+  isAcceptedTransactionVersion,
+  TransactionOnchainFailureError,
+} from "../utils";
 
 /** Solana per-transaction compute-unit maximum. */
 const MAX_TRANSACTION_COMPUTE_UNITS = 1_400_000;
@@ -314,6 +319,15 @@ export async function broadcastOpen(
   onBroadcast?: (signature: string) => Promise<void>,
   onPrepared?: (signature: string, wire: string) => Promise<void>,
 ): Promise<string> {
+  const transaction = getTransactionDecoder().decode(
+    getBase64Codec().encode(openTransactionBase64),
+  );
+  const compiled = getCompiledTransactionMessageDecoder().decode(transaction.messageBytes);
+  if (!isAcceptedTransactionVersion(compiled.version)) {
+    throw new Error(
+      `${ErrUnsupportedTransactionVersion}: broadcastOpen: transaction message version ${String(compiled.version)} is not accepted`,
+    );
+  }
   const wire = await facilitator.signTransaction(openTransactionBase64, feePayer, network);
   let signature = onPrepared
     ? getSignatureFromTransaction(getTransactionDecoder().decode(getBase64Codec().encode(wire)))
@@ -450,6 +464,11 @@ async function buildOpenSettleDistributeSimulationInstructions(
 ): Promise<Instruction[]> {
   const tx = getTransactionDecoder().decode(getBase64Codec().encode(openTransactionBase64));
   const compiled = getCompiledTransactionMessageDecoder().decode(tx.messageBytes);
+  if (!isAcceptedTransactionVersion(compiled.version)) {
+    throw new Error(
+      `${ErrUnsupportedTransactionVersion}: simulateOpenSettleDistribute: transaction message version ${String(compiled.version)} is not accepted`,
+    );
+  }
   const decompiled = decompileTransactionMessage(compiled);
   const openInstructions = (decompiled.instructions ?? []) as Instruction[];
 
