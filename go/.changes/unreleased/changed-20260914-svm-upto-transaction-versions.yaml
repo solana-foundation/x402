@@ -1,0 +1,3 @@
+kind: changed
+body: 'SVM upto: the facilitator advertises extra.transactionVersions ([0]) in /supported, the client builds an advertised version and refuses a facilitator that accepts none it can build, and the payment-channels open verifier and upto settlement reject any message version other than legacy or 0 with unsupported_transaction_version before inspecting signatures or instructions.'
+time: 2026-09-14T12:05:00Z
