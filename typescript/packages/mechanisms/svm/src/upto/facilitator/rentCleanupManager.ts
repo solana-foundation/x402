@@ -258,6 +258,13 @@ export interface UptoSvmRentCleanupManagerConfig {
    * (`reclaimComputeUnitLimit`) and are mint-independent.
    */
   settleComputeUnitLimit?: number;
+  /**
+   * Inline v1 loaded-account-data budget for close/distribute cleanup
+   * transactions. Defaults to `DEFAULT_SETTLE_LOADED_ACCOUNTS_DATA_SIZE_LIMIT`
+   * (4 MiB, sized for a mainnet Token-2022 distribute). Reclaim batches
+   * derive their own budget per channel.
+   */
+  settleLoadedAccountsDataSizeLimit?: number;
 }
 
 /**
@@ -273,6 +280,7 @@ export class UptoSvmRentCleanupManager {
   private readonly network: Network;
   private readonly computeUnitPriceMicroLamports: number | undefined;
   private readonly settleComputeUnitLimit: number | undefined;
+  private readonly settleLoadedAccountsDataSizeLimit: number | undefined;
 
   private timer: ReturnType<typeof setInterval> | undefined;
   private discoveryTimer: ReturnType<typeof setInterval> | undefined;
@@ -317,6 +325,7 @@ export class UptoSvmRentCleanupManager {
     this.network = config.network;
     this.computeUnitPriceMicroLamports = config.computeUnitPriceMicroLamports;
     this.settleComputeUnitLimit = config.settleComputeUnitLimit;
+    this.settleLoadedAccountsDataSizeLimit = config.settleLoadedAccountsDataSizeLimit;
   }
 
   /**
@@ -679,6 +688,7 @@ export class UptoSvmRentCleanupManager {
 
     return submitSettle(feePayerSigner, this.signer, this.network, instructions, {
       computeUnitLimit: this.settleComputeUnitLimit,
+      loadedAccountsDataSizeLimit: this.settleLoadedAccountsDataSizeLimit,
       computeUnitPriceMicroLamports: this.computeUnitPriceMicroLamports,
     });
   }
@@ -787,9 +797,13 @@ export class UptoSvmRentCleanupManager {
     if (opts.abort.aborted()) return;
 
     const rpc = accountFetchRpc(this.signer, this.network);
-    // Refetch each account immediately before acting (stale → skip).
+    // Refetch each account immediately before acting (stale → skip). No packed
+    // transaction can hold more than maxReclaimsPerTx, so stop refetching once
+    // the remaining transaction budget could not carry another candidate.
+    const maxLive = budget.remaining * opts.maxReclaimsPerTx;
     const liveBatch: ReclaimCandidate[] = [];
     for (const candidate of group) {
+      if (liveBatch.length >= maxLive) break;
       try {
         const maybe = await fetchMaybeChannel(rpc, address(candidate.channelId), {
           commitment: STATE_COMMITMENT,

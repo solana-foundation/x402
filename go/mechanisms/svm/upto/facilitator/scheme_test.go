@@ -778,6 +778,25 @@ func TestClaimSettleUsesTheConfiguredComputeBudget(t *testing.T) {
 	limit, gotPrice := transactionConfigData(t, sent[0])
 	assert.Equal(t, settleLimit, limit)
 	assert.Equal(t, uint64(1), gotPrice)
+	require.NotNil(t, sent[0].Message.TransactionConfig.LoadedAccountsDataSizeLimit)
+	assert.Equal(t, DefaultSettleLoadedAccountsDataSizeLimit, *sent[0].Message.TransactionConfig.LoadedAccountsDataSizeLimit)
+}
+
+func TestClaimSettleUsesTheConfiguredLoadedAccountsDataBudget(t *testing.T) {
+	signer := newMockSigner(t, 1)
+	stub := newStubRPC(t)
+	fixture := newPaymentFixture(t, signer)
+	loadedLimit := uint32(2_097_152)
+	scheme := newScheme(signer, stub, &Config{SettleLoadedAccountsDataSizeLimit: &loadedLimit})
+	stub.setAccount(fixture.channelID.String(), fixture.openChannel().encode(t))
+
+	_, err := scheme.Settle(context.Background(), fixture.claimPayload(t, 0), fixture.claimRequirements(0), nil)
+	require.NoError(t, err)
+
+	sent := signer.sentTransactions()
+	require.Len(t, sent, 1)
+	require.NotNil(t, sent[0].Message.TransactionConfig.LoadedAccountsDataSizeLimit)
+	assert.Equal(t, loadedLimit, *sent[0].Message.TransactionConfig.LoadedAccountsDataSizeLimit)
 }
 
 func TestClaimSettleOmitsComputeUnitPriceWhenZero(t *testing.T) {

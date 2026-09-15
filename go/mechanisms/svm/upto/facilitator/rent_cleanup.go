@@ -174,6 +174,12 @@ type RentCleanupConfig struct {
 	// Token-2022 extension mints. Reclaim batches instead derive their limit
 	// per channel (ReclaimComputeUnitLimit) and are mint-independent.
 	SettleComputeUnitLimit *uint32
+
+	// SettleLoadedAccountsDataSizeLimit is the inline v1 loaded-account-data
+	// budget for close/distribute cleanup transactions. Unset defaults to
+	// DefaultSettleLoadedAccountsDataSizeLimit (4 MiB, sized for a mainnet
+	// Token-2022 distribute). Reclaim batches derive their own budget.
+	SettleLoadedAccountsDataSizeLimit *uint32
 }
 
 // RentCleanupManager recovers the rent a facilitator fronts for payment
@@ -184,11 +190,12 @@ type RentCleanupConfig struct {
 // refunds the unsettled remainder to the client, so cleanup only kicks in
 // after the voucher deadline plus a grace period.
 type RentCleanupManager struct {
-	signer                        UptoFacilitatorSigner
-	storage                       ChannelStorage
-	network                       string
-	computeUnitPriceMicroLamports *uint64
-	settleComputeUnitLimit        *uint32
+	signer                            UptoFacilitatorSigner
+	storage                           ChannelStorage
+	network                           string
+	computeUnitPriceMicroLamports     *uint64
+	settleComputeUnitLimit            *uint32
+	settleLoadedAccountsDataSizeLimit *uint32
 
 	mu     sync.Mutex
 	cancel context.CancelFunc
@@ -215,11 +222,12 @@ func NewRentCleanupManager(config RentCleanupConfig) *RentCleanupManager {
 		panic("upto svm rent cleanup: signer is required")
 	}
 	return &RentCleanupManager{
-		signer:                        signer,
-		storage:                       config.Storage,
-		network:                       config.Network,
-		computeUnitPriceMicroLamports: config.ComputeUnitPriceMicroLamports,
-		settleComputeUnitLimit:        config.SettleComputeUnitLimit,
+		signer:                            signer,
+		storage:                           config.Storage,
+		network:                           config.Network,
+		computeUnitPriceMicroLamports:     config.ComputeUnitPriceMicroLamports,
+		settleComputeUnitLimit:            config.SettleComputeUnitLimit,
+		settleLoadedAccountsDataSizeLimit: config.SettleLoadedAccountsDataSizeLimit,
 	}
 }
 
@@ -597,6 +605,7 @@ func (m *RentCleanupManager) submitCloseOrDistribute(
 
 	return submitSettle(ctx, m.signer, feePayer, m.network, instructions, submitSettleOptions{
 		ComputeUnitLimit:              m.settleComputeUnitLimit,
+		LoadedAccountsDataSizeLimit:   m.settleLoadedAccountsDataSizeLimit,
 		ComputeUnitPriceMicroLamports: m.computeUnitPriceMicroLamports,
 	})
 }

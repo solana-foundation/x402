@@ -93,11 +93,15 @@ export const DEFAULT_CHANNEL_READ_BACKOFF_STEP_MS = 200;
 export const DEFAULT_SETTLE_COMPUTE_UNIT_LIMIT = 100_000;
 
 /**
- * Loaded-account-data budget for a normal facilitator settlement. This is
- * deliberately far below the runtime maximum while leaving headroom for the
- * payment-channel program, token program, mint and associated-token accounts.
+ * Loaded-account-data budget for a normal facilitator settlement. The runtime
+ * counts every loaded account, including the upgradeable program-data accounts
+ * of the programs a transaction invokes: the payment-channels program is
+ * ~66 KiB, SPL Token ~106 KiB, and mainnet Token-2022 ~1.32 MiB
+ * (1,382,061 bytes). 4 MiB covers a Token-2022 claim with headroom while
+ * staying far below the 64 MiB runtime maximum. Override via
+ * `settleLoadedAccountsDataSizeLimit` on the facilitator or cleanup config.
  */
-export const DEFAULT_SETTLE_LOADED_ACCOUNTS_DATA_SIZE_LIMIT = 1_048_576;
+export const DEFAULT_SETTLE_LOADED_ACCOUNTS_DATA_SIZE_LIMIT = 4_194_304;
 
 /** Loaded-account-data budget shared by every reclaim batch. */
 export const RECLAIM_LOADED_ACCOUNTS_DATA_SIZE_BASE = 262_144;

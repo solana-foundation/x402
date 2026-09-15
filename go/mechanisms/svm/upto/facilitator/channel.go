@@ -48,9 +48,13 @@ const (
 	DefaultSettleComputeUnitLimit uint32 = 100_000
 
 	// DefaultSettleLoadedAccountsDataSizeLimit is the inline v1 account-data
-	// budget for normal settlement. It is intentionally far below the runtime
-	// maximum while leaving headroom for the channel and token programs.
-	DefaultSettleLoadedAccountsDataSizeLimit uint32 = 1_048_576
+	// budget for normal settlement. The runtime counts every loaded account,
+	// including the upgradeable program-data accounts of the programs a
+	// transaction invokes: the payment-channels program is ~66 KiB, SPL Token
+	// ~106 KiB, and mainnet Token-2022 ~1.32 MiB (1,382,061 bytes). 4 MiB
+	// covers a Token-2022 claim with headroom while staying far below the
+	// 64 MiB runtime maximum. Override via Config.SettleLoadedAccountsDataSizeLimit.
+	DefaultSettleLoadedAccountsDataSizeLimit uint32 = 4_194_304
 
 	// ReclaimComputeUnitBase is the base inline compute limit for a reclaim
 	// batch transaction.

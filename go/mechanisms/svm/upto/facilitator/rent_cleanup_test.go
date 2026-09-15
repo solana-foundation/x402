@@ -335,13 +335,15 @@ func TestCleanupBatchReclaimsDistributedChannels(t *testing.T) {
 func TestCleanupUsesTheConfiguredSettleComputeBudget(t *testing.T) {
 	harness := newCleanupHarness(t)
 	settleLimit := uint32(222_222)
+	loadedLimit := uint32(3_145_728)
 	price := uint64(9)
 	harness.manager = NewRentCleanupManager(RentCleanupConfig{
-		Signer:                        harness.signer,
-		Storage:                       harness.storage,
-		Network:                       testNetwork,
-		SettleComputeUnitLimit:        &settleLimit,
-		ComputeUnitPriceMicroLamports: &price,
+		Signer:                            harness.signer,
+		Storage:                           harness.storage,
+		Network:                           testNetwork,
+		SettleComputeUnitLimit:            &settleLimit,
+		SettleLoadedAccountsDataSizeLimit: &loadedLimit,
+		ComputeUnitPriceMicroLamports:     &price,
 	})
 	record := harness.seedRecord(
 		ChannelRecord{PayTo: harness.payTo.String(), ExpiresAt: time.Now().Unix() + 3600},
@@ -353,6 +355,9 @@ func TestCleanupUsesTheConfiguredSettleComputeBudget(t *testing.T) {
 
 	require.Len(t, harness.closes, 1)
 	assert.Equal(t, settleLimit, harness.sentComputeUnitLimit(0))
+	sentConfig := harness.signer.sentTransactions()[0].Message.TransactionConfig
+	require.NotNil(t, sentConfig.LoadedAccountsDataSizeLimit)
+	assert.Equal(t, loadedLimit, *sentConfig.LoadedAccountsDataSizeLimit)
 }
 
 func TestCleanupRespectsReclaimBatchCaps(t *testing.T) {
