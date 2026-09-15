@@ -278,9 +278,13 @@ def resolve_transaction_version(extra: dict | None) -> int:
     Raises:
         ValueError: If the advertised set does not include version 0.
     """
-    advertised = (extra or {}).get("transactionVersions")
-    if not isinstance(advertised, list):
+    if extra is None or "transactionVersions" not in extra:
         return 0
+    advertised = extra["transactionVersions"]
+    if not isinstance(advertised, list):
+        raise ValueError(
+            f"{ERR_UNSUPPORTED_TRANSACTION_VERSION}: transactionVersions must be a list"
+        )
     if any(isinstance(v, int) and not isinstance(v, bool) and v == 0 for v in advertised):
         return 0
     raise ValueError(

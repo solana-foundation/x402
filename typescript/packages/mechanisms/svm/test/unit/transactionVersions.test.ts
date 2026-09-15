@@ -37,11 +37,13 @@ import {
   validateComputeBudgetLimits,
 } from "../../src/exact/facilitator/smartWalletVerification";
 import { ExactSvmSchemeV1 } from "../../src/exact/v1/facilitator/scheme";
+import { SettlementCache } from "../../src/settlement-cache";
 import type { FacilitatorSvmSigner } from "../../src/signer";
 import {
   decodeTransactionFromPayload,
   isAcceptedTransactionVersion,
   resolveTransactionVersion,
+  transactionMessageHash,
 } from "../../src/utils";
 import { buildExactPaymentTransaction } from "./helpers/signedTransaction";
 
@@ -138,13 +140,16 @@ describe("isAcceptedTransactionVersion", () => {
 });
 
 describe("resolveTransactionVersion", () => {
-  it("defaults to version 0 when the field is absent or malformed", () => {
+  it("defaults to version 0 when the field is absent", () => {
     expect(resolveTransactionVersion(undefined)).toBe(0);
     expect(resolveTransactionVersion({})).toBe(0);
     expect(resolveTransactionVersion({ feePayer: FEE_PAYER })).toBe(0);
-    expect(resolveTransactionVersion({ transactionVersions: "0" })).toBe(0);
-    expect(resolveTransactionVersion({ transactionVersions: 0 })).toBe(0);
-    expect(resolveTransactionVersion({ transactionVersions: null })).toBe(0);
+  });
+
+  it.each(["0", 0, null])("rejects malformed transactionVersions metadata (%j)", advertised => {
+    expect(() => resolveTransactionVersion({ transactionVersions: advertised })).toThrow(
+      /^unsupported_transaction_version/,
+    );
   });
 
   it("builds version 0 whenever it is advertised", () => {
@@ -210,12 +215,14 @@ describe("exact client honours extra.transactionVersions", () => {
   it("refuses to build when the facilitator does not accept version 0", async () => {
     const payer = await generateKeyPairSigner();
     const client = new ExactSvmClientScheme(payer);
+    vi.mocked(fetchMint).mockClear();
     await expect(
       client.createPaymentPayload(2, requirements({ transactionVersions: [1] })),
     ).rejects.toThrow(/^unsupported_transaction_version/);
     await expect(
       client.createPaymentPayload(2, requirements({ transactionVersions: ["legacy"] })),
     ).rejects.toThrow(/^unsupported_transaction_version/);
+    expect(fetchMint).not.toHaveBeenCalled();
   });
 });
 
@@ -270,6 +277,24 @@ describe("verifier version gates", () => {
     expect(control.invalidReason).not.toBe(Errors.ErrUnsupportedTransactionVersion);
   });
 
+  it("exact settle rejects an unmodelled version before duplicate detection", async () => {
+    const { transaction, requirements } = await exactPayment();
+    const payload: PaymentPayload = {
+      x402Version: 2,
+      resource: { url: "http://example.com/p", description: "", mimeType: "application/json" },
+      accepted: requirements,
+      payload: { transaction },
+    };
+    const cache = new SettlementCache();
+    cache.isDuplicate(transactionMessageHash(decodeTransactionFromPayload({ transaction })));
+    const facilitator = new ExactSvmFacilitatorScheme(facilitatorSigner(), cache);
+
+    reportedVersionOverride = 1;
+    const result = await facilitator.settle(payload, requirements);
+    expect(result.success).toBe(false);
+    expect(result.errorReason).toBe(Errors.ErrUnsupportedTransactionVersion);
+  });
+
   it("exact facilitator still accepts legacy-reported messages past the gate", async () => {
     const { transaction, requirements } = await exactPayment();
     const payload: PaymentPayload = {
@@ -314,6 +339,36 @@ describe("verifier version gates", () => {
     reportedVersionOverride = undefined;
     const control = await facilitator.verify(payload, requirements);
     expect(control.invalidReason).not.toBe("unsupported_transaction_version");
+  });
+
+  it("legacy x402 v1 settle rejects an unmodelled version before duplicate detection", async () => {
+    const { transaction } = await exactPayment();
+    const requirements: PaymentRequirementsV1 = {
+      scheme: "exact",
+      network: "solana-devnet",
+      asset: USDC_DEVNET_ADDRESS,
+      maxAmountRequired: "100000",
+      payTo,
+      maxTimeoutSeconds: 3600,
+      resource: "http://example.com/p",
+      description: "",
+      mimeType: "application/json",
+      extra: { feePayer: FEE_PAYER },
+    };
+    const payload: PaymentPayloadV1 = {
+      x402Version: 1,
+      scheme: "exact",
+      network: "solana-devnet",
+      payload: { transaction },
+    };
+    const cache = new SettlementCache();
+    cache.isDuplicate(transactionMessageHash(decodeTransactionFromPayload({ transaction })));
+    const facilitator = new ExactSvmSchemeV1(facilitatorSigner(), cache);
+
+    reportedVersionOverride = 1;
+    const result = await facilitator.settle(payload, requirements);
+    expect(result.success).toBe(false);
+    expect(result.errorReason).toBe(Errors.ErrUnsupportedTransactionVersion);
   });
 
   it("smart wallet checks fail closed on an unmodelled message version", async () => {

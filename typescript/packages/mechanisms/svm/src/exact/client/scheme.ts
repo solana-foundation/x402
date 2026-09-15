@@ -63,6 +63,7 @@ export class ExactSvmScheme implements SchemeNetworkClient {
     x402Version: number,
     paymentRequirements: PaymentRequirements,
   ): Promise<Pick<PaymentPayload, "x402Version" | "payload">> {
+    const transactionVersion = resolveTransactionVersion(paymentRequirements.extra);
     const rpc = createRpcClient(paymentRequirements.network, this.config?.rpcUrl);
 
     const mintMetadata = await getCachedMintMetadata(
@@ -133,9 +134,6 @@ export class ExactSvmScheme implements SchemeNetworkClient {
       data: memoData,
     };
 
-    // Build one of the message versions the facilitator advertised in
-    // `extra.transactionVersions` (version 0 when the field is absent).
-    const transactionVersion = resolveTransactionVersion(paymentRequirements.extra);
     const tx = pipe(
       createTransactionMessage({ version: transactionVersion }),
       tx => setTransactionMessageComputeUnitPrice(DEFAULT_COMPUTE_UNIT_PRICE_MICROLAMPORTS, tx),

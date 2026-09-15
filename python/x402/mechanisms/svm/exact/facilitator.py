@@ -409,6 +409,14 @@ class ExactSvmScheme:
         # PendingSettlementStore on the message hash before doing any verify/sign/send work.
         try:
             tx = decode_transaction_from_payload(svm_payload)
+            if not is_accepted_transaction_version(get_transaction_version(tx.message)):
+                return SettleResponse(
+                    success=False,
+                    error_reason=ERR_UNSUPPORTED_TRANSACTION_VERSION,
+                    network=network,
+                    payer="",
+                    transaction="",
+                )
             tx_key = transaction_message_hash(tx)
         except Exception as e:
             return SettleResponse(

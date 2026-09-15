@@ -445,6 +445,24 @@ export class ExactSvmSchemeV1 implements SchemeNetworkFacilitator {
     } catch {
       txKey = undefined;
     }
+    if (decodedTx) {
+      try {
+        const compiled = compiledMessageDecoder.decode(decodedTx.messageBytes);
+        if (!isAcceptedTransactionVersion(compiled.version)) {
+          return {
+            success: false,
+            network: payloadV1.network,
+            transaction: "",
+            errorReason: ErrUnsupportedTransactionVersion,
+            payer: "",
+          };
+        }
+      } catch {
+        // Verification below owns the canonical malformed-message error. Keep
+        // the cache key so decode stubs and future decoder failures do not
+        // accidentally disable deduplication.
+      }
+    }
 
     // Duplicate settlement check keyed on message hash (immune to mutable fee-payer sig at slot 0).
     if (txKey && this.settlementCache.isDuplicate(txKey)) {

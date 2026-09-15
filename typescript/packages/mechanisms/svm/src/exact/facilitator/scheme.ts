@@ -351,6 +351,24 @@ export class ExactSvmScheme implements SchemeNetworkFacilitator {
     } catch {
       txKey = undefined;
     }
+    if (decodedTransaction) {
+      try {
+        const compiled = compiledMessageDecoder.decode(decodedTransaction.messageBytes);
+        if (!isAcceptedTransactionVersion(compiled.version)) {
+          return {
+            success: false,
+            network: payload.accepted.network,
+            transaction: "",
+            errorReason: Errors.ErrUnsupportedTransactionVersion,
+            payer: "",
+          };
+        }
+      } catch {
+        // Verification below owns the canonical malformed-message error. Keep
+        // the cache key so decode stubs and future decoder failures do not
+        // accidentally disable deduplication.
+      }
+    }
 
     // Duplicate settlement check keyed on message hash (immune to mutable fee-payer sig at slot
     // 0). Must remain synchronous (before any await) so concurrent settle calls for

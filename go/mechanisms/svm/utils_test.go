@@ -141,7 +141,7 @@ func TestResolveTransactionVersion(t *testing.T) {
 	}{
 		{name: "nil extra selects v0", extra: nil},
 		{name: "absent field selects v0", extra: map[string]interface{}{"feePayer": "x"}},
-		{name: "malformed field selects v0", extra: map[string]interface{}{ExtraTransactionVersions: "0"}},
+		{name: "malformed field is unsupported", extra: map[string]interface{}{ExtraTransactionVersions: "0"}, wantErr: true},
 		{name: "JSON-decoded [0] selects v0", extra: map[string]interface{}{ExtraTransactionVersions: []interface{}{float64(0)}}},
 		{name: "JSON-decoded [\"legacy\",0] selects v0", extra: map[string]interface{}{ExtraTransactionVersions: []interface{}{"legacy", float64(0)}}},
 		{name: "JSON-decoded [1,0] selects v0", extra: map[string]interface{}{ExtraTransactionVersions: []interface{}{float64(1), float64(0)}}},
