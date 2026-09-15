@@ -53,7 +53,9 @@ func BuildRequestCloseTransaction(args BuildRequestCloseArgs) (*solana.Transacti
 	if err != nil {
 		return nil, fmt.Errorf("failed to build request_close transaction: %w", err)
 	}
-	tx.Message.SetVersion(solana.MessageVersionV0)
+	if _, err := tx.Message.SetVersion(solana.MessageVersionV0); err != nil {
+		return nil, fmt.Errorf("failed to set request_close transaction version: %w", err)
+	}
 	return tx, nil
 }
 
