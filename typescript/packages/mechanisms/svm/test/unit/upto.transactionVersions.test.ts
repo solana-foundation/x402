@@ -1,10 +1,7 @@
 /**
  * Transaction message version negotiation for `upto` and the shared
- * payment-channels open transaction.
- *
- * The `@solana/kit` release resolved in this workspace refuses to decode a
- * transaction v1 wire payload, so the verifier gate is exercised by
- * overriding the compiled message decoder's reported `version`.
+ * payment-channels open transaction. The version gate is exercised with a
+ * genuine transaction-v1 wire payload, which `@solana/kit` >= 8 decodes.
  */
 import {
   generateKeyPairSigner,
@@ -12,7 +9,7 @@ import {
   getCompiledTransactionMessageDecoder,
   getTransactionDecoder,
 } from "@solana/kit";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 
 import { TOKEN_PROGRAM_ADDRESS } from "../../src/constants";
 import { USDC_DEVNET_ADDRESS } from "../../src/defaultAssets";
@@ -21,40 +18,7 @@ import {
   verifyOpenTransaction,
 } from "../../src/payment-channels/open";
 import { resolveTransactionVersion } from "../../src/utils";
-
-/**
- * When set, every compiled message decoded through `@solana/kit` reports this
- * version instead of the one on the wire.
- */
-let reportedVersionOverride: number | string | undefined;
-
-vi.mock("@solana/kit", async importOriginal => {
-  const actual = await importOriginal<typeof import("@solana/kit")>();
-  return {
-    ...actual,
-    getCompiledTransactionMessageDecoder: () => {
-      const real = actual.getCompiledTransactionMessageDecoder();
-      return {
-        ...real,
-        decode: (bytes: Uint8Array, offset?: number) => {
-          const compiled = real.decode(bytes, offset);
-          return reportedVersionOverride === undefined
-            ? compiled
-            : { ...compiled, version: reportedVersionOverride };
-        },
-        read: (bytes: Uint8Array, offset: number) => {
-          const [compiled, next] = real.read(bytes, offset);
-          return [
-            reportedVersionOverride === undefined
-              ? compiled
-              : { ...compiled, version: reportedVersionOverride },
-            next,
-          ];
-        },
-      };
-    },
-  };
-});
+import { buildVersion1WireTransaction } from "./helpers/signedTransaction";
 
 const DUMMY_BLOCKHASH = USDC_DEVNET_ADDRESS;
 
@@ -91,12 +55,8 @@ async function openTransaction() {
     tokenProgram: TOKEN_PROGRAM_ADDRESS,
     withdrawDelay: 900,
   };
-  return { open, expected };
+  return { open, expected, payer, feePayer };
 }
-
-afterEach(() => {
-  reportedVersionOverride = undefined;
-});
 
 describe("payment-channels open builder", () => {
   it("builds a version 0 open transaction", async () => {
@@ -106,15 +66,18 @@ describe("payment-channels open builder", () => {
 });
 
 describe("verifyOpenTransaction version gate", () => {
-  it("rejects an unmodelled message version before layout checks", async () => {
-    const { open, expected } = await openTransaction();
+  it("rejects a real version 1 message before layout checks", async () => {
+    const { open, expected, payer, feePayer } = await openTransaction();
+    const v1 = await buildVersion1WireTransaction({ feePayer: feePayer.address, payer });
+    expect(wireVersion(v1)).toBe(1);
 
-    reportedVersionOverride = 1;
-    await expect(verifyOpenTransaction(open.transaction, expected)).rejects.toThrow(
+    // The v1 payload has no ComputeBudget prefix and no `open` instruction; a
+    // layout error would name one of those, so the version prefix proves the
+    // gate ran first.
+    await expect(verifyOpenTransaction(v1, expected)).rejects.toThrow(
       /^unsupported_transaction_version/,
     );
 
-    reportedVersionOverride = undefined;
     await expect(verifyOpenTransaction(open.transaction, expected)).resolves.toMatchObject({
       channelId: open.channelId,
     });

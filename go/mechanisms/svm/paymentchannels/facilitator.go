@@ -36,8 +36,10 @@ const (
 	DefaultSettleComputeUnitLimit uint32 = 100_000
 
 	// DefaultSettleLoadedAccountsDataSizeLimit is the inline v1 account-data
-	// budget for normal settlement.
-	DefaultSettleLoadedAccountsDataSizeLimit uint32 = 1_048_576
+	// budget for normal settlement. Four MiB covers the mainnet Token-2022
+	// program-data account (about 1.4 MiB) with room for the remaining programs
+	// and accounts loaded by a settlement.
+	DefaultSettleLoadedAccountsDataSizeLimit uint32 = 4_194_304
 
 	ReclaimLoadedAccountsDataSizeBase       uint32 = 262_144
 	ReclaimLoadedAccountsDataSizePerChannel uint32 = 1_024

@@ -184,6 +184,7 @@ type PaymentChannelRentCleanupConfig struct {
 	Network                       string
 	ComputeUnitPriceMicroLamports *uint64
 	SettleComputeUnitLimit        *uint32
+	SettleLoadedAccountsDataSizeLimit *uint32
 	MaxIdleSecs                   *int64
 	AbandonPolicy                 OpenAbandonPolicy
 	// SealClosingChannels nil defaults to true. upto sets it false.
@@ -199,6 +200,7 @@ type PaymentChannelRentCleanupManager struct {
 	network                       string
 	computeUnitPriceMicroLamports *uint64
 	settleComputeUnitLimit        *uint32
+	settleLoadedAccountsDataSizeLimit *uint32
 	maxIdleSecs                   *int64
 	abandonPolicy                 OpenAbandonPolicy
 	sealClosingChannels           bool
@@ -241,6 +243,7 @@ func NewPaymentChannelRentCleanupManager(config PaymentChannelRentCleanupConfig)
 		network:                       config.Network,
 		computeUnitPriceMicroLamports: config.ComputeUnitPriceMicroLamports,
 		settleComputeUnitLimit:        config.SettleComputeUnitLimit,
+		settleLoadedAccountsDataSizeLimit: config.SettleLoadedAccountsDataSizeLimit,
 		maxIdleSecs:                   config.MaxIdleSecs,
 		abandonPolicy:                 policy,
 		sealClosingChannels:           seal,
@@ -610,6 +613,7 @@ func (m *PaymentChannelRentCleanupManager) submitCloseOrDistribute(
 	}
 	return SubmitChannelTransactionWithSigner(ctx, m.signer, m.signer, feePayer, m.network, instructions, SubmitSettleOptions{
 		ComputeUnitLimit:              m.settleComputeUnitLimit,
+		LoadedAccountsDataSizeLimit:   m.settleLoadedAccountsDataSizeLimit,
 		ComputeUnitPriceMicroLamports: m.computeUnitPriceMicroLamports,
 	})
 }
@@ -658,6 +662,13 @@ func (m *PaymentChannelRentCleanupManager) submitReclaimGroup(
 			opts.reportError(err, candidate.channelID.String())
 		}
 		return
+	}
+	maxLive := int(atomic.LoadInt64(budget)) * opts.MaxReclaimsPerTx
+	if maxLive <= 0 {
+		return
+	}
+	if len(group) > maxLive {
+		group = group[:maxLive]
 	}
 	batch := m.refreshReclaimBatch(ctx, rpcClient, group, opts)
 	for offset := 0; offset < len(batch); {
