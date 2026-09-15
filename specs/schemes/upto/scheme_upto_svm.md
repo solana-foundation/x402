@@ -767,10 +767,11 @@ version is the facilitator's choice:
   version. Only `reclaim` batches: its size MUST be derived from the serialized
   transaction (1232 bytes for legacy and version 0, 4096 bytes for version 1),
   the 64 static account keys and the 64 top-level instruction limit, never
-  from a fixed count. Informative capacity, with the fee payer, program and
-  `rent_payer` shared: each `reclaim` adds one account and one instruction
-  (~38 bytes), for about 26 channels per legacy or version-0 transaction and
-  about 61 per version-1 transaction, where the account-key limit binds.
+  from a fixed count. Informative capacity, with the fee payer (which is also
+  the shared `rent_payer`) and the program as the two shared account keys:
+  each `reclaim` adds one account and one instruction (~38 bytes), for about
+  26 channels per legacy or version-0 transaction and 62 per version-1
+  transaction, where the 64 account-key limit binds.
 
 ### Duplicate Settlement Mitigation
 

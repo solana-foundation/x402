@@ -1357,7 +1357,7 @@ instruction count.
 |---|---|---|---|---|
 | `settle` claim: Ed25519 precompile + `settle` | 1 account, 2 instructions, ~205 B | 4 | 18 | size |
 | `distribute` (open or sealed) | 4 accounts, 1 instruction, ~143 B | 5 | 13 | 64 account keys |
-| `reclaim` | 1 account, 1 instruction, ~38 B | ~26 | ~61 | 64 account keys |
+| `reclaim` | 1 account, 1 instruction, ~38 B | ~26 | 62 | 64 account keys |
 | `settle_and_seal` + sealed `distribute` (refund) | one channel per transaction | 1 | 1 | not batched |
 | `open`, `top_up`, `request_close` | client-built, one channel per transaction | 1 | 1 | not batched |
 
