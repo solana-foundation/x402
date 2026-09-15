@@ -25,13 +25,13 @@ const (
 	// no facilitator-visible activity is abandon-closed. Seven days.
 	DefaultMaxIdleSecs int64 = 7 * 24 * 60 * 60
 
-	// DefaultMaxReclaimsPerTx is how many reclaim instructions are packed into
-	// one cleanup transaction.
-	DefaultMaxReclaimsPerTx = 8
+	// DefaultMaxReclaimsPerTx is the v1 instruction ceiling. Actual batches are
+	// also bounded by encoded size and static account count.
+	DefaultMaxReclaimsPerTx = solana.MaxInstructionsV1
 
 	// MaxSafeReclaimsPerTx is the largest reclaim batch that serializes under
 	// Solana's packet data size. MaxReclaimsPerTx is clamped to this.
-	MaxSafeReclaimsPerTx = 16
+	MaxSafeReclaimsPerTx = solana.MaxInstructionsV1
 
 	// DefaultMaxTxsPerRun caps the close/distribute transactions the storage
 	// scan submits per run.
@@ -659,37 +659,56 @@ func (m *PaymentChannelRentCleanupManager) submitReclaimGroup(
 		}
 		return
 	}
-	for start := 0; start < len(group); start += opts.MaxReclaimsPerTx {
+	batch := m.refreshReclaimBatch(ctx, rpcClient, group, opts)
+	for offset := 0; offset < len(batch); {
+		if ctx.Err() != nil {
+			return
+		}
+		packed := make([]reclaimCandidate, 0, len(batch)-offset)
+		for _, candidate := range batch[offset:] {
+			next := append(packed, candidate)
+			instructions := make([]solana.Instruction, 0, len(next))
+			for _, item := range next {
+				instructions = append(instructions, BuildReclaimInstruction(item.channelID, item.rentPayer))
+			}
+			reclaimLimit := ReclaimComputeUnitLimit(len(next))
+			loadedLimit := ReclaimLoadedAccountsDataSizeLimit(len(next))
+			if len(next) > opts.MaxReclaimsPerTx || !FacilitatorV1TransactionFits(feePayer, instructions, SubmitSettleOptions{
+				ComputeUnitLimit:              &reclaimLimit,
+				LoadedAccountsDataSizeLimit:   &loadedLimit,
+				ComputeUnitPriceMicroLamports: m.computeUnitPriceMicroLamports,
+			}) {
+				break
+			}
+			packed = next
+		}
+		if len(packed) == 0 {
+			opts.reportError(fmt.Errorf("single reclaim instruction exceeds transaction v1 limits"), batch[offset].channelID.String())
+			offset++
+			continue
+		}
 		if atomic.AddInt64(budget, -1) < 0 {
 			atomic.AddInt64(budget, 1)
 			return
 		}
-		if ctx.Err() != nil {
-			return
-		}
-		end := start + opts.MaxReclaimsPerTx
-		if end > len(group) {
-			end = len(group)
-		}
-		batch := m.refreshReclaimBatch(ctx, rpcClient, group[start:end], opts)
-		if len(batch) == 0 {
-			continue
-		}
-		instructions := make([]solana.Instruction, 0, len(batch))
-		channelIDs := make([]string, 0, len(batch))
-		for _, candidate := range batch {
+		instructions := make([]solana.Instruction, 0, len(packed))
+		channelIDs := make([]string, 0, len(packed))
+		for _, candidate := range packed {
 			instructions = append(instructions, BuildReclaimInstruction(candidate.channelID, candidate.rentPayer))
 			channelIDs = append(channelIDs, candidate.channelID.String())
 		}
-		reclaimLimit := ReclaimComputeUnitLimit(len(batch))
+		reclaimLimit := ReclaimComputeUnitLimit(len(packed))
+		loadedLimit := ReclaimLoadedAccountsDataSizeLimit(len(packed))
 		signature, err := SubmitChannelTransactionWithSigner(ctx, m.signer, m.signer, feePayer, m.network, instructions, SubmitSettleOptions{
 			ComputeUnitLimit:              &reclaimLimit,
+			LoadedAccountsDataSizeLimit:   &loadedLimit,
 			ComputeUnitPriceMicroLamports: m.computeUnitPriceMicroLamports,
 		})
 		if err != nil {
 			for _, channelID := range channelIDs {
 				opts.reportError(err, channelID)
 			}
+			offset += len(packed)
 			continue
 		}
 		if opts.OnReclaim != nil {
@@ -700,6 +719,7 @@ func (m *PaymentChannelRentCleanupManager) submitReclaimGroup(
 				opts.reportError(err, channelID)
 			}
 		}
+		offset += len(packed)
 	}
 }
 
