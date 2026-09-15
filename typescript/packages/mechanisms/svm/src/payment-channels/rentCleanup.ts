@@ -27,8 +27,11 @@ import { BASIS_POINTS_DENOMINATOR, SLOT_COMMITMENT, STATE_COMMITMENT } from "./c
 import { discoverChannelsByRentPayer } from "./discovery";
 import {
   type PaymentChannelSvmSigner,
+  facilitatorV1TransactionFits,
   reclaimComputeUnitLimit,
+  reclaimLoadedAccountsDataSizeLimit,
   submitChannelTransactionWithSigner,
+  V1_MAX_INSTRUCTIONS,
 } from "./facilitator";
 import { fetchMaybeChannel, type Channel } from "./generated/accounts/channel";
 import {
@@ -238,8 +241,8 @@ export function assertMaxIdleSecs(value: number | undefined): number {
   return value;
 }
 
-/** Default reclaim instructions per cleanup transaction. */
-export const DEFAULT_MAX_RECLAIMS_PER_TX = 8;
+/** Default reclaim instruction ceiling; wire-size packing may choose fewer. */
+export const DEFAULT_MAX_RECLAIMS_PER_TX = V1_MAX_INSTRUCTIONS;
 
 /**
  * Largest reclaim batch proven, by the Go SDK's
@@ -249,7 +252,7 @@ export const DEFAULT_MAX_RECLAIMS_PER_TX = 8;
  * operator value can never build a reclaim transaction that fails to
  * serialize or gets rejected on broadcast.
  */
-export const MAX_SAFE_RECLAIMS_PER_TX = 16;
+export const MAX_SAFE_RECLAIMS_PER_TX = V1_MAX_INSTRUCTIONS;
 
 /** Default close/distribute transactions the storage scan may submit per call. */
 export const DEFAULT_MAX_TXS_PER_RUN = 20;
@@ -960,63 +963,91 @@ export class PaymentChannelRentCleanupManager {
       return;
     }
 
-    for (let i = 0; i < group.length; i += opts.maxReclaimsPerTx) {
-      if (budget.remaining <= 0) return;
-      // Silent, unlike the scan loop: batches already submitted reported
-      // through onReclaim, and the pass as a whole reports the cancellation.
-      if (opts.abort.aborted()) return;
-      budget.remaining -= 1;
-
-      const batch = group.slice(i, i + opts.maxReclaimsPerTx);
+    // Refetch each account immediately before acting (stale -> skip).
+    const rpc = accountFetchRpc(this.signer, this.network);
+    const liveBatch: ReclaimCandidate[] = [];
+    for (const candidate of group) {
       try {
-        // Refetch each account immediately before acting (stale → skip).
-        const rpc = accountFetchRpc(this.signer, this.network);
-        const liveBatch: ReclaimCandidate[] = [];
-        for (const candidate of batch) {
-          const maybe = await fetchMaybeChannel(rpc, address(candidate.channelId), {
-            commitment: STATE_COMMITMENT,
-          });
-          if (!maybe.exists) {
-            await this.storage.delete(this.network, candidate.channelId);
-            continue;
-          }
-          if (maybe.data.status !== ChannelStatus.Distributed) continue;
-          liveBatch.push({
-            channelId: candidate.channelId,
-            rentPayer: maybe.data.rentPayer,
-          });
+        const maybe = await fetchMaybeChannel(rpc, address(candidate.channelId), {
+          commitment: STATE_COMMITMENT,
+        });
+        if (!maybe.exists) {
+          await this.storage.delete(this.network, candidate.channelId);
+          continue;
         }
-        if (liveBatch.length === 0) continue;
+        if (maybe.data.status !== ChannelStatus.Distributed) continue;
+        liveBatch.push({ channelId: candidate.channelId, rentPayer: maybe.data.rentPayer });
+      } catch (error) {
+        opts.onError?.(error, { channelId: candidate.channelId });
+      }
+    }
 
-        const instructions = liveBatch.map(candidate =>
-          buildReclaimInstruction({
-            channelId: candidate.channelId,
-            rentPayer: candidate.rentPayer,
-          }),
+    let offset = 0;
+    while (offset < liveBatch.length) {
+      if (budget.remaining <= 0 || opts.abort.aborted()) return;
+
+      const packed: ReclaimCandidate[] = [];
+      for (const candidate of liveBatch.slice(offset)) {
+        const next = [...packed, candidate];
+        const nextInstructions = next.map(item =>
+          buildReclaimInstruction({ channelId: item.channelId, rentPayer: item.rentPayer }),
         );
+        if (
+          next.length > opts.maxReclaimsPerTx ||
+          !facilitatorV1TransactionFits(feePayerSigner, nextInstructions, {
+            computeUnitLimit: reclaimComputeUnitLimit(next.length),
+            loadedAccountsDataSizeLimit: reclaimLoadedAccountsDataSizeLimit(next.length),
+            computeUnitPriceMicroLamports: this.computeUnitPriceMicroLamports,
+          })
+        ) {
+          break;
+        }
+        packed.push(candidate);
+      }
+      if (packed.length === 0) {
+        opts.onError?.(new Error("single reclaim instruction exceeds transaction v1 limits"), {
+          channelId: liveBatch[offset]!.channelId,
+        });
+        offset += 1;
+        continue;
+      }
+
+      budget.remaining -= 1;
+      const instructions = packed.map(candidate =>
+        buildReclaimInstruction({
+          channelId: candidate.channelId,
+          rentPayer: candidate.rentPayer,
+        }),
+      );
+      try {
         const signature = await submitChannelTransactionWithSigner(
           feePayerSigner,
           this.signer,
           this.network,
           instructions,
           {
-            computeUnitLimit: reclaimComputeUnitLimit(liveBatch.length),
+            computeUnitLimit: reclaimComputeUnitLimit(packed.length),
+            loadedAccountsDataSizeLimit: reclaimLoadedAccountsDataSizeLimit(packed.length),
             computeUnitPriceMicroLamports: this.computeUnitPriceMicroLamports,
           },
         );
         opts.onReclaim?.({
-          channelIds: liveBatch.map(c => c.channelId),
+          channelIds: packed.map(candidate => candidate.channelId),
           transaction: signature,
         });
-        for (const candidate of liveBatch) {
-          await this.storage.delete(this.network, candidate.channelId);
+        for (const candidate of packed) {
+          try {
+            await this.storage.delete(this.network, candidate.channelId);
+          } catch (error) {
+            opts.onError?.(error, { channelId: candidate.channelId });
+          }
         }
       } catch (error) {
-        // Every channel in the batch is stuck, not just the first.
-        for (const candidate of batch) {
+        for (const candidate of packed) {
           opts.onError?.(error, { channelId: candidate.channelId });
         }
       }
+      offset += packed.length;
     }
   }
 

@@ -14,16 +14,30 @@ import (
 	"github.com/x402-foundation/x402/go/v2/mechanisms/svm"
 )
 
-// retagMessageVersion re-encodes a signed v0 transaction with its version
-// prefix byte replaced, producing a wire transaction that solana-go decodes
-// with a message version the verifiers do not model.
-func retagMessageVersion(t *testing.T, tx *solana.Transaction, prefix byte) string {
+// encodeV1Transaction creates a structurally valid v1 transaction. Exact
+// clients currently advertise/build v0, so facilitator verification rejects it
+// before applying v0-specific payment checks.
+func encodeV1Transaction(t *testing.T) string {
 	t.Helper()
+	payer := solana.NewWallet()
+	tx, err := solana.NewTransaction(
+		[]solana.Instruction{solana.NewInstruction(solana.MemoProgramID, nil, []byte("v1"))},
+		solana.Hash{},
+		solana.TransactionPayer(payer.PublicKey()),
+		solana.TransactionV1Config(solana.TransactionConfig{}.
+			WithComputeUnitLimit(10_000).
+			WithLoadedAccountsDataSizeLimit(65_536)),
+	)
+	require.NoError(t, err)
+	_, err = tx.Sign(func(key solana.PublicKey) *solana.PrivateKey {
+		if key.Equals(payer.PublicKey()) {
+			return &payer.PrivateKey
+		}
+		return nil
+	})
+	require.NoError(t, err)
 	raw, err := tx.MarshalBinary()
 	require.NoError(t, err)
-	offset := 1 + 64*len(tx.Signatures)
-	require.Equal(t, byte(0x80), raw[offset], "fixture must be a v0 transaction")
-	raw[offset] = prefix
 	return base64.StdEncoding.EncodeToString(raw)
 }
 
@@ -41,7 +55,7 @@ func TestExactSvmScheme_VerifyRejectsUnsupportedTransactionVersionBeforeSignatur
 	f := buildExactFixture(t)
 	f.tx.Message.SetVersion(solana.MessageVersionV0)
 	signTransaction(t, f.tx, f.ownerKey)
-	f.payload.Payload = (&svm.ExactSvmPayload{Transaction: retagMessageVersion(t, f.tx, 0x81)}).ToMap()
+	f.payload.Payload = (&svm.ExactSvmPayload{Transaction: encodeV1Transaction(t)}).ToMap()
 
 	signer := &mockExactSvmSigner{addresses: []solana.PublicKey{f.facilitatorAddr}}
 	scheme := NewExactSvmScheme(signer)
@@ -77,7 +91,7 @@ func TestExactSvmScheme_SettleRejectsUnsupportedTransactionVersionBeforeSigning(
 	f := buildExactFixture(t)
 	f.tx.Message.SetVersion(solana.MessageVersionV0)
 	signTransaction(t, f.tx, f.ownerKey)
-	f.payload.Payload = (&svm.ExactSvmPayload{Transaction: retagMessageVersion(t, f.tx, 0x81)}).ToMap()
+	f.payload.Payload = (&svm.ExactSvmPayload{Transaction: encodeV1Transaction(t)}).ToMap()
 
 	signer := &mockExactSvmSigner{addresses: []solana.PublicKey{f.facilitatorAddr}}
 	scheme := NewExactSvmScheme(signer)
