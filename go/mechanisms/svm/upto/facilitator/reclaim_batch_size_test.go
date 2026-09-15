@@ -67,7 +67,10 @@ func TestFacilitatorV1PackingChecksInstructionAndWireLimits(t *testing.T) {
 		instructions[i] = tiny
 	}
 	require.True(t, facilitatorV1TransactionFits(payer, instructions, submitSettleOptions{}))
-	require.False(t, facilitatorV1TransactionFits(payer, append(instructions, tiny), submitSettleOptions{}))
+	tooManyInstructions := make([]solana.Instruction, len(instructions)+1)
+	copy(tooManyInstructions, instructions)
+	tooManyInstructions[len(instructions)] = tiny
+	require.False(t, facilitatorV1TransactionFits(payer, tooManyInstructions, submitSettleOptions{}))
 
 	tooLarge := solana.NewInstruction(solana.MemoProgramID, nil, make([]byte, 4_000))
 	require.False(t, facilitatorV1TransactionFits(payer, []solana.Instruction{tooLarge}, submitSettleOptions{}))
