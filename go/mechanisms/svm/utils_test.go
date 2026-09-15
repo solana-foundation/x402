@@ -167,11 +167,9 @@ func TestResolveTransactionVersion(t *testing.T) {
 	}
 }
 
-// solana-go 1.14 reads any first message byte >= 0x7f as a versioned prefix and
-// stores `byte - 127` as the version without validating it, so a message tagged
-// 0x81 decodes with version 2. The verifiers must refuse it rather than run
-// their v0-shaped checks against it.
-func TestDecodeTransactionSurfacesUnknownMessageVersions(t *testing.T) {
+// Unknown version prefixes must be surfaced so verifiers can refuse them
+// rather than run v0-shaped checks against a future format.
+func TestDecodeTransactionRejectsUnknownMessageVersions(t *testing.T) {
 	payer := solana.NewWallet()
 	tx, err := solana.NewTransactionBuilder().
 		SetRecentBlockHash(solana.Hash(solana.SystemProgramID)).
@@ -193,10 +191,8 @@ func TestDecodeTransactionSurfacesUnknownMessageVersions(t *testing.T) {
 	// Wire layout: compact signature count (1 byte here), signatures, message.
 	versionOffset := 1 + 64*len(tx.Signatures)
 	require.Equal(t, byte(0x80), raw[versionOffset], "v0 prefix expected before tampering")
-	raw[versionOffset] = 0x81
+	raw[versionOffset] = 0x82
 
-	decoded, err := DecodeTransaction(base64.StdEncoding.EncodeToString(raw))
-	require.NoError(t, err)
-	assert.Equal(t, solana.MessageVersion(2), decoded.Message.GetVersion())
-	assert.False(t, IsAcceptedTransactionVersion(decoded.Message.GetVersion()))
+	_, err = DecodeTransaction(base64.StdEncoding.EncodeToString(raw))
+	require.ErrorContains(t, err, "unsupported message version: 2")
 }

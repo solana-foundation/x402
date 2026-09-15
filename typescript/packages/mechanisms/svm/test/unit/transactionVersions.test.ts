@@ -6,9 +6,8 @@
  * clients build one of the advertised versions, and every verifier rejects
  * any other version before inspecting signatures or instructions.
  *
- * The `@solana/kit` release resolved in this workspace refuses to decode a
- * transaction v1 wire payload, so the verifier gates are exercised by
- * overriding the compiled message decoder's reported `version`.
+ * The verifier gates are exercised with genuine transaction-v1 and legacy
+ * wire payloads, which `@solana/kit` >= 8 decodes.
  */
 import { fetchMint } from "@solana-program/token-2022";
 import {
@@ -20,7 +19,7 @@ import {
 } from "@solana/kit";
 import type { PaymentPayload, PaymentRequirements } from "@x402/core/types";
 import type { PaymentPayloadV1, PaymentRequirementsV1 } from "@x402/core/types/v1";
-import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   ACCEPTED_TRANSACTION_VERSIONS,
@@ -45,46 +44,14 @@ import {
   resolveTransactionVersion,
   transactionMessageHash,
 } from "../../src/utils";
-import { buildExactPaymentTransaction } from "./helpers/signedTransaction";
+import {
+  buildExactPaymentTransaction,
+  buildVersion1WireTransaction,
+} from "./helpers/signedTransaction";
 
 vi.mock("@solana-program/token-2022", async importOriginal => {
   const actual = await importOriginal<typeof import("@solana-program/token-2022")>();
   return { ...actual, fetchMint: vi.fn() };
-});
-
-/**
- * When set, every compiled message decoded through `@solana/kit` reports this
- * version instead of the one on the wire. Lets the tests reach the version
- * gates with a kit that cannot yet decode the newer wire formats.
- */
-let reportedVersionOverride: number | string | undefined;
-
-vi.mock("@solana/kit", async importOriginal => {
-  const actual = await importOriginal<typeof import("@solana/kit")>();
-  return {
-    ...actual,
-    getCompiledTransactionMessageDecoder: () => {
-      const real = actual.getCompiledTransactionMessageDecoder();
-      return {
-        ...real,
-        decode: (bytes: Uint8Array, offset?: number) => {
-          const compiled = real.decode(bytes, offset);
-          return reportedVersionOverride === undefined
-            ? compiled
-            : { ...compiled, version: reportedVersionOverride };
-        },
-        read: (bytes: Uint8Array, offset: number) => {
-          const [compiled, next] = real.read(bytes, offset);
-          return [
-            reportedVersionOverride === undefined
-              ? compiled
-              : { ...compiled, version: reportedVersionOverride },
-            next,
-          ];
-        },
-      };
-    },
-  };
 });
 
 /** Facilitator fee payer; a real keypair so the address encodes to 32 bytes. */
@@ -109,10 +76,6 @@ function wireVersion(transactionBase64: string): number | string {
   const tx = getTransactionDecoder().decode(getBase64Codec().encode(transactionBase64));
   return getCompiledTransactionMessageDecoder().decode(tx.messageBytes).version;
 }
-
-afterEach(() => {
-  reportedVersionOverride = undefined;
-});
 
 describe("transaction version constants", () => {
   it("advertises version 0 only; legacy is tolerated but never advertised", () => {
@@ -230,18 +193,22 @@ describe("verifier version gates", () => {
   // Any valid 32-byte base58 pubkey works as the recipient.
   const payTo = USDC_DEVNET_ADDRESS;
 
-  async function exactPayment(): Promise<{
+  async function exactPayment(version: 0 | "legacy" | 1 = 0): Promise<{
     transaction: string;
     requirements: PaymentRequirements;
   }> {
     const payer = await generateKeyPairSigner();
-    const transaction = await buildExactPaymentTransaction({
-      amount: 100000n,
-      feePayer: FEE_PAYER as never,
-      mint: USDC_DEVNET_ADDRESS as never,
-      payTo: payTo as never,
-      payer,
-    });
+    const transaction =
+      version === 1
+        ? await buildVersion1WireTransaction({ feePayer: FEE_PAYER as never, payer })
+        : await buildExactPaymentTransaction({
+            amount: 100000n,
+            feePayer: FEE_PAYER as never,
+            mint: USDC_DEVNET_ADDRESS as never,
+            payTo: payTo as never,
+            payer,
+            version,
+          });
     return {
       transaction,
       requirements: {
@@ -256,8 +223,9 @@ describe("verifier version gates", () => {
     };
   }
 
-  it("exact facilitator rejects an unmodelled message version before any other check", async () => {
-    const { transaction, requirements } = await exactPayment();
+  it("exact facilitator rejects a version 1 message before any other check", async () => {
+    const { transaction, requirements } = await exactPayment(1);
+    expect(wireVersion(transaction)).toBe(1);
     const payload: PaymentPayload = {
       x402Version: 2,
       resource: { url: "http://example.com/p", description: "", mimeType: "application/json" },
@@ -266,19 +234,23 @@ describe("verifier version gates", () => {
     };
     const facilitator = new ExactSvmFacilitatorScheme(facilitatorSigner());
 
-    reportedVersionOverride = 1;
+    // The v1 payload carries no transfer at all; a layout or amount error
+    // would surface first if the gate did not run before every other check.
     const rejected = await facilitator.verify(payload, requirements);
     expect(rejected.isValid).toBe(false);
     expect(rejected.invalidReason).toBe(Errors.ErrUnsupportedTransactionVersion);
     expect(rejected.invalidReason).toBe("unsupported_transaction_version");
 
-    reportedVersionOverride = undefined;
-    const control = await facilitator.verify(payload, requirements);
-    expect(control.invalidReason).not.toBe(Errors.ErrUnsupportedTransactionVersion);
+    const control = await exactPayment(0);
+    const accepted = await facilitator.verify(
+      { ...payload, accepted: control.requirements, payload: { transaction: control.transaction } },
+      control.requirements,
+    );
+    expect(accepted.invalidReason).not.toBe(Errors.ErrUnsupportedTransactionVersion);
   });
 
-  it("exact settle rejects an unmodelled version before duplicate detection", async () => {
-    const { transaction, requirements } = await exactPayment();
+  it("exact settle rejects a version 1 message before duplicate detection", async () => {
+    const { transaction, requirements } = await exactPayment(1);
     const payload: PaymentPayload = {
       x402Version: 2,
       resource: { url: "http://example.com/p", description: "", mimeType: "application/json" },
@@ -289,14 +261,14 @@ describe("verifier version gates", () => {
     cache.isDuplicate(transactionMessageHash(decodeTransactionFromPayload({ transaction })));
     const facilitator = new ExactSvmFacilitatorScheme(facilitatorSigner(), cache);
 
-    reportedVersionOverride = 1;
     const result = await facilitator.settle(payload, requirements);
     expect(result.success).toBe(false);
     expect(result.errorReason).toBe(Errors.ErrUnsupportedTransactionVersion);
   });
 
-  it("exact facilitator still accepts legacy-reported messages past the gate", async () => {
-    const { transaction, requirements } = await exactPayment();
+  it("exact facilitator still accepts a real legacy message past the gate", async () => {
+    const { transaction, requirements } = await exactPayment("legacy");
+    expect(wireVersion(transaction)).toBe("legacy");
     const payload: PaymentPayload = {
       x402Version: 2,
       resource: { url: "http://example.com/p", description: "", mimeType: "application/json" },
@@ -304,13 +276,12 @@ describe("verifier version gates", () => {
       payload: { transaction },
     };
     const facilitator = new ExactSvmFacilitatorScheme(facilitatorSigner());
-    reportedVersionOverride = "legacy";
     const result = await facilitator.verify(payload, requirements);
     expect(result.invalidReason).not.toBe(Errors.ErrUnsupportedTransactionVersion);
   });
 
-  it("legacy x402 v1 exact facilitator rejects an unmodelled message version", async () => {
-    const { transaction } = await exactPayment();
+  it("legacy x402 v1 exact facilitator rejects a version 1 message", async () => {
+    const { transaction } = await exactPayment(1);
     const requirements: PaymentRequirementsV1 = {
       scheme: "exact",
       network: "solana-devnet",
@@ -331,18 +302,20 @@ describe("verifier version gates", () => {
     };
     const facilitator = new ExactSvmSchemeV1(facilitatorSigner());
 
-    reportedVersionOverride = 1;
     const rejected = await facilitator.verify(payload, requirements);
     expect(rejected.isValid).toBe(false);
     expect(rejected.invalidReason).toBe("unsupported_transaction_version");
 
-    reportedVersionOverride = undefined;
-    const control = await facilitator.verify(payload, requirements);
+    const v0 = await exactPayment(0);
+    const control = await facilitator.verify(
+      { ...payload, payload: { transaction: v0.transaction } },
+      requirements,
+    );
     expect(control.invalidReason).not.toBe("unsupported_transaction_version");
   });
 
-  it("legacy x402 v1 settle rejects an unmodelled version before duplicate detection", async () => {
-    const { transaction } = await exactPayment();
+  it("legacy x402 v1 settle rejects a version 1 message before duplicate detection", async () => {
+    const { transaction } = await exactPayment(1);
     const requirements: PaymentRequirementsV1 = {
       scheme: "exact",
       network: "solana-devnet",
@@ -365,24 +338,20 @@ describe("verifier version gates", () => {
     cache.isDuplicate(transactionMessageHash(decodeTransactionFromPayload({ transaction })));
     const facilitator = new ExactSvmSchemeV1(facilitatorSigner(), cache);
 
-    reportedVersionOverride = 1;
     const result = await facilitator.settle(payload, requirements);
     expect(result.success).toBe(false);
     expect(result.errorReason).toBe(Errors.ErrUnsupportedTransactionVersion);
   });
 
-  it("smart wallet checks fail closed on an unmodelled message version", async () => {
-    const { transaction } = await exactPayment();
-    const decoded = decodeTransactionFromPayload({ transaction });
-
-    reportedVersionOverride = 1;
-    expect(() => validateComputeBudgetLimits(decoded)).toThrow(/^unsupported_transaction_version/);
-    await expect(assertFeePayerIsolated(decoded, FEE_PAYER)).rejects.toThrow(
+  it("smart wallet checks fail closed on a version 1 message", async () => {
+    const v1 = decodeTransactionFromPayload({ transaction: (await exactPayment(1)).transaction });
+    expect(() => validateComputeBudgetLimits(v1)).toThrow(/^unsupported_transaction_version/);
+    await expect(assertFeePayerIsolated(v1, FEE_PAYER)).rejects.toThrow(
       /^unsupported_transaction_version/,
     );
 
-    reportedVersionOverride = undefined;
-    expect(() => validateComputeBudgetLimits(decoded)).not.toThrow();
+    const v0 = decodeTransactionFromPayload({ transaction: (await exactPayment(0)).transaction });
+    expect(() => validateComputeBudgetLimits(v0)).not.toThrow();
   });
 
   it("a real version 0 wire transaction reports version 0", async () => {

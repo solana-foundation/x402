@@ -20,16 +20,14 @@ const (
 	// is left alone before the facilitator seals it to recover its rent.
 	DefaultAbandonGraceSecs = 120
 
-	// DefaultMaxReclaimsPerTx is how many reclaim instructions are packed into
-	// one cleanup transaction.
-	DefaultMaxReclaimsPerTx = 8
+	// DefaultMaxReclaimsPerTx is the v1 instruction ceiling. Actual batches are
+	// packed below this using their encoded wire size and static account count.
+	DefaultMaxReclaimsPerTx = solana.MaxInstructionsV1
 
-	// MaxSafeReclaimsPerTx is the largest reclaim batch proven, by
-	// TestReclaimBatchFitsInOneTransaction, to serialize under Solana's
-	// PACKET_DATA_SIZE (1232 bytes). MaxReclaimsPerTx is clamped to this so a
-	// misconfigured operator value can never build a reclaim transaction that
-	// fails to serialize or gets rejected on broadcast.
-	MaxSafeReclaimsPerTx = 16
+	// MaxSafeReclaimsPerTx is retained for API compatibility and now represents
+	// the v1 top-level instruction ceiling. Wire size and account count are
+	// checked independently for each candidate batch.
+	MaxSafeReclaimsPerTx = solana.MaxInstructionsV1
 
 	// DefaultMaxTxsPerRun caps the close/distribute transactions the storage
 	// scan submits per run.
@@ -165,17 +163,23 @@ type RentCleanupConfig struct {
 	Storage ChannelStorage
 	Network string
 
-	// ComputeUnitPriceMicroLamports is the SetComputeUnitPrice (microlamports
-	// per compute unit) attached to cleanup transactions; 0 omits the
-	// instruction. Unset defaults to svm.DefaultComputeUnitPriceMicrolamports.
+	// ComputeUnitPriceMicroLamports is converted to v1's total priority fee for
+	// cleanup transactions; 0 omits the config field. Unset defaults to
+	// svm.DefaultComputeUnitPriceMicrolamports.
 	ComputeUnitPriceMicroLamports *uint64
 
-	// SettleComputeUnitLimit is the SetComputeUnitLimit for close/distribute
+	// SettleComputeUnitLimit is the inline v1 compute limit for close/distribute
 	// cleanup transactions. Unset defaults to DefaultSettleComputeUnitLimit
 	// (100k, standard SPL Token settlement); raise it for compute-heavy
 	// Token-2022 extension mints. Reclaim batches instead derive their limit
 	// per channel (ReclaimComputeUnitLimit) and are mint-independent.
 	SettleComputeUnitLimit *uint32
+
+	// SettleLoadedAccountsDataSizeLimit is the inline v1 loaded-account-data
+	// budget for close/distribute cleanup transactions. Unset defaults to
+	// DefaultSettleLoadedAccountsDataSizeLimit (4 MiB, sized for a mainnet
+	// Token-2022 distribute). Reclaim batches derive their own budget.
+	SettleLoadedAccountsDataSizeLimit *uint32
 }
 
 // RentCleanupManager recovers the rent a facilitator fronts for payment
@@ -186,11 +190,12 @@ type RentCleanupConfig struct {
 // refunds the unsettled remainder to the client, so cleanup only kicks in
 // after the voucher deadline plus a grace period.
 type RentCleanupManager struct {
-	signer                        UptoFacilitatorSigner
-	storage                       ChannelStorage
-	network                       string
-	computeUnitPriceMicroLamports *uint64
-	settleComputeUnitLimit        *uint32
+	signer                            UptoFacilitatorSigner
+	storage                           ChannelStorage
+	network                           string
+	computeUnitPriceMicroLamports     *uint64
+	settleComputeUnitLimit            *uint32
+	settleLoadedAccountsDataSizeLimit *uint32
 
 	mu     sync.Mutex
 	cancel context.CancelFunc
@@ -217,11 +222,12 @@ func NewRentCleanupManager(config RentCleanupConfig) *RentCleanupManager {
 		panic("upto svm rent cleanup: signer is required")
 	}
 	return &RentCleanupManager{
-		signer:                        signer,
-		storage:                       config.Storage,
-		network:                       config.Network,
-		computeUnitPriceMicroLamports: config.ComputeUnitPriceMicroLamports,
-		settleComputeUnitLimit:        config.SettleComputeUnitLimit,
+		signer:                            signer,
+		storage:                           config.Storage,
+		network:                           config.Network,
+		computeUnitPriceMicroLamports:     config.ComputeUnitPriceMicroLamports,
+		settleComputeUnitLimit:            config.SettleComputeUnitLimit,
+		settleLoadedAccountsDataSizeLimit: config.SettleLoadedAccountsDataSizeLimit,
 	}
 }
 
@@ -599,6 +605,7 @@ func (m *RentCleanupManager) submitCloseOrDistribute(
 
 	return submitSettle(ctx, m.signer, feePayer, m.network, instructions, submitSettleOptions{
 		ComputeUnitLimit:              m.settleComputeUnitLimit,
+		LoadedAccountsDataSizeLimit:   m.settleLoadedAccountsDataSizeLimit,
 		ComputeUnitPriceMicroLamports: m.computeUnitPriceMicroLamports,
 	})
 }
@@ -660,42 +667,66 @@ func (m *RentCleanupManager) submitReclaimGroup(
 		return
 	}
 
-	for start := 0; start < len(group); start += opts.MaxReclaimsPerTx {
-		if atomic.AddInt64(budget, -1) < 0 {
-			atomic.AddInt64(budget, 1)
-			return
-		}
+	batch := m.refreshReclaimBatch(ctx, group, opts)
+	if len(batch) == 0 {
+		return
+	}
+
+	for offset := 0; offset < len(batch); {
 		if ctx.Err() != nil {
 			return
 		}
 
-		end := start + opts.MaxReclaimsPerTx
-		if end > len(group) {
-			end = len(group)
+		packed := make([]reclaimCandidate, 0, len(batch)-offset)
+		for _, candidate := range batch[offset:] {
+			next := make([]reclaimCandidate, len(packed)+1)
+			copy(next, packed)
+			next[len(packed)] = candidate
+			instructions := make([]solana.Instruction, 0, len(next))
+			for _, item := range next {
+				instructions = append(instructions,
+					paymentchannels.BuildReclaimInstruction(item.channelID, item.rentPayer))
+			}
+			reclaimLimit := ReclaimComputeUnitLimit(len(next))
+			loadedLimit := ReclaimLoadedAccountsDataSizeLimit(len(next))
+			if len(next) > opts.MaxReclaimsPerTx || !facilitatorV1TransactionFits(feePayer, instructions, submitSettleOptions{
+				ComputeUnitLimit:              &reclaimLimit,
+				LoadedAccountsDataSizeLimit:   &loadedLimit,
+				ComputeUnitPriceMicroLamports: m.computeUnitPriceMicroLamports,
+			}) {
+				break
+			}
+			packed = next
 		}
-		batch := m.refreshReclaimBatch(ctx, group[start:end], opts)
-		if len(batch) == 0 {
+		if len(packed) == 0 {
+			opts.reportError(fmt.Errorf("single reclaim instruction exceeds transaction v1 limits"), batch[offset].channelID.String())
+			offset++
 			continue
 		}
 
-		instructions := make([]solana.Instruction, 0, len(batch))
-		channelIDs := make([]string, 0, len(batch))
-		for _, candidate := range batch {
+		if atomic.AddInt64(budget, -1) < 0 {
+			atomic.AddInt64(budget, 1)
+			return
+		}
+		instructions := make([]solana.Instruction, 0, len(packed))
+		channelIDs := make([]string, 0, len(packed))
+		for _, candidate := range packed {
 			instructions = append(instructions,
 				paymentchannels.BuildReclaimInstruction(candidate.channelID, candidate.rentPayer))
 			channelIDs = append(channelIDs, candidate.channelID.String())
 		}
-
-		reclaimLimit := ReclaimComputeUnitLimit(len(batch))
+		reclaimLimit := ReclaimComputeUnitLimit(len(packed))
+		loadedLimit := ReclaimLoadedAccountsDataSizeLimit(len(packed))
 		signature, err := submitSettle(ctx, m.signer, feePayer, m.network, instructions, submitSettleOptions{
 			ComputeUnitLimit:              &reclaimLimit,
+			LoadedAccountsDataSizeLimit:   &loadedLimit,
 			ComputeUnitPriceMicroLamports: m.computeUnitPriceMicroLamports,
 		})
 		if err != nil {
-			// Every channel in the batch is stuck, not just the first.
 			for _, channelID := range channelIDs {
 				opts.reportError(err, channelID)
 			}
+			offset += len(packed)
 			continue
 		}
 		if opts.OnReclaim != nil {
@@ -706,6 +737,7 @@ func (m *RentCleanupManager) submitReclaimGroup(
 				opts.reportError(err, channelID)
 			}
 		}
+		offset += len(packed)
 	}
 }
 

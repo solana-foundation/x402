@@ -220,7 +220,9 @@ func (c *ExactSvmSchemeV1) CreatePaymentPayload(
 	// extra.transactionVersions (version 0 when absent). This client only
 	// produces version 0; a facilitator that accepts no version it can build
 	// is reported before signing.
-	tx.Message.SetVersion(version)
+	if _, err := tx.Message.SetVersion(version); err != nil {
+		return types.PaymentPayloadV1{}, fmt.Errorf("failed to set transaction version: %w", err)
+	}
 
 	// Partially sign with client's key
 	if err := c.signer.SignTransaction(ctx, tx); err != nil {

@@ -37,6 +37,7 @@ const (
 // Extra field names carried in PaymentRequirements.Extra for SVM `upto`.
 const (
 	ExtraFeePayer             = "feePayer"
+	ExtraTransactionVersions  = svm.ExtraTransactionVersions
 	ExtraReceiverAuthorizer   = "receiverAuthorizer"
 	ExtraWithdrawDelay        = "withdrawDelay"
 	ExtraTokenProgram         = "tokenProgram"

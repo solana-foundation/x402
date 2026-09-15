@@ -1,4 +1,4 @@
-import { generateKeyPairSigner } from "@solana/kit";
+import { generateKeyPairSigner, type Address } from "@solana/kit";
 import type { PaymentPayload, PaymentRequirements } from "@x402/core/types";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -65,6 +65,7 @@ import {
   ERR_UNEXPECTED_VOUCHER,
   UptoSvmScheme,
 } from "../../src/upto/facilitator/scheme";
+import { buildVersion1WireTransaction } from "./helpers/signedTransaction";
 import {
   InMemoryUptoDelegatedAuthStore,
   UptoDelegatedAuthIdentityConflictError,
@@ -187,6 +188,7 @@ describe("UptoSvmScheme facilitator channel lifecycle", () => {
       await buildFixture({
         computeUnitPriceMicroLamports: 7,
         settleComputeUnitLimit: 123_456,
+        settleLoadedAccountsDataSizeLimit: 2_097_152,
       });
 
     const voucherSignature = await signVoucher(receiverAuthorizer, {
@@ -211,6 +213,7 @@ describe("UptoSvmScheme facilitator channel lifecycle", () => {
       expect.anything(),
       expect.objectContaining({
         computeUnitLimit: 123_456,
+        loadedAccountsDataSizeLimit: 2_097_152,
         computeUnitPriceMicroLamports: 7,
       }),
     );
@@ -273,6 +276,26 @@ describe("UptoSvmScheme facilitator channel lifecycle", () => {
     expect(channelMocks.broadcastOpen).not.toHaveBeenCalled();
     expect(channelMocks.channelExists).not.toHaveBeenCalled();
     expect(channelMocks.fetchAndVerifyOpenChannel).not.toHaveBeenCalled();
+    expect(channelMocks.simulateOpenSettleDistribute).not.toHaveBeenCalled();
+  });
+
+  it("rejects a version 1 open with the spec's unsupported_transaction_version reason", async () => {
+    const { facilitator, payload, requirements, uptoPayload } = await buildFixture();
+    const openTransaction = await buildVersion1WireTransaction({
+      feePayer: requirements.extra!.feePayer as Address,
+      payer: await generateKeyPairSigner(),
+    });
+    const v1Payload = { ...payload, payload: { ...uptoPayload, openTransaction } };
+
+    await expect(facilitator.verify(v1Payload, requirements)).resolves.toMatchObject({
+      isValid: false,
+      invalidReason: "unsupported_transaction_version",
+    });
+    await expect(facilitator.settle(v1Payload, requirements)).resolves.toMatchObject({
+      success: false,
+      errorReason: "unsupported_transaction_version",
+    });
+    expect(channelMocks.broadcastOpen).not.toHaveBeenCalled();
     expect(channelMocks.simulateOpenSettleDistribute).not.toHaveBeenCalled();
   });
 
@@ -1375,6 +1398,7 @@ describe("UptoSvmScheme facilitator channel lifecycle", () => {
       const { facilitator } = await buildFixture();
       expect(facilitator.getExtra(SOLANA_DEVNET_CAIP2)).toEqual({
         feePayer: expect.any(String),
+        transactionVersions: [0],
       });
       expect(facilitator.getExtra(SOLANA_DEVNET_CAIP2)).not.toHaveProperty("receiverAuthorizer");
 
@@ -1386,6 +1410,7 @@ describe("UptoSvmScheme facilitator channel lifecycle", () => {
       expect(delegated.getExtra(SOLANA_DEVNET_CAIP2)).toEqual({
         feePayer: expect.any(String),
         receiverAuthorizer: authorizerSigner.address,
+        transactionVersions: [0],
       });
     });
 
