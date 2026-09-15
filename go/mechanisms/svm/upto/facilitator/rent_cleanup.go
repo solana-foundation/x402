@@ -183,6 +183,13 @@ type RentCleanupConfig struct {
 	// Token-2022 extension mints. Reclaim batches instead derive their limit
 	// per channel (paymentchannels.ReclaimComputeUnitLimit) and are mint-independent.
 	SettleComputeUnitLimit *uint32
+
+	// SettleLoadedAccountsDataSizeLimit is the inline v1 loaded-account-data
+	// budget for close/distribute cleanup transactions. Unset defaults to
+	// paymentchannels.DefaultSettleLoadedAccountsDataSizeLimit (4 MiB, sized
+	// for a mainnet Token-2022 settlement). Reclaim batches derive their own
+	// account-data limit per channel.
+	SettleLoadedAccountsDataSizeLimit *uint32
 }
 
 // RentCleanupManager recovers the rent a facilitator fronts for payment
@@ -206,6 +213,7 @@ func NewRentCleanupManager(config RentCleanupConfig) *RentCleanupManager {
 			Network:                       config.Network,
 			ComputeUnitPriceMicroLamports: config.ComputeUnitPriceMicroLamports,
 			SettleComputeUnitLimit:        config.SettleComputeUnitLimit,
+			SettleLoadedAccountsDataSizeLimit: config.SettleLoadedAccountsDataSizeLimit,
 			AbandonPolicy:                 paymentchannels.OpenAbandonPolicyExpiry,
 			SealClosingChannels:           &sealClosingChannels,
 			Label:                         "RentCleanupManager",

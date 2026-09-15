@@ -96,8 +96,12 @@ export const DEFAULT_CHANNEL_READ_BACKOFF_STEP_MS = 200;
  */
 export const DEFAULT_SETTLE_COMPUTE_UNIT_LIMIT = 100_000;
 
-/** Default inline loaded-account-data budget for facilitator settlements. */
-export const DEFAULT_SETTLE_LOADED_ACCOUNTS_DATA_SIZE_LIMIT = 1_048_576;
+/**
+ * Default inline loaded-account-data budget for facilitator settlements.
+ * Four MiB covers the mainnet Token-2022 program-data account (about 1.4 MiB)
+ * with room for the remaining programs and accounts loaded by a settlement.
+ */
+export const DEFAULT_SETTLE_LOADED_ACCOUNTS_DATA_SIZE_LIMIT = 4_194_304;
 
 /** Loaded-account-data budget shared by every reclaim batch. */
 export const RECLAIM_LOADED_ACCOUNTS_DATA_SIZE_BASE = 262_144;
