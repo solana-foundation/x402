@@ -67,14 +67,12 @@ type Config struct {
 	// rule applies.
 	MaxRequiredSignatures *int
 
-	// ComputeUnitPriceMicroLamports is the SetComputeUnitPrice (microlamports
-	// per compute unit) attached to facilitator-submitted settlement
-	// transactions (claim, zero-charge cancel, and rent cleanup via
-	// NewRentCleanupManager). A value of 0 omits the instruction. Unset
-	// defaults to svm.DefaultComputeUnitPriceMicrolamports.
+	// ComputeUnitPriceMicroLamports is converted to v1's total priority fee for
+	// facilitator-submitted settlement transactions. A value of 0 omits the
+	// config field. Unset defaults to svm.DefaultComputeUnitPriceMicrolamports.
 	ComputeUnitPriceMicroLamports *uint64
 
-	// SettleComputeUnitLimit is the SetComputeUnitLimit for
+	// SettleComputeUnitLimit is the inline v1 compute limit for
 	// facilitator-submitted settlement transactions (claim, zero-charge
 	// cancel, and rent-cleanup close/distribute). The default
 	// (DefaultSettleComputeUnitLimit, 100k) assumes standard SPL Token

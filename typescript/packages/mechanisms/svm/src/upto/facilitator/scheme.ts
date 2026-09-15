@@ -185,17 +185,15 @@ export interface UptoSvmFacilitatorConfig {
    */
   maxRequiredSignatures?: number;
   /**
-   * `SetComputeUnitPrice` (microlamports per compute unit) attached to
-   * facilitator-submitted settlement transactions (claim, zero-charge cancel,
-   * and rent cleanup via {@link UptoSvmScheme.createRentCleanupManager}).
-   * `0` omits the instruction. The priority fee is charged on the requested
-   * compute-unit limit, which these transactions size statically.
+   * Priority price (microlamports per compute unit) for facilitator-submitted
+   * v1 settlement transactions. It is converted to v1's total lamport fee;
+   * `0` omits the config field.
    *
    * Default: `DEFAULT_COMPUTE_UNIT_PRICE_MICROLAMPORTS` (1)
    */
   computeUnitPriceMicroLamports?: number;
   /**
-   * `SetComputeUnitLimit` for facilitator-submitted settlement transactions
+   * Inline v1 compute-unit limit for facilitator-submitted settlement transactions
    * (claim, zero-charge cancel, and rent-cleanup close/distribute). The
    * default (`DEFAULT_SETTLE_COMPUTE_UNIT_LIMIT` = 100k) assumes standard SPL
    * Token settlement with a single-recipient distribution; raise it for

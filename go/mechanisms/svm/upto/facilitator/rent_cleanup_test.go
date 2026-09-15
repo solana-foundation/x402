@@ -2,7 +2,6 @@ package facilitator
 
 import (
 	"context"
-	"encoding/binary"
 	"sync"
 	"testing"
 	"time"
@@ -133,8 +132,8 @@ func (h *cleanupHarness) exists(channelID string) bool {
 }
 
 // sentInstructionData returns the settlement instruction data for the
-// transaction at index, excluding the leading ComputeBudget prefix submitSettle
-// always attaches.
+// transaction at index. The ComputeBudget skip preserves compatibility with
+// simulated/client-built fixtures; facilitator v1 settlements contain none.
 func (h *cleanupHarness) sentInstructionData(index int) [][]byte {
 	h.t.Helper()
 	sent := h.signer.sentTransactions()
@@ -153,23 +152,16 @@ func (h *cleanupHarness) sentInstructionData(index int) [][]byte {
 	return data
 }
 
-// sentComputeUnitLimit extracts the SetComputeUnitLimit value from the leading
-// ComputeBudget prefix of the transaction at index.
+// sentComputeUnitLimit extracts the inline v1 compute limit.
 func (h *cleanupHarness) sentComputeUnitLimit(index int) uint32 {
 	h.t.Helper()
 	sent := h.signer.sentTransactions()
 	require.Greater(h.t, len(sent), index)
 
 	message := &sent[index].Message
-	for _, instruction := range message.Instructions {
-		program, err := message.Program(instruction.ProgramIDIndex)
-		require.NoError(h.t, err)
-		if program.Equals(solana.ComputeBudget) && instruction.Data[0] == paymentchannels.ComputeBudgetSetUnitLimit {
-			return binary.LittleEndian.Uint32(instruction.Data[1:5])
-		}
-	}
-	h.t.Fatalf("transaction %d has no SetComputeUnitLimit instruction", index)
-	return 0
+	require.Equal(h.t, solana.MessageVersionV1, message.GetVersion())
+	require.NotNil(h.t, message.TransactionConfig.ComputeUnitLimit)
+	return *message.TransactionConfig.ComputeUnitLimit
 }
 
 // closeAccountOnSend removes the channel account once the close lands, matching

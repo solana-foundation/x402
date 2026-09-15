@@ -75,7 +75,7 @@ func VerifyOpenTransaction(transactionBase64 string, expected VerifyOpenExpected
 	// shape this verifier models. Reject any other version before looking at
 	// a single instruction so nothing can pass vacuously.
 	if !svm.IsAcceptedTransactionVersion(message.GetVersion()) {
-		return nil, fmt.Errorf("%s: verifyOpenTransaction: unsupported transaction message version %d; open transactions must be legacy or version 0", svm.ErrUnsupportedTransactionVersion, message.GetVersion())
+		return nil, fmt.Errorf("%s: verifyOpenTransaction: unsupported transaction message version %d; open transactions must be legacy or version 0", svm.ErrUnsupportedTransactionVersion, int(message.GetVersion())-1)
 	}
 
 	// Address Lookup Tables hide instruction programs and accounts from the

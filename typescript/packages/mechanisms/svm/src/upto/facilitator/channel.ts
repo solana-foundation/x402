@@ -10,7 +10,6 @@
 import { sha256 } from "@noble/hashes/sha256";
 import {
   getSetComputeUnitLimitInstruction,
-  getSetComputeUnitPriceInstruction,
   parseSetComputeUnitPriceInstruction,
 } from "@solana-program/compute-budget";
 import {
@@ -19,6 +18,7 @@ import {
   addSignersToInstruction,
   appendTransactionMessageInstructions,
   type Blockhash,
+  compileTransactionMessage,
   createNoopSigner,
   createTransactionMessage,
   decompileTransactionMessage,
@@ -26,12 +26,14 @@ import {
   getBase64Codec,
   getBase64EncodedWireTransaction,
   getCompiledTransactionMessageDecoder,
+  getCompiledTransactionMessageEncoder,
   getTransactionDecoder,
   type Instruction,
   type MessagePartialSigner,
   partiallySignTransactionMessageWithSigners,
   pipe,
   setTransactionMessageFeePayerSigner,
+  setTransactionMessageConfig,
   setTransactionMessageLifetimeUsingBlockhash,
   type Signature,
   signTransactionMessageWithSigners,
@@ -78,7 +80,7 @@ export const DEFAULT_CHANNEL_READ_MAX_ATTEMPTS = 6;
 export const DEFAULT_CHANNEL_READ_BACKOFF_STEP_MS = 200;
 
 /**
- * Default `SetComputeUnitLimit` for facilitator-submitted settlement
+ * Default inline v1 compute-unit limit for facilitator-submitted settlement
  * transactions: claim (`settle_and_seal` + optional Ed25519 precompile +
  * `distribute`), the zero-charge cancel, and rent-cleanup close/distribute.
  * A measured claim with a warm recipient ATA consumes ~21.6k CU; a distribute
@@ -90,7 +92,24 @@ export const DEFAULT_CHANNEL_READ_BACKOFF_STEP_MS = 200;
  */
 export const DEFAULT_SETTLE_COMPUTE_UNIT_LIMIT = 100_000;
 
-/** Base `SetComputeUnitLimit` for a reclaim batch transaction. */
+/**
+ * Loaded-account-data budget for a normal facilitator settlement. This is
+ * deliberately far below the runtime maximum while leaving headroom for the
+ * payment-channel program, token program, mint and associated-token accounts.
+ */
+export const DEFAULT_SETTLE_LOADED_ACCOUNTS_DATA_SIZE_LIMIT = 1_048_576;
+
+/** Loaded-account-data budget shared by every reclaim batch. */
+export const RECLAIM_LOADED_ACCOUNTS_DATA_SIZE_BASE = 262_144;
+/** Extra loaded-account-data budget for each channel PDA in a reclaim batch. */
+export const RECLAIM_LOADED_ACCOUNTS_DATA_SIZE_PER_CHANNEL = 1_024;
+
+/** Transaction-v1 wire and structural limits mandated by SIMD-0385. */
+export const V1_MAX_TRANSACTION_SIZE = 4_096;
+export const V1_MAX_STATIC_ACCOUNTS = 64;
+export const V1_MAX_INSTRUCTIONS = 64;
+
+/** Base inline compute-unit limit for a reclaim batch transaction. */
 export const RECLAIM_COMPUTE_UNIT_BASE = 25_000;
 /**
  * Additional compute units budgeted per `reclaim` instruction in a batch. A
@@ -101,7 +120,7 @@ export const RECLAIM_COMPUTE_UNIT_BASE = 25_000;
 export const RECLAIM_COMPUTE_UNIT_PER_CHANNEL = 5_000;
 
 /**
- * `SetComputeUnitLimit` for a reclaim batch of `channelCount` channels,
+ * Inline compute-unit limit for a reclaim batch of `channelCount` channels,
  * clamped to the per-transaction maximum.
  *
  * @param channelCount - Number of `reclaim` instructions in the batch
@@ -112,6 +131,31 @@ export function reclaimComputeUnitLimit(channelCount: number): number {
     RECLAIM_COMPUTE_UNIT_BASE + RECLAIM_COMPUTE_UNIT_PER_CHANNEL * channelCount,
     MAX_TRANSACTION_COMPUTE_UNITS,
   );
+}
+
+/**
+ * Loaded-account-data budget for a reclaim batch.
+ *
+ * @param channelCount - Reclaim instructions in the transaction
+ * @returns Sized inline v1 loaded-account-data limit
+ */
+export function reclaimLoadedAccountsDataSizeLimit(channelCount: number): number {
+  return (
+    RECLAIM_LOADED_ACCOUNTS_DATA_SIZE_BASE +
+    RECLAIM_LOADED_ACCOUNTS_DATA_SIZE_PER_CHANNEL * channelCount
+  );
+}
+
+/**
+ * Convert the existing microlamports/CU operator setting to v1's total fee.
+ *
+ * @param computeUnitLimit - Configured compute-unit limit
+ * @param microLamports - Configured price per compute unit
+ * @returns Total priority fee in lamports, rounded up
+ */
+export function priorityFeeLamports(computeUnitLimit: number, microLamports: number): bigint {
+  if (microLamports <= 0) return 0n;
+  return (BigInt(computeUnitLimit) * BigInt(Math.trunc(microLamports)) + 999_999n) / 1_000_000n;
 }
 
 /** Signer capable of signing Solana transactions and raw Ed25519 messages. */
@@ -502,15 +546,17 @@ export async function simulateOpenSettleDistribute(
 /** Options for {@link submitSettle}. */
 export interface SubmitSettleOptions {
   /**
-   * `SetComputeUnitLimit` for the settlement transaction. Defaults to
+   * Inline v1 compute-unit limit for the settlement transaction. Defaults to
    * {@link DEFAULT_SETTLE_COMPUTE_UNIT_LIMIT} (100k), sized for standard SPL
    * Token settlement; raise it for compute-heavy Token-2022 extension mints
    * or unusually large distributions.
    */
   computeUnitLimit?: number | undefined;
+  /** Inline v1 loaded-account-data budget. */
+  loadedAccountsDataSizeLimit?: number | undefined;
   /**
-   * `SetComputeUnitPrice` in microlamports per compute unit attached to the
-   * settlement transaction; `0` omits the instruction. Defaults to
+   * Priority price in microlamports per compute unit, converted to v1's total
+   * lamport fee; `0` omits the config field. Defaults to
    * `DEFAULT_COMPUTE_UNIT_PRICE_MICROLAMPORTS` (1).
    */
   computeUnitPriceMicroLamports?: number | undefined;
@@ -519,6 +565,91 @@ export interface SubmitSettleOptions {
    * omitted, {@link submitSettle} fetches one via the signer.
    */
   latestBlockhash?: { blockhash: string; lastValidBlockHeight: bigint } | undefined;
+}
+
+/**
+ * Build the facilitator-owned v1 message used for both sizing and signing.
+ *
+ * @param feePayer - Facilitator fee payer
+ * @param instructions - Settlement instructions
+ * @param latestBlockhash - Transaction lifetime
+ * @param latestBlockhash.blockhash - Recent blockhash
+ * @param latestBlockhash.lastValidBlockHeight - Last valid height
+ * @param options - Inline config overrides
+ * @returns A signable v1 transaction message
+ */
+function buildSettleMessage(
+  feePayer: UptoSvmSigner,
+  instructions: readonly ServerInstruction[],
+  latestBlockhash: { blockhash: string; lastValidBlockHeight: bigint },
+  options: SubmitSettleOptions,
+) {
+  const computeUnitLimit = options.computeUnitLimit ?? DEFAULT_SETTLE_COMPUTE_UNIT_LIMIT;
+  const loadedAccountsDataSizeLimit =
+    options.loadedAccountsDataSizeLimit ?? DEFAULT_SETTLE_LOADED_ACCOUNTS_DATA_SIZE_LIMIT;
+  const computeUnitPrice =
+    options.computeUnitPriceMicroLamports ?? DEFAULT_COMPUTE_UNIT_PRICE_MICROLAMPORTS;
+  const fee = priorityFeeLamports(computeUnitLimit, computeUnitPrice);
+
+  return pipe(
+    createTransactionMessage({ version: 1 }),
+    m =>
+      setTransactionMessageConfig(
+        {
+          computeUnitLimit,
+          loadedAccountsDataSizeLimit,
+          ...(fee > 0n ? { priorityFeeLamports: fee } : {}),
+        },
+        m,
+      ),
+    m => setTransactionMessageFeePayerSigner(feePayer, m),
+    m =>
+      setTransactionMessageLifetimeUsingBlockhash(
+        {
+          blockhash: latestBlockhash.blockhash as Blockhash,
+          lastValidBlockHeight: latestBlockhash.lastValidBlockHeight,
+        },
+        m,
+      ),
+    m => appendTransactionMessageInstructions(instructions, m),
+  );
+}
+
+/**
+ * Whether a facilitator v1 transaction satisfies the serialized-size, static
+ * account and top-level instruction ceilings. Signatures are fixed-width in
+ * v1 and follow the encoded message, so they can be counted without signing.
+ *
+ * @param feePayer - Facilitator fee payer
+ * @param instructions - Candidate settlement instructions
+ * @param options - Inline config overrides used by the candidate
+ * @returns Whether all v1 envelope limits are satisfied
+ */
+export function facilitatorV1TransactionFits(
+  feePayer: UptoSvmSigner,
+  instructions: readonly ServerInstruction[],
+  options: SubmitSettleOptions = {},
+): boolean {
+  try {
+    const message = buildSettleMessage(
+      feePayer,
+      instructions,
+      { blockhash: SIM_PLACEHOLDER_BLOCKHASH, lastValidBlockHeight: 0n },
+      options,
+    );
+    const compiled = compileTransactionMessage(message);
+    if (
+      compiled.numStaticAccounts > V1_MAX_STATIC_ACCOUNTS ||
+      compiled.numInstructions > V1_MAX_INSTRUCTIONS
+    ) {
+      return false;
+    }
+    const messageSize = getCompiledTransactionMessageEncoder().encode(compiled).length;
+    const wireSize = messageSize + compiled.header.numSignerAccounts * 64;
+    return wireSize <= V1_MAX_TRANSACTION_SIZE;
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -543,9 +674,8 @@ export class SettlementSimulationError extends Error {
  * Other signers, such as the channel payee on `settle_and_seal`, are carried
  * by the instruction list.
  *
- * The transaction is prefixed with a statically sized `SetComputeUnitLimit`
- * and an optional `SetComputeUnitPrice`. Static sizing keeps the time-critical
- * claim free of extra RPC round-trips and failure modes; the limit is
+ * The v1 message carries a statically sized inline transaction config. Static
+ * sizing keeps the time-critical claim free of extra RPC round-trips and failure modes; the limit is
  * operator-overridable for deployments outside the documented assumptions.
  *
  * @param feePayer - The fee-payer signer
@@ -565,30 +695,8 @@ export async function submitSettle(
   instructions: readonly ServerInstruction[],
   options: SubmitSettleOptions = {},
 ): Promise<Signature> {
-  const computeUnitLimit = options.computeUnitLimit ?? DEFAULT_SETTLE_COMPUTE_UNIT_LIMIT;
-  const computeUnitPrice =
-    options.computeUnitPriceMicroLamports ?? DEFAULT_COMPUTE_UNIT_PRICE_MICROLAMPORTS;
-  const computeBudgetIxs: Instruction[] = [
-    getSetComputeUnitLimitInstruction({ units: computeUnitLimit }),
-    ...(computeUnitPrice > 0
-      ? [getSetComputeUnitPriceInstruction({ microLamports: computeUnitPrice })]
-      : []),
-  ];
-
   const latestBlockhash = options.latestBlockhash ?? (await signer.getLatestBlockhash(network));
-  const message = pipe(
-    createTransactionMessage({ version: 0 }),
-    m => setTransactionMessageFeePayerSigner(feePayer, m),
-    m =>
-      setTransactionMessageLifetimeUsingBlockhash(
-        {
-          blockhash: latestBlockhash.blockhash as Blockhash,
-          lastValidBlockHeight: latestBlockhash.lastValidBlockHeight,
-        },
-        m,
-      ),
-    m => appendTransactionMessageInstructions([...computeBudgetIxs, ...instructions], m),
-  );
+  const message = buildSettleMessage(feePayer, instructions, latestBlockhash, options);
   const signed = await signTransactionMessageWithSigners(message);
   const wire = getBase64EncodedWireTransaction(signed);
   try {

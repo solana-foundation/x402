@@ -10,6 +10,7 @@ import {
   getBase64Encoder,
   getTransactionDecoder,
   getCompiledTransactionMessageDecoder,
+  getInstructionsFromCompiledTransactionMessage,
   type Blockhash,
   type Transaction,
   createSolanaRpc,
@@ -137,23 +138,20 @@ export function resolveTransactionVersion(extra: Record<string, unknown> | undef
  */
 export function getTokenPayerFromTransaction(transaction: Transaction): string {
   const compiled = getCompiledTransactionMessageDecoder().decode(transaction.messageBytes);
-  const staticAccounts = compiled.staticAccounts ?? [];
-  const instructions = compiled.instructions ?? [];
+  const instructions = getInstructionsFromCompiledTransactionMessage(compiled);
 
   for (const ix of instructions) {
-    const programIndex = ix.programAddressIndex;
-    const programAddress = staticAccounts[programIndex].toString();
+    const programAddress = ix.programAddress.toString();
 
     // Check if this is a token program instruction
     if (
       programAddress === TOKEN_PROGRAM_ADDRESS.toString() ||
       programAddress === TOKEN_2022_PROGRAM_ADDRESS.toString()
     ) {
-      const accountIndices: number[] = ix.accountIndices ?? [];
+      const accounts = ix.accounts ?? [];
       // TransferChecked account order: [source, mint, destination, owner, ...]
-      if (accountIndices.length >= 4) {
-        const ownerIndex = accountIndices[3];
-        const ownerAddress = staticAccounts[ownerIndex].toString();
+      if (accounts.length >= 4) {
+        const ownerAddress = accounts[3].address.toString();
         if (ownerAddress) return ownerAddress;
       }
     }

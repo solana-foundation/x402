@@ -378,10 +378,9 @@ describe("UptoSvmRentCleanupManager — cleanup", () => {
     expect(submitSettleMock).toHaveBeenCalledTimes(1);
   });
 
-  // An operator-configured maxReclaimsPerTx above MAX_SAFE_RECLAIMS_PER_TX
-  // must be clamped, not honored: a larger batch risks failing to serialize
-  // or being rejected on broadcast (see the Go SDK's
-  // TestReclaimBatchFitsInOneTransaction, which proves the same ceiling).
+  // The option is clamped to the v1 instruction ceiling, then the packer uses
+  // the actual account/wire limits. A reclaim needs one distinct channel key;
+  // fee payer + program consume the other two v1 account slots.
   it("clamps maxReclaimsPerTx to MAX_SAFE_RECLAIMS_PER_TX", async () => {
     for (let i = 0; i < MAX_SAFE_RECLAIMS_PER_TX + 1; i++) {
       await seed();
@@ -394,7 +393,7 @@ describe("UptoSvmRentCleanupManager — cleanup", () => {
 
     expect(onReclaim).toHaveBeenCalledTimes(2);
     const batchSizes = onReclaim.mock.calls.map(call => call[0].channelIds.length as number);
-    expect(Math.max(...batchSizes)).toBe(MAX_SAFE_RECLAIMS_PER_TX);
+    expect(Math.max(...batchSizes)).toBe(MAX_SAFE_RECLAIMS_PER_TX - 2);
     expect(batchSizes.reduce((a, b) => a + b, 0)).toBe(MAX_SAFE_RECLAIMS_PER_TX + 1);
   });
 
