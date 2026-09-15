@@ -62,6 +62,10 @@ func (c *ExactSvmScheme) CreatePaymentPayload(
 	if !svm.IsValidNetwork(networkStr) {
 		return types.PaymentPayload{}, fmt.Errorf(ErrUnsupportedNetwork+": %s", requirements.Network)
 	}
+	version, err := svm.ResolveTransactionVersion(requirements.Extra)
+	if err != nil {
+		return types.PaymentPayload{}, err
+	}
 
 	// Get network configuration
 	config, err := svm.GetNetworkConfig(networkStr)
@@ -203,10 +207,6 @@ func (c *ExactSvmScheme) CreatePaymentPayload(
 	// extra.transactionVersions (version 0 when absent). This client only
 	// produces version 0; a facilitator that accepts no version it can build
 	// is reported before signing.
-	version, err := svm.ResolveTransactionVersion(requirements.Extra)
-	if err != nil {
-		return types.PaymentPayload{}, err
-	}
 	tx.Message.SetVersion(version)
 
 	// Partially sign with client's key

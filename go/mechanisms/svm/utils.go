@@ -306,9 +306,9 @@ func IsAcceptedTransactionVersion(version solana.MessageVersion) bool {
 
 // ResolveTransactionVersion picks the message version a client must build from
 // requirements.Extra["transactionVersions"]. Clients only ever build version 0:
-// an absent or malformed field means the facilitator predates advertisement and
-// accepts v0; a list that names 0 selects it; any other list is a facilitator
-// this client cannot serve, reported with ErrUnsupportedTransactionVersion.
+// an absent field means the facilitator predates advertisement and accepts v0;
+// a list that names 0 selects it; any other value is rejected with
+// ErrUnsupportedTransactionVersion.
 func ResolveTransactionVersion(extra map[string]interface{}) (solana.MessageVersion, error) {
 	if extra == nil {
 		return solana.MessageVersionV0, nil
@@ -337,7 +337,7 @@ func ResolveTransactionVersion(extra map[string]interface{}) (solana.MessageVers
 			}
 			return 0, fmt.Errorf("%s: facilitator accepts none of the transaction versions this client can build: %v", ErrUnsupportedTransactionVersion, typed)
 		default:
-			return solana.MessageVersionV0, nil
+			return 0, fmt.Errorf("%s: transactionVersions must be an array, got %T", ErrUnsupportedTransactionVersion, raw)
 		}
 	}
 	for _, entry := range list {

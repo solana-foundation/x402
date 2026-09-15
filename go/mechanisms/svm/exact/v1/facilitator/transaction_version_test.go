@@ -46,6 +46,7 @@ func TestExactSvmSchemeV1_VerifyRejectsUnsupportedTransactionVersion(t *testing.
 	require.Error(t, err)
 	require.True(t, errors.As(err, &ve))
 	assert.Equal(t, ErrUnsupportedTransactionVersion, ve.InvalidReason)
+	assert.Contains(t, ve.InvalidMessage, "version 1")
 	assert.Equal(t, 0, signer.signCalls)
 	assert.Equal(t, 0, signer.simulateCalls)
 }
@@ -63,5 +64,6 @@ func TestExactSvmSchemeV1_SettleRejectsUnsupportedTransactionVersion(t *testing.
 	require.Error(t, err)
 	require.True(t, errors.As(err, &se))
 	assert.Equal(t, ErrUnsupportedTransactionVersion, se.ErrorReason)
+	assert.Contains(t, se.ErrorMessage, "version 1")
 	assert.Equal(t, 0, signer.signCalls)
 }

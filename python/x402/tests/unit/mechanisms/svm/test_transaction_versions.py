@@ -35,6 +35,8 @@ from x402.mechanisms.svm.exact import (
 )
 from x402.mechanisms.svm.exact.v1 import ExactSvmSchemeV1Client, ExactSvmSchemeV1Facilitator
 from x402.mechanisms.svm.signers import KeypairSigner
+from x402.mechanisms.svm.utils import transaction_message_hash
+from x402.pending_settlement_store import InMemoryPendingSettlementStore
 from x402.schemas import PaymentPayload, PaymentRequirements, ResourceInfo, SupportedKind
 from x402.schemas.v1 import PaymentPayloadV1, PaymentRequirementsV1
 
@@ -123,9 +125,14 @@ class TestIsAcceptedTransactionVersion:
 
 
 class TestResolveTransactionVersion:
-    @pytest.mark.parametrize("extra", [None, {}, {"transactionVersions": "0"}])
-    def test_absent_or_malformed_defaults_to_v0(self, extra):
+    @pytest.mark.parametrize("extra", [None, {}])
+    def test_absent_defaults_to_v0(self, extra):
         assert resolve_transaction_version(extra) == 0
+
+    @pytest.mark.parametrize("advertised", ["0", 0, None])
+    def test_rejects_malformed_metadata(self, advertised):
+        with pytest.raises(ValueError, match=f"^{ERR_UNSUPPORTED_TRANSACTION_VERSION}"):
+            resolve_transaction_version({"transactionVersions": advertised})
 
     @pytest.mark.parametrize("advertised", [[0], [0, 1], ["legacy", 0], [1, 0]])
     def test_picks_v0_when_advertised(self, advertised):
@@ -285,20 +292,22 @@ class TestClientBuildsAdvertisedVersion:
     def test_v2_client_refuses_when_v0_not_advertised(self, advertised):
         client = ExactSvmClientScheme(KeypairSigner(Keypair.from_seed(bytes([1] * 32))))
         with (
-            patch.object(client, "_get_client", return_value=self._mock_rpc_client()),
+            patch.object(client, "_get_client") as get_client,
             pytest.raises(ValueError, match=f"^{ERR_UNSUPPORTED_TRANSACTION_VERSION}"),
         ):
             client.create_payment_payload(
                 self._v2_requirements({"transactionVersions": advertised})
             )
+        get_client.assert_not_called()
 
     def test_v1_client_refuses_when_v0_not_advertised(self):
         client = ExactSvmSchemeV1Client(KeypairSigner(Keypair.from_seed(bytes([1] * 32))))
         with (
-            patch.object(client, "_get_client", return_value=self._mock_rpc_client()),
+            patch.object(client, "_get_client") as get_client,
             pytest.raises(ValueError, match=f"^{ERR_UNSUPPORTED_TRANSACTION_VERSION}"),
         ):
             client.create_payment_payload(self._v1_requirements({"transactionVersions": [1]}))
+        get_client.assert_not_called()
 
 
 class TestFacilitatorGate:
@@ -366,8 +375,13 @@ class TestFacilitatorGate:
         assert result.invalid_reason == ERR_UNSUPPORTED_TRANSACTION_VERSION
 
     def test_v2_settle_rejects_unmodelled_version(self):
-        facilitator = ExactSvmFacilitatorScheme(MockFacilitatorSigner())
-        payload, requirements = self._v2_pair(_v0_tx())
+        tx = _v0_tx()
+        pending_store = InMemoryPendingSettlementStore()
+        pending_store.set(transaction_message_hash(tx), "mockSignature123")
+        facilitator = ExactSvmFacilitatorScheme(
+            MockFacilitatorSigner(), pending_store=pending_store
+        )
+        payload, requirements = self._v2_pair(tx)
         with patch(
             "x402.mechanisms.svm.exact.facilitator.get_transaction_version",
             return_value=1,

@@ -64,6 +64,16 @@ func (c *ExactSvmSchemeV1) CreatePaymentPayload(
 	if !svm.IsValidNetwork(networkStr) {
 		return types.PaymentPayloadV1{}, fmt.Errorf(ErrUnsupportedNetwork+": %s", requirements.Network)
 	}
+	var extraMap map[string]interface{}
+	if requirements.Extra != nil {
+		if err := json.Unmarshal(*requirements.Extra, &extraMap); err != nil {
+			return types.PaymentPayloadV1{}, fmt.Errorf(ErrInvalidExtraField+": %w", err)
+		}
+	}
+	version, err := svm.ResolveTransactionVersion(extraMap)
+	if err != nil {
+		return types.PaymentPayloadV1{}, err
+	}
 
 	// Get network configuration
 	config, err := svm.GetNetworkConfig(networkStr)
@@ -128,13 +138,6 @@ func (c *ExactSvmSchemeV1) CreatePaymentPayload(
 	}
 
 	// Get fee payer from requirements.extra (unmarshal Extra from json.RawMessage)
-	var extraMap map[string]interface{}
-	if requirements.Extra != nil {
-		if err := json.Unmarshal(*requirements.Extra, &extraMap); err != nil {
-			return types.PaymentPayloadV1{}, fmt.Errorf(ErrInvalidExtraField+": %w", err)
-		}
-	}
-
 	feePayerAddr, ok := extraMap["feePayer"].(string)
 	if !ok {
 		return types.PaymentPayloadV1{}, errors.New(ErrFeePayerRequired)
@@ -217,10 +220,6 @@ func (c *ExactSvmSchemeV1) CreatePaymentPayload(
 	// extra.transactionVersions (version 0 when absent). This client only
 	// produces version 0; a facilitator that accepts no version it can build
 	// is reported before signing.
-	version, err := svm.ResolveTransactionVersion(extraMap)
-	if err != nil {
-		return types.PaymentPayloadV1{}, err
-	}
 	tx.Message.SetVersion(version)
 
 	// Partially sign with client's key
