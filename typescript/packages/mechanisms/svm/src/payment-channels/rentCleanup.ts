@@ -365,6 +365,13 @@ export interface PaymentChannelRentCleanupManagerConfig {
    */
   settleComputeUnitLimit?: number;
   /**
+   * Inline v1 loaded-account-data budget for close/distribute cleanup
+   * transactions. Defaults to
+   * `DEFAULT_SETTLE_LOADED_ACCOUNTS_DATA_SIZE_LIMIT` (4 MiB). Reclaim batches
+   * derive their own budget per channel.
+   */
+  settleLoadedAccountsDataSizeLimit?: number;
+  /**
    * Default idle window for passes that do not set
    * {@link RentCleanupOptions.maxIdleSecs}. Facilitator schemes pass the value
    * they advertise so cleanup and advertisement cannot diverge. Used only by
@@ -401,6 +408,7 @@ export class PaymentChannelRentCleanupManager {
   private readonly network: Network;
   private readonly computeUnitPriceMicroLamports: number | undefined;
   private readonly settleComputeUnitLimit: number | undefined;
+  private readonly settleLoadedAccountsDataSizeLimit: number | undefined;
   private readonly maxIdleSecs: number | undefined;
   private readonly abandonPolicy: OpenAbandonPolicy;
   private readonly sealClosingChannels: boolean;
@@ -450,6 +458,7 @@ export class PaymentChannelRentCleanupManager {
     this.network = config.network;
     this.computeUnitPriceMicroLamports = config.computeUnitPriceMicroLamports;
     this.settleComputeUnitLimit = config.settleComputeUnitLimit;
+    this.settleLoadedAccountsDataSizeLimit = config.settleLoadedAccountsDataSizeLimit;
     this.maxIdleSecs = config.maxIdleSecs;
     this.abandonPolicy = config.abandonPolicy ?? "idle";
     this.sealClosingChannels = config.sealClosingChannels ?? true;
@@ -847,6 +856,7 @@ export class PaymentChannelRentCleanupManager {
       instructions,
       {
         computeUnitLimit: this.settleComputeUnitLimit,
+        loadedAccountsDataSizeLimit: this.settleLoadedAccountsDataSizeLimit,
         computeUnitPriceMicroLamports: this.computeUnitPriceMicroLamports,
       },
     );
@@ -966,7 +976,9 @@ export class PaymentChannelRentCleanupManager {
     // Refetch each account immediately before acting (stale -> skip).
     const rpc = accountFetchRpc(this.signer, this.network);
     const liveBatch: ReclaimCandidate[] = [];
+    const maxLive = budget.remaining * opts.maxReclaimsPerTx;
     for (const candidate of group) {
+      if (liveBatch.length >= maxLive) break;
       try {
         const maybe = await fetchMaybeChannel(rpc, address(candidate.channelId), {
           commitment: STATE_COMMITMENT,

@@ -55,7 +55,10 @@ import {
   TransactionOnchainFailureError,
   validateSvmAddress,
 } from "../../utils";
-import { ErrSettlementPending } from "../../exact/facilitator/errors";
+import {
+  ErrSettlementPending,
+  ErrUnsupportedTransactionVersion,
+} from "../../exact/facilitator/errors";
 import {
   CallerIdentityConflictError,
   assertPaymentChannelStorage,
@@ -83,6 +86,14 @@ export const ERR_CHANNEL_ALREADY_OPEN = "invalid_upto_svm_channel_already_open";
  * reached the chain and the deposit is safe to retry.
  */
 export const ERR_CHANNEL_BROADCAST = "invalid_upto_svm_channel_broadcast";
+
+/** Map unsupported client transaction versions to their stable reason code. */
+function openTransactionFailureReason(error: unknown, fallback: string): string {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.startsWith(ErrUnsupportedTransactionVersion)
+    ? ErrUnsupportedTransactionVersion
+    : fallback;
+}
 
 /** `maxTimeoutSeconds` or `expiresAt` exceeds facilitator `maxChannelLifetimeSecs`. */
 export const ERR_CHANNEL_LIFETIME_EXCEEDED = "invalid_upto_svm_payload_channel_lifetime_exceeded";
@@ -204,6 +215,12 @@ export interface UptoSvmFacilitatorConfig {
    */
   settleComputeUnitLimit?: number;
   /**
+   * Inline v1 loaded-account-data budget for facilitator-submitted settlement
+   * transactions. Defaults to 4 MiB, sized for mainnet Token-2022. Reclaim
+   * batches derive their own budget per channel.
+   */
+  settleLoadedAccountsDataSizeLimit?: number;
+  /**
    * Lets a retried deposit (open) or claim (settle_and_seal + distribute)
    * settle for the same channel reconcile against an already-broadcast
    * signature instead of re-broadcasting (see {@link PendingSettlementStore}).
@@ -308,6 +325,7 @@ export class UptoSvmScheme implements SchemeNetworkFacilitator {
     assertLimit("maxRequiredSignatures", config.maxRequiredSignatures, 1);
     assertLimit("computeUnitPriceMicroLamports", config.computeUnitPriceMicroLamports, 0);
     assertLimit("settleComputeUnitLimit", config.settleComputeUnitLimit, 1);
+    assertLimit("settleLoadedAccountsDataSizeLimit", config.settleLoadedAccountsDataSizeLimit, 1);
     assertPaymentChannelFacilitatorSigner(signer, "UptoSvmScheme");
     this.signer = signer;
     this.getKitSigner = signer.getSigner.bind(signer);
@@ -357,6 +375,7 @@ export class UptoSvmScheme implements SchemeNetworkFacilitator {
       computeUnitPriceMicroLamports: this.config.computeUnitPriceMicroLamports,
       network,
       settleComputeUnitLimit: this.config.settleComputeUnitLimit,
+      settleLoadedAccountsDataSizeLimit: this.config.settleLoadedAccountsDataSizeLimit,
       signer: cleanupSigner,
       storage: this.channelStorage,
     });
@@ -712,7 +731,10 @@ export class UptoSvmScheme implements SchemeNetworkFacilitator {
         success: false,
         network: payload.accepted.network,
         transaction: "",
-        errorReason: "invalid_upto_svm_settlement_simulation",
+        errorReason: openTransactionFailureReason(
+          error,
+          "invalid_upto_svm_settlement_simulation",
+        ),
         errorMessage: error instanceof Error ? error.message : String(error),
         payer: p.from,
       };
@@ -1064,6 +1086,7 @@ export class UptoSvmScheme implements SchemeNetworkFacilitator {
         instructions,
         {
           computeUnitLimit: this.config.settleComputeUnitLimit,
+          loadedAccountsDataSizeLimit: this.config.settleLoadedAccountsDataSizeLimit,
           computeUnitPriceMicroLamports: this.config.computeUnitPriceMicroLamports,
           latestBlockhash: prefetchedBlockhash,
         },
@@ -1415,7 +1438,10 @@ export class UptoSvmScheme implements SchemeNetworkFacilitator {
       return {
         ok: false,
         failure: {
-          reason: "invalid_upto_svm_payload_open_transaction",
+          reason: openTransactionFailureReason(
+            error,
+            "invalid_upto_svm_payload_open_transaction",
+          ),
           message: error instanceof Error ? error.message : String(error),
           payer: p.from,
         },
