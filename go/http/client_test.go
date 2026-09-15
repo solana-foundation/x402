@@ -84,6 +84,144 @@ func TestPaymentRoundTripper_OnPaymentRequiredHeaderRetry(t *testing.T) {
 	}
 }
 
+func TestReadLimitedBody(t *testing.T) {
+	t.Run("short body", func(t *testing.T) {
+		body, err := readLimitedBody(strings.NewReader("response"))
+		if err != nil {
+			t.Fatalf("readLimitedBody() error = %v", err)
+		}
+		if string(body) != "response" {
+			t.Fatalf("readLimitedBody() body = %q, want response", body)
+		}
+	})
+
+	t.Run("exact limit", func(t *testing.T) {
+		body, err := readLimitedBody(io.LimitReader(testZeroReader{}, maxControlPlaneResponseBytes))
+		if err != nil {
+			t.Fatalf("readLimitedBody() error = %v", err)
+		}
+		if int64(len(body)) != maxControlPlaneResponseBytes {
+			t.Fatalf("readLimitedBody() length = %d, want %d", len(body), maxControlPlaneResponseBytes)
+		}
+	})
+
+	t.Run("over limit", func(t *testing.T) {
+		body, err := readLimitedBody(io.LimitReader(testZeroReader{}, maxControlPlaneResponseBytes+1))
+		if body != nil {
+			t.Fatalf("readLimitedBody() body length = %d, want nil", len(body))
+		}
+		if !errors.Is(err, ErrResponseBodyTooLarge) {
+			t.Fatalf("readLimitedBody() error = %v, want ErrResponseBodyTooLarge", err)
+		}
+	})
+
+	t.Run("reader error", func(t *testing.T) {
+		readErr := errors.New("read failed")
+		body, err := readLimitedBody(errorReader{err: readErr})
+		if body != nil {
+			t.Fatalf("readLimitedBody() body length = %d, want nil", len(body))
+		}
+		if !errors.Is(err, readErr) {
+			t.Fatalf("readLimitedBody() error = %v, want %v", err, readErr)
+		}
+	})
+}
+
+type errorReader struct {
+	err error
+}
+
+func (r errorReader) Read([]byte) (int, error) {
+	return 0, r.err
+}
+
+func TestPaymentRoundTripper_RejectsOversizedInitial402(t *testing.T) {
+	body := &oneShotBody{reader: io.LimitReader(testZeroReader{}, maxControlPlaneResponseBytes+1)}
+	rt := &PaymentRoundTripper{
+		Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusPaymentRequired,
+				Header:     make(http.Header),
+				Body:       body,
+			}, nil
+		}),
+		retryCount: &sync.Map{},
+	}
+
+	req, err := http.NewRequest(http.MethodGet, "https://api.example.com/data", nil)
+	if err != nil {
+		t.Fatalf("NewRequest() error = %v", err)
+	}
+	resp, err := rt.RoundTrip(req)
+	if resp != nil {
+		resp.Body.Close()
+		t.Fatalf("RoundTrip() response = %v, want nil", resp)
+	}
+	if !errors.Is(err, ErrResponseBodyTooLarge) {
+		t.Fatalf("RoundTrip() error = %v, want ErrResponseBodyTooLarge", err)
+	}
+	if !body.closed {
+		t.Fatal("response body was not closed")
+	}
+}
+
+func TestPaymentRoundTripper_RejectsOversizedAuthRetry402(t *testing.T) {
+	required := types.PaymentRequired{
+		X402Version: 2,
+		Extensions: map[string]interface{}{
+			"sign-in-with-x": map[string]interface{}{"info": map[string]interface{}{"nonce": "abc"}},
+		},
+		Accepts: []types.PaymentRequirements{
+			{Scheme: "exact", Network: "eip155:1"},
+		},
+	}
+	encodedRequired, err := encodePaymentRequiredHeader(required)
+	if err != nil {
+		t.Fatalf("encodePaymentRequiredHeader() error = %v", err)
+	}
+
+	authBody := &oneShotBody{reader: io.LimitReader(testZeroReader{}, maxControlPlaneResponseBytes+1)}
+	transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if req.Header.Get("SIGN-IN-WITH-X") == "" {
+			return stringResponse(http.StatusPaymentRequired, map[string]string{
+				"PAYMENT-REQUIRED": encodedRequired,
+			}, "")
+		}
+		return &http.Response{
+			StatusCode: http.StatusPaymentRequired,
+			Header:     make(http.Header),
+			Body:       authBody,
+		}, nil
+	})
+	client := Newx402HTTPClient(x402.Newx402Client()).
+		OnPaymentRequired(func(context.Context, types.PaymentRequired, string) (*PaymentRequiredHookResult, error) {
+			return &PaymentRequiredHookResult{
+				Headers: map[string]string{"SIGN-IN-WITH-X": "signed"},
+			}, nil
+		})
+	rt := &PaymentRoundTripper{
+		Transport:  transport,
+		x402Client: client,
+		retryCount: &sync.Map{},
+	}
+
+	req, err := http.NewRequest(http.MethodGet, "https://api.example.com/profile", nil)
+	if err != nil {
+		t.Fatalf("NewRequest() error = %v", err)
+	}
+	resp, err := rt.RoundTrip(req)
+	if resp != nil {
+		resp.Body.Close()
+		t.Fatalf("RoundTrip() response = %v, want nil", resp)
+	}
+	if !errors.Is(err, ErrResponseBodyTooLarge) {
+		t.Fatalf("RoundTrip() error = %v, want ErrResponseBodyTooLarge", err)
+	}
+	if !authBody.closed {
+		t.Fatal("auth retry response body was not closed")
+	}
+}
+
 func TestPaymentRoundTripper_OnPaymentRequiredHookSkippedWithoutHeaders(t *testing.T) {
 	required := types.PaymentRequired{
 		X402Version: 2,
@@ -368,6 +506,13 @@ type oneShotBody struct {
 	closeCalls int
 }
 
+type testZeroReader struct{}
+
+func (testZeroReader) Read(p []byte) (int, error) {
+	clear(p)
+	return len(p), nil
+}
+
 type failingBody struct {
 	readErr    error
 	closeErr   error
@@ -611,6 +756,26 @@ func TestEncodePaymentResponseHeader_ChannelStateOrder(t *testing.T) {
 			t.Fatalf("field %s out of order in %s", field, body)
 		}
 		last = idx
+	}
+}
+
+func TestEncodePaymentResponseHeaderOmitsExtensionResponses(t *testing.T) {
+	encoded, err := encodePaymentResponseHeader(x402.SettleResponse{
+		Success:            true,
+		Transaction:        "0xtx",
+		Network:            "eip155:1",
+		ExtensionResponses: map[string]interface{}{"bazaar": map[string]interface{}{"status": "accepted"}},
+	})
+	if err != nil {
+		t.Fatalf("encodePaymentResponseHeader: %v", err)
+	}
+
+	decoded, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if strings.Contains(string(decoded), "extensionResponses") || strings.Contains(string(decoded), "bazaar") {
+		t.Fatalf("extension responses leaked into PAYMENT-RESPONSE: %s", decoded)
 	}
 }
 

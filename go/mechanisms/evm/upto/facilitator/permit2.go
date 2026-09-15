@@ -44,11 +44,8 @@ func VerifyUptoPermit2(
 
 	tokenAddress := evm.NormalizeAddress(requirements.Asset)
 
-	if errReason, err := evm.ValidateAssetIsContract(ctx, signer, requirements.Asset); err != nil {
-		return nil, fmt.Errorf("asset contract check failed: %w", err)
-	} else if errReason != "" {
-		return nil, x402.NewVerifyError(errReason, payer, fmt.Sprintf("asset %s is not a deployed contract", requirements.Asset))
-	}
+	// Run the asset-contract check concurrently with the signature check below.
+	assetCheck := evm.StartAssetContractCheck(ctx, signer, string(requirements.Network), requirements.Asset)
 
 	if !strings.EqualFold(permit2Payload.Permit2Authorization.Spender, evm.X402UptoPermit2ProxyAddress) {
 		return nil, x402.NewVerifyError(ErrPermit2InvalidSpender, payer, "invalid spender")
@@ -110,10 +107,24 @@ func VerifyUptoPermit2(
 		return nil, x402.NewVerifyError(ErrInvalidSignatureFormat, payer, err.Error())
 	}
 
-	sigValid, sigErr := verifyUptoPermit2Signature(ctx, signer, permit2Payload.Permit2Authorization, signatureBytes, chainID)
+	sigValid, sigData, sigErr := verifyUptoPermit2Signature(ctx, signer, permit2Payload.Permit2Authorization, signatureBytes, chainID)
+
+	assetReason, assetErr := assetCheck.Await()
+	if assetErr != nil {
+		return nil, fmt.Errorf("asset contract check failed: %w", assetErr)
+	}
+	if assetReason != "" {
+		return nil, x402.NewVerifyError(assetReason, payer, fmt.Sprintf("asset %s is not a deployed contract", requirements.Asset))
+	}
+
 	if sigErr != nil || !sigValid {
-		code, codeErr := signer.GetCode(ctx, payer)
-		if codeErr != nil || len(code) == 0 {
+		deployed := false
+		if sigData != nil {
+			deployed = sigData.CodeDeployed
+		} else if code, codeErr := signer.GetCode(ctx, payer); codeErr == nil {
+			deployed = len(code) > 0
+		}
+		if !deployed {
 			return nil, x402.NewVerifyError(ErrPermit2InvalidSignature, payer, "invalid signature")
 		}
 	}
@@ -383,23 +394,23 @@ func SettleUptoPermit2(
 	)
 }
 
+// verifyUptoPermit2Signature verifies the upto Permit2 EIP-712 signature.
 func verifyUptoPermit2Signature(
 	ctx context.Context,
 	signer evm.FacilitatorEvmSigner,
 	authorization evm.UptoPermit2Authorization,
 	signature []byte,
 	chainID *big.Int,
-) (bool, error) {
+) (bool, *evm.ERC6492SignatureData, error) {
 	hash, err := evm.HashUptoPermit2Authorization(authorization, chainID)
 	if err != nil {
-		return false, err
+		return false, nil, err
 	}
 
 	var hash32 [32]byte
 	copy(hash32[:], hash)
 
-	valid, _, err := evm.VerifyUniversalSignature(ctx, signer, authorization.From, hash32, signature, true)
-	return valid, err
+	return evm.VerifyUniversalSignature(ctx, signer, authorization.From, hash32, signature, true)
 }
 
 var validateEip2612PermitForPayment = evm.ValidateEip2612PermitForPayment

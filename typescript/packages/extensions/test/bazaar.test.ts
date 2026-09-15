@@ -1972,6 +1972,28 @@ describe("Bazaar Discovery Extension", () => {
       expect(input.pathParams).toEqual({ var1: "san-francisco" });
     });
 
+    it("should not emit routeTemplate for a bare wildcard * pattern", () => {
+      const declared = declareDiscoveryExtension({
+        input: {},
+        inputSchema: { properties: {} },
+      });
+      const extension = declared.bazaar;
+
+      const httpContext: HTTPRequestContext = {
+        method: "GET",
+        path: "/api/rotation",
+        routePattern: "*",
+        adapter: createMockAdapterWithPath("/api/rotation"),
+      };
+
+      const enriched = bazaarResourceServerExtension.enrichDeclaration!(
+        extension,
+        httpContext,
+      ) as Record<string, unknown>;
+
+      expect(enriched.routeTemplate).toBeUndefined();
+    });
+
     it("should auto-convert multiple wildcards to :var1, :var2, etc.", () => {
       const declared = declareDiscoveryExtension({
         input: {},
@@ -2116,6 +2138,42 @@ describe("Bazaar Discovery Extension", () => {
     it("rejects percent-encoded traversal sequences", () => {
       expect(isValidRouteTemplate("/users/%2e%2e/admin")).toBe(false);
       expect(isValidRouteTemplate("/users/%2E%2E/admin")).toBe(false);
+    });
+
+    it("rejects double-encoded traversal sequences (regression for double-decode bypass)", () => {
+      // %25 decodes to "%", so %252e%252e decodes-once to "%2e%2e" (still
+      // encoded) and only decodes-twice to "..". A single-pass decode
+      // wouldn't see the traversal here.
+      expect(isValidRouteTemplate("/users/%252e%252e/admin")).toBe(false);
+      expect(isValidRouteTemplate("/users/%252E%252E/admin")).toBe(false);
+    });
+
+    it("rejects triple-encoded traversal sequences", () => {
+      expect(isValidRouteTemplate("/users/%25252e%25252e/admin")).toBe(false);
+    });
+
+    it("rejects double-encoded scheme injection", () => {
+      // %3a decodes to ":", %2f decodes to "/" — %253a%252f%252f decodes-once
+      // to "%3a%2f%2f" (still encoded) and decodes-twice to "://".
+      expect(isValidRouteTemplate("/users/javascript%253a%252f%252fevil")).toBe(false);
+    });
+
+    it("still accepts a legitimate single percent-encoded segment", () => {
+      // One decode pass resolves this to plain text with no further
+      // encoding, reaching a fixed point immediately — must not be rejected
+      // just for containing a "%".
+      expect(isValidRouteTemplate("/search/caf%C3%A9")).toBe(true);
+    });
+
+    it("rejects a value whose percent-encoding never resolves to a fixed point", () => {
+      // Pathologically deep encoding (more than the decode-pass budget) has
+      // no safe canonical form to validate — reject rather than decode
+      // indefinitely. ":" is re-encoded ("%3A" → "%253A" → ...) on every
+      // encodeURIComponent pass, so this compounds correctly (unlike "..",
+      // whose dots encodeURIComponent leaves untouched).
+      let value: string = ":";
+      for (let i = 0; i < 8; i++) value = encodeURIComponent(value);
+      expect(isValidRouteTemplate(`/users/x${value}/admin`)).toBe(false);
     });
   });
 
@@ -2572,6 +2630,24 @@ describe("Bazaar Discovery Extension", () => {
       validateBazaarRouteExtensions(routes);
       expect(spy).toHaveBeenCalledTimes(1);
       expect(spy.mock.calls[0][0]).toContain("invalid bazaar extension");
+      spy.mockRestore();
+    });
+
+    it("should warn for a malformed bazaar extension object", () => {
+      const spy = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const routes = {
+        "/api": {
+          accepts: [
+            { scheme: "exact", payTo: "0x1", price: "$0.01", network: "eip155:1" as const },
+          ],
+          extensions: {
+            bazaar: { info: { input: { method: "GET" } } },
+          },
+        },
+      };
+      validateBazaarRouteExtensions(routes);
+      expect(spy).toHaveBeenCalledTimes(1);
+      expect(spy.mock.calls[0][0]).toContain("malformed");
       spy.mockRestore();
     });
   });
