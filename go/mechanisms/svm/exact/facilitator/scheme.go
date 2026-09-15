@@ -219,7 +219,7 @@ func (f *ExactSvmScheme) verify(
 	// Message version gate, before any signature or instruction check: every
 	// check below reads its sponsorship policy from version-specific structure.
 	if !svm.IsAcceptedTransactionVersion(tx.Message.GetVersion()) {
-		return nil, x402.NewVerifyError(ErrUnsupportedTransactionVersion, "", fmt.Sprintf("unsupported transaction message version %d", tx.Message.GetVersion()))
+		return nil, x402.NewVerifyError(ErrUnsupportedTransactionVersion, "", fmt.Sprintf("unsupported transaction message version %d", int(tx.Message.GetVersion())-1))
 	}
 
 	if f.config.MaxRequiredSignatures != nil && tx.Message.Header.NumRequiredSignatures > *f.config.MaxRequiredSignatures {
@@ -492,7 +492,7 @@ func (f *ExactSvmScheme) Settle(
 		return nil, x402.NewSettleError(ErrInvalidPayloadTransaction, "", network, "", err.Error())
 	}
 	if !svm.IsAcceptedTransactionVersion(tx.Message.GetVersion()) {
-		return nil, x402.NewSettleError(ErrUnsupportedTransactionVersion, "", network, "", fmt.Sprintf("unsupported transaction message version %d", tx.Message.GetVersion()))
+		return nil, x402.NewSettleError(ErrUnsupportedTransactionVersion, "", network, "", fmt.Sprintf("unsupported transaction message version %d", int(tx.Message.GetVersion())-1))
 	}
 	// Keyed on message hash (immune to mutable fee-payer sig at slot 0); shared
 	// by the duplicate-settlement check and the PendingSettlementStore below.

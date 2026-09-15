@@ -106,8 +106,8 @@ export function isAcceptedTransactionVersion(version: number | string): boolean 
 /**
  * Pick the transaction message version a client builds from the versions the
  * facilitator advertised in `extra.transactionVersions`. This client only
- * builds version 0: when the field is absent or malformed, version 0 is
- * assumed; when it is present it must list `0`.
+ * builds version 0: when the field is absent, version 0 is assumed; when it is
+ * present it must be an array that lists `0`.
  *
  * @param extra - The `extra` field of the payment requirements
  * @returns The transaction message version to build (always `0`)
@@ -115,8 +115,11 @@ export function isAcceptedTransactionVersion(version: number | string): boolean 
  */
 export function resolveTransactionVersion(extra: Record<string, unknown> | undefined): 0 {
   const advertised = extra?.transactionVersions;
-  if (!Array.isArray(advertised)) {
+  if (advertised === undefined) {
     return 0;
+  }
+  if (!Array.isArray(advertised)) {
+    throw new Error(`${ErrUnsupportedTransactionVersion}: transactionVersions must be an array`);
   }
   if (advertised.includes(0)) {
     return 0;

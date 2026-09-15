@@ -145,7 +145,7 @@ func (f *ExactSvmSchemeV1) Verify(
 
 	// Message version gate, before any signature or instruction check.
 	if !svm.IsAcceptedTransactionVersion(tx.Message.GetVersion()) {
-		return nil, x402.NewVerifyError(ErrUnsupportedTransactionVersion, "", fmt.Sprintf("unsupported transaction message version %d", tx.Message.GetVersion()))
+		return nil, x402.NewVerifyError(ErrUnsupportedTransactionVersion, "", fmt.Sprintf("unsupported transaction message version %d", int(tx.Message.GetVersion())-1))
 	}
 
 	if err := exactv2.VerifyRequiredSignatures(tx, feePayerStr); err != nil {
@@ -277,7 +277,7 @@ func (f *ExactSvmSchemeV1) Settle(
 		return nil, x402.NewSettleError(ErrInvalidPayloadTransaction, "", network, "", err.Error())
 	}
 	if !svm.IsAcceptedTransactionVersion(tx.Message.GetVersion()) {
-		return nil, x402.NewSettleError(ErrUnsupportedTransactionVersion, "", network, "", fmt.Sprintf("unsupported transaction message version %d", tx.Message.GetVersion()))
+		return nil, x402.NewSettleError(ErrUnsupportedTransactionVersion, "", network, "", fmt.Sprintf("unsupported transaction message version %d", int(tx.Message.GetVersion())-1))
 	}
 	txKey, err := svm.MessageHash(tx)
 	if err != nil {

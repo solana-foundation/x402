@@ -107,10 +107,11 @@ class ExactSvmSchemeV1:
             ValueError: If feePayer is missing or invalid.
         """
         network = requirements.network
+        extra = requirements.extra or {}
+        resolve_transaction_version(extra)
         client = self._get_client(network)
 
         # Facilitator must provide feePayer to cover transaction fees
-        extra = requirements.extra or {}
         fee_payer_str = extra.get("feePayer")
         if not fee_payer_str:
             raise ValueError("feePayer is required in requirements.extra for SVM transactions")
@@ -184,11 +185,6 @@ class ExactSvmSchemeV1:
         # Get latest blockhash
         blockhash_resp = client.get_latest_blockhash()
         blockhash = blockhash_resp.value.blockhash
-
-        # The facilitator advertises the message versions it accepts in
-        # extra.transactionVersions (version 0 when absent); this client only
-        # builds version 0 and fails fast when that is not among them.
-        resolve_transaction_version(extra)
 
         # Build message
         message = MessageV0.try_compile(
