@@ -666,7 +666,9 @@ func (m *PaymentChannelRentCleanupManager) submitReclaimGroup(
 		}
 		packed := make([]reclaimCandidate, 0, len(batch)-offset)
 		for _, candidate := range batch[offset:] {
-			next := append(packed, candidate)
+			next := make([]reclaimCandidate, len(packed)+1)
+			copy(next, packed)
+			next[len(packed)] = candidate
 			instructions := make([]solana.Instruction, 0, len(next))
 			for _, item := range next {
 				instructions = append(instructions, BuildReclaimInstruction(item.channelID, item.rentPayer))

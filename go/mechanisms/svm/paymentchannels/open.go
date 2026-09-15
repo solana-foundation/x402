@@ -230,7 +230,9 @@ func BuildOpenTransaction(args BuildOpenArgs) (*BuiltOpen, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to build open transaction: %w", err)
 	}
-	tx.Message.SetVersion(solana.MessageVersionV0)
+	if _, err := tx.Message.SetVersion(solana.MessageVersionV0); err != nil {
+		return nil, fmt.Errorf("failed to set open transaction version: %w", err)
+	}
 	raw, err := tx.MarshalBinary()
 	if err != nil {
 		return nil, fmt.Errorf("failed to serialize open transaction: %w", err)
@@ -430,7 +432,9 @@ func BuildTopUpPaymentChannelTransaction(args BuildTopUpArgs) (*BuiltTopUp, erro
 	if err != nil {
 		return nil, fmt.Errorf("failed to build top-up transaction: %w", err)
 	}
-	tx.Message.SetVersion(solana.MessageVersionV0)
+	if _, err := tx.Message.SetVersion(solana.MessageVersionV0); err != nil {
+		return nil, fmt.Errorf("failed to set top-up transaction version: %w", err)
+	}
 	return &BuiltTopUp{ChannelID: args.ChannelID, Amount: args.Amount, Transaction: tx}, nil
 }
 

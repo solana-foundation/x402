@@ -697,7 +697,9 @@ func buildSignedTransaction(
 	if err != nil {
 		return nil, fmt.Errorf("failed to build transaction: %w", err)
 	}
-	tx.Message.SetVersion(solana.MessageVersionV0)
+	if _, err := tx.Message.SetVersion(solana.MessageVersionV0); err != nil {
+		return nil, fmt.Errorf("failed to set transaction version: %w", err)
+	}
 	tx.Signatures = make([]solana.Signature, tx.Message.Header.NumRequiredSignatures)
 	if err := signer.SignTransaction(ctx, tx, feePayer, network); err != nil {
 		return nil, err
