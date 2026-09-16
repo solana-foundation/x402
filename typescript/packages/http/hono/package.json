@@ -31,7 +31,7 @@
     "eslint-plugin-jsdoc": "^50.6.9",
     "eslint-plugin-prettier": "^5.2.6",
     "eslint-plugin-sonarjs": "^3.0.7",
-    "hono": "^4.7.1",
+    "hono": "^4.13.5",
     "prettier": "3.5.2",
     "tsup": "^8.4.0",
     "tsx": "^4.21.0",
