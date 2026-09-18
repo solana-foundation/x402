@@ -180,7 +180,7 @@ and `SettlementResponse` types are defined in
 | `paymentFlow` | string | no | When present, MUST be `"authorization"`. The scheme resolves to the protocol-default `authorization` flow: read-only verification runs before the resource handler, and `/settle` commits the voucher — and broadcasts any `deposit` transaction — after it. |
 | `feePayer` | string | yes | Base58 sponsor key set as channel `rent_payer` and zero-share `payee`. Co-signs setup/top-up transactions as transaction fee payer and signs channel lifecycle transactions. |
 | `receiverAuthorizer` | string | no | Base58 server-controlled Ed25519 key that authenticates an optional immediate cooperative close to the facilitator. It is not a payment-channel account field. |
-| `voucherSigner` | string | no | Voucher-signing mode: `"client"` (default) or `"server"`. |
+| `voucherSigner` | string | no | Voucher-signing mode: `"client"` (default) or `"server"`. A client MUST NOT act on a `"server"` accept unless it has trusted that operator out of band (section 8); a server advertising `"server"` SHOULD list a `"client"` accept for the same resource alongside it so clients that do not extend that trust can still pay. |
 | `operator` | string | conditional | Base58 resource-operator Ed25519 key. REQUIRED when `voucherSigner == "server"`; MUST be absent in client mode. |
 | `withdrawDelay` | number | yes | Forced-close grace period in seconds. MUST be an integer from `900` through `2592000` (15 minutes through 30 days), MUST be `>= maxTimeoutSeconds`, and MUST be encoded exactly as the program `grace_period`. The payment-channels program accepts any positive `grace_period`; this range is an x402 conformance bound, so verifying facilitators MUST enforce it and reject out-of-range requirements. |
 | `tokenProgram` | string | yes | SPL Token (`Tokenkeg...`) or Token-2022 (`TokenzQ...`) program that owns `asset`. The client and facilitator MUST verify it against the onchain mint owner. |
@@ -673,7 +673,14 @@ The standard x402 `POST /verify` and `POST /settle` request envelope contains
 `paymentPayload.payload` MUST be one of the client-authored `deposit`, `voucher`,
 `authorization`, or `refund` variants in section 4.3. The facilitator validates the wire fields,
 voucher signature, derived channel PDA, and onchain channel state and, for
-`deposit` and `refund`, the client-signed transaction. For `refund`, it
+`deposit` and `refund`, the client-signed transaction. For `authorization`, and
+for a `deposit` whose `channelConfig` selects server mode, it MUST also verify
+the `BatchAuthorization` itself: the payer signature over the section 4.2
+message, `channelId` equal to the derived PDA, `payer` equal to
+`channelConfig.payer`, `authorizedAmount` equal to `PaymentRequirements.amount`,
+a non-empty `requestId`, and `now < expiresAt`. A facilitator used as a
+standalone verifier therefore never accepts a server-mode request on the
+resource server's word alone. For `refund`, it
 additionally confirms that the transaction is an exact payer-authorized
 `request_close` for the derived channel, the channel is `Open` or is still
 within its `Closing` grace period, and the payer's canonical return ATA is
@@ -1089,6 +1096,14 @@ new cumulative base and retry. When the server has no accepted voucher for the
 channel, it omits `voucherState` and the client resynchronizes from onchain
 state instead.
 
+In server mode `voucherState.signature` is the operator's, so it proves only
+that the operator produced the snapshot, not that the client authorized it. A
+server-mode client MUST additionally reject a corrective snapshot whose
+`chargedCumulativeAmount` exceeds its own confirmed watermark plus the sum of
+`PaymentRequirements.amount` for its requests on that channel whose outcome it
+never observed. That sum is the most the client has agreed the operator may
+have charged.
+
 ## 5. Phases
 
 ### Phase 1 - Open or Top Up
@@ -1301,7 +1316,10 @@ In client mode, using the last authenticated `PAYMENT-RESPONSE`, the client sets
 PaymentRequirements.amount`, signs a new `BatchVoucher`, and sends a `voucher`
 payload. In server mode it sends an `authorization` payload with an unexpired
 payer proof binding a fresh `requestId` and `PaymentRequirements.amount`; it
-does not propose a cumulative amount.
+does not propose a cumulative amount. A client enters server mode only for an
+operator it has trusted out of band; when a 402 offers both modes for the same
+resource, a client that holds such trust SHOULD prefer the server-mode accept
+and every other client MUST fall back to the client-mode accept.
 The client MUST keep at most one server-mode request in flight per channel so
 the returned cumulative voucher can be evaluated against one exact local
 watermark. A transport retry is a new x402 request and MUST use a new
@@ -1678,6 +1696,21 @@ Standard x402 codes apply. The facilitator reports verification failures in
   client mode. A client choosing server mode SHOULD use small, short-lived
   deposits and top up frequently. Over-provisioning is theft exposure in server
   mode, not merely temporarily locked client funds.
+- **Server mode is opt-in per operator, never per 402.** A client MUST NOT open
+  or pay into a server-mode channel because a `PaymentRequired` advertised
+  `voucherSigner: "server"`. It MUST require an explicit, locally configured
+  grant of trust for the operator, bound to the origin of the URL the client
+  actually requested (never to a URL carried in the 402 body), to the
+  `extra.operator` key, or to both. The grant SHOULD carry a maximum escrow the
+  client will lock under that operator; the client MUST clamp every deposit
+  hint, including `extra.minDeposit`, to that cap, since the cap is exactly
+  what a dishonest operator could take. Absent a grant the client MUST drop the
+  server-mode accept and use a client-mode accept if one is offered; servers
+  advertising server mode SHOULD therefore also offer the same resource in
+  client mode, typically at the request ceiling as a fixed price. Because the
+  channel derivation binds `voucherSigner` and `operator`, a server that later
+  changes either cannot reuse a channel the client opened under the old terms;
+  the new terms go through the same trust decision.
 - **Bearer-proof confinement.** The proof binds the channel, payer, operator,
   single-use request identifier, amount ceiling, and expiry under a versioned
   domain. It MUST NOT be logged or sent to any origin other than the authorized

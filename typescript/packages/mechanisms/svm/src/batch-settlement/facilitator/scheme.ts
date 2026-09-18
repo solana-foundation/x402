@@ -37,6 +37,7 @@ import {
 } from "../../payment-channels/open";
 import { encodeVoucherMessageBytes, verifyVoucherSignature } from "../../payment-channels/voucher";
 import { SettlementCache } from "../../settlement-cache";
+import { verifyBatchAuthorization } from "../authorization";
 import type {
   FacilitatorAccountInfo,
   FacilitatorConfirmedTransaction,
@@ -291,6 +292,7 @@ export class BatchSvmScheme implements SchemeNetworkFacilitator {
         case "authorization": {
           const terms = await this.resolveTerms(payload.channelConfig, requirements);
           const channelId = await this.deriveChannelId(payload.channelConfig, terms.feePayer);
+          await this.assertServerModeProof(payload, channelId, requirements);
           const channel = await this.fetchChannel(requirements.network, channelId);
           this.assertClaimChannel(channel, payload.channelConfig, terms, requirements, [
             ChannelStatus.Open,
@@ -764,6 +766,9 @@ export class BatchSvmScheme implements SchemeNetworkFacilitator {
     }
     if (terms.voucherSigner === "server" && voucherAmount === undefined) {
       throw new Error(`${BatchError.CUMULATIVE_AMOUNT_MISMATCH}: amount missing`);
+    }
+    if (terms.voucherSigner === "server") {
+      await this.assertServerModeProof(payload, channelId, requirements);
     }
     if (payload.voucher) {
       if (payload.voucher.channelId !== channelId) {
@@ -1821,6 +1826,37 @@ export class BatchSvmScheme implements SchemeNetworkFacilitator {
     );
     if (channel.deposit !== validated.expectedDeposit) {
       throw new Error(`${BatchError.CHANNEL_STATE}: confirmed deposit mismatch`);
+    }
+  }
+
+  /**
+   * Verify the payer proof behind a server-signed request.
+   *
+   * The resource server checks this proof before serving, but a facilitator
+   * used as a standalone verifier must not accept a forged or replayed proof
+   * on the server's word: the proof is what ties this request to the payer's
+   * explicit, expiring, amount-bounded delegation to the operator.
+   *
+   * @param payload - Server-mode `authorization` or `deposit` payload
+   * @param channelId - Derived channel PDA
+   * @param requirements - Accepted requirements; `amount` is the request ceiling
+   */
+  private async assertServerModeProof(
+    payload: Extract<BatchPayload, { type: "authorization" | "deposit" }>,
+    channelId: string,
+    requirements: PaymentRequirements,
+  ): Promise<void> {
+    const authorization = payload.authorization;
+    if (!authorization) throw new Error(`${BatchError.VOUCHER_SIGNATURE}: payer proof missing`);
+    if (
+      authorization.channelId !== channelId ||
+      authorization.payer !== payload.channelConfig.payer ||
+      authorization.authorizedAmount !== requirements.amount ||
+      typeof authorization.requestId !== "string" ||
+      authorization.requestId.length === 0 ||
+      !(await verifyBatchAuthorization(authorization, payload.channelConfig.payerAuthorizer))
+    ) {
+      throw new Error(`${BatchError.VOUCHER_SIGNATURE}: invalid payer proof`);
     }
   }
 

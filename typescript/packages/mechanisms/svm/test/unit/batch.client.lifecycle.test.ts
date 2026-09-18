@@ -100,10 +100,12 @@ describe("batch client lifecycle", () => {
     async restart => {
       const operator = await generateKeyPairSigner();
       const { records, storage } = memoryStorage();
+      const trust = { trust: [{ operator: operator.address }] };
       let client = new BatchSvmScheme(payer, {
         channelStorage: storage,
         depositAmount: 3_000n,
         discoverChannels: false,
+        serverSignedChannels: trust,
       });
       const serverRequirements = requirements({
         extra: {
@@ -123,7 +125,11 @@ describe("batch client lifecycle", () => {
       });
       const voucher = { channelId, expiresAt: 0, maxClaimableAmount: "400", signature };
       if (restart) {
-        client = new BatchSvmScheme(payer, { channelStorage: storage, discoverChannels: false });
+        client = new BatchSvmScheme(payer, {
+          channelStorage: storage,
+          discoverChannels: false,
+          serverSignedChannels: trust,
+        });
       }
       await client.schemeHooks.onPaymentResponse!({
         paymentPayload: { accepted: serverRequirements, ...opened },
@@ -592,17 +598,27 @@ describe("batch client lifecycle", () => {
         }),
       ),
     ).resolves.toMatchObject({ memo: "invoice", receiverAuthorizer: payer.address });
+    const serverMode = requirements({
+      extra: {
+        ...requirements().extra,
+        operator: feePayer.address,
+        voucherSigner: "server",
+      },
+    });
+    // Server mode is never implied by the 402: without a grant the terms are
+    // refused even though every field is well-formed.
+    await expect(resolve(serverMode)).rejects.toThrow(/Trust it explicitly/);
     await expect(
-      resolve(
-        requirements({
-          extra: {
-            ...requirements().extra,
-            operator: feePayer.address,
-            voucherSigner: "server",
-          },
+      internals(
+        new BatchSvmScheme(payer, {
+          serverSignedChannels: { trust: [{ operator: feePayer.address, maxDeposit: "5000" }] },
         }),
-      ),
-    ).resolves.toMatchObject({ operator: feePayer.address, voucherSigner: "server" });
+      ).resolveTerms(serverMode),
+    ).resolves.toMatchObject({
+      operator: feePayer.address,
+      voucherSigner: "server",
+      trust: { operator: feePayer.address, maxDeposit: 5_000n },
+    });
     const invalid = [
       requirements({ extra: undefined }),
       requirements({ extra: { ...requirements().extra, paymentFlow: "upfront" } }),

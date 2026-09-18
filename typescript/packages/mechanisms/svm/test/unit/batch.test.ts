@@ -240,6 +240,56 @@ describe("batch-settlement SVM", () => {
       });
     });
 
+    it("lets a route stay client-signed next to a configured operator", async () => {
+      const operator = await generateKeyPairSigner();
+      const server = new BatchServerScheme({ operator });
+      const kind = {
+        extra: { feePayer: feePayer.address },
+        network: SOLANA_DEVNET_CAIP2,
+        scheme: "batch-settlement",
+        x402Version: 2,
+      };
+      // The same route can list both accepts: metered for clients that trust
+      // the operator, the ceiling as a fixed price for everyone else.
+      const clientSigned = await server.enhancePaymentRequirements(
+        {
+          ...requirements(),
+          extra: { ...requirements().extra, operator: "stale", voucherSigner: "client" },
+        },
+        kind,
+        [],
+      );
+      expect(clientSigned.extra).toMatchObject({ voucherSigner: "client" });
+      expect(clientSigned.extra).not.toHaveProperty("operator");
+      // The published deposit hint is smaller where the escrow is the
+      // operator's to take.
+      expect(clientSigned.extra?.minDeposit).toBe("10000");
+      const serverSigned = await server.enhancePaymentRequirements(requirements(), kind, []);
+      expect(serverSigned.extra).toMatchObject({
+        minDeposit: "3000",
+        operator: operator.address,
+        voucherSigner: "server",
+      });
+      expect(
+        (await new BatchServerScheme().enhancePaymentRequirements(requirements(), kind, [])).extra
+          ?.minDeposit,
+      ).toBe("10000");
+      expect(() =>
+        new BatchServerScheme().enhancePaymentRequirements(
+          { ...requirements(), extra: { ...requirements().extra, voucherSigner: "server" } },
+          kind,
+          [],
+        ),
+      ).toThrow(/requires an operator signer/);
+      expect(() =>
+        server.enhancePaymentRequirements(
+          { ...requirements(), extra: { ...requirements().extra, voucherSigner: "other" } },
+          kind,
+          [],
+        ),
+      ).toThrow(/"client" or "server"/);
+    });
+
     it("broadcasts the deposit and commits its voucher only in the post-handler settle", async () => {
       const store = new MemoryChannelStore();
       const server = new BatchServerScheme({ store });
