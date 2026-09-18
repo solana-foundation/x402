@@ -82,6 +82,8 @@ CONCURRENCY=3 NUMBER_OF_ROUNDS=3 pnpm dev:concurrent
 | `SVM_PRIVATE_KEY` | one of | Base58-encoded SVM payer keypair bytes |
 | `SVM_RPC_URL` | no | SVM RPC endpoint override |
 | `SVM_DEPOSIT_AMOUNT` | no | Fixed SVM deposit target in atomic units; overrides `extra.minDeposit` and `DEPOSIT_MULTIPLIER` |
+| `SVM_SERVER_SIGNED_TRUSTED_ORIGINS` | no | Comma-separated origins (`https://host[:port]`) whose SVM operator may sign vouchers for this client (server-signed, metered channels). Empty means server-signed accepts are refused and the client pays with its own vouchers. The operator of a server-signed channel can claim up to the whole escrow. |
+| `SVM_SERVER_SIGNED_MAX_DEPOSIT` | no | Atomic cap on the escrow locked under a trusted operator; server `minDeposit` hints above it are clamped |
 | `RESOURCE_SERVER_URL` | no | Server base URL (default `http://localhost:4021`) |
 | `ENDPOINT_PATH` | no | Path on the server (default `/weather`) |
 | `CHANNEL_SALT` | no | `bytes32` salt for channel id; change to open a fresh channel |

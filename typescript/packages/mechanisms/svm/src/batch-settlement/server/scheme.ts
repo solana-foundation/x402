@@ -71,6 +71,12 @@ const MIN_WITHDRAW_DELAY = 900;
 const MAX_WITHDRAW_DELAY = 2_592_000;
 const CHANNEL_BUSY = "duplicate_settlement";
 const DEFAULT_SERVER_MIN_DEPOSIT_MULTIPLIER = 10n;
+/**
+ * In server mode the escrow is what the operator could take, so the hint the
+ * server publishes stays close to the client-side minimum instead of nudging
+ * clients into over-provisioning.
+ */
+const DEFAULT_SERVER_SIGNED_MIN_DEPOSIT_MULTIPLIER = 3n;
 
 export interface BatchSvmServerConfig {
   withdrawDelay?: number | undefined;
@@ -233,10 +239,18 @@ export class BatchSvmScheme implements SchemeNetworkServer {
     if (withdrawDelay > MAX_WITHDRAW_DELAY) {
       throw new Error(BatchError.WITHDRAW_DELAY_OUT_OF_RANGE);
     }
+    const serverSigned = this.isServerSigned(paymentRequirements);
+    // A route may pin itself to client mode with `extra.voucherSigner:
+    // "client"` even when an operator is configured, so one route can offer
+    // both a server-signed accept (metered) and a client-signed accept (the
+    // ceiling as a fixed price) and clients that do not trust the operator
+    // still have a way to pay.
+    const { operator: _routeOperator, ...routeExtra } = paymentRequirements.extra ?? {};
+    void _routeOperator;
     return Promise.resolve({
       ...paymentRequirements,
       extra: {
-        ...paymentRequirements.extra,
+        ...routeExtra,
         ...supportedKind.extra,
         tokenProgram: getStablecoinTokenProgram(
           paymentRequirements.asset,
@@ -247,11 +261,34 @@ export class BatchSvmScheme implements SchemeNetworkServer {
         ...(this.config.receiverAuthorizer
           ? { receiverAuthorizer: this.config.receiverAuthorizer }
           : {}),
-        ...(this.config.operator
-          ? { operator: this.config.operator.address, voucherSigner: "server" }
+        ...(serverSigned
+          ? { operator: this.config.operator!.address, voucherSigner: "server" }
           : {}),
       },
     });
+  }
+
+  /**
+   * Whether a route's accept is served in server-signed mode.
+   *
+   * Server mode needs a configured operator and is the default for every
+   * batch route once one is configured; a route opts back out with
+   * `extra.voucherSigner: "client"`.
+   *
+   * @param paymentRequirements - Route accept, before or after enrichment
+   * @returns True when the operator signs vouchers for this accept
+   */
+  isServerSigned(paymentRequirements: PaymentRequirements): boolean {
+    const routeMode = paymentRequirements.extra?.voucherSigner;
+    if (routeMode !== undefined && routeMode !== "client" && routeMode !== "server") {
+      throw new Error('extra.voucherSigner must be "client" or "server"');
+    }
+    if (routeMode === "server" && !this.config.operator) {
+      throw new Error(
+        'extra.voucherSigner: "server" requires an operator signer in BatchSvmServerConfig',
+      );
+    }
+    return this.config.operator !== undefined && routeMode !== "client";
   }
 
   /**
@@ -320,7 +357,12 @@ export class BatchSvmScheme implements SchemeNetworkServer {
         );
       }
     }
-    const minimum = configured ?? amount * DEFAULT_SERVER_MIN_DEPOSIT_MULTIPLIER;
+    const minimum =
+      configured ??
+      amount *
+        (this.isServerSigned(paymentRequirements)
+          ? DEFAULT_SERVER_SIGNED_MIN_DEPOSIT_MULTIPLIER
+          : DEFAULT_SERVER_MIN_DEPOSIT_MULTIPLIER);
     return (minimum > amount ? minimum : amount).toString();
   }
 

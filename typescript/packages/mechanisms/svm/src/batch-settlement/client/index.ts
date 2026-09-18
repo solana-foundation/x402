@@ -9,4 +9,9 @@ export {
   signBatchVoucher,
 } from "./channel";
 export type { BatchSvmClientConfig } from "./scheme";
+export {
+  type BatchServerSignedChannelsConfig,
+  type BatchServerSignedTrust,
+  isServerSignedAccept,
+} from "./trust";
 export { type BatchRefundOptions, probeBatchRequirements, refundBatchChannel } from "./refund";

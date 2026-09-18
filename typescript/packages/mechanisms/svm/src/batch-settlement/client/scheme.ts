@@ -34,6 +34,12 @@ import {
   buildRefundPayload,
 } from "./channel";
 import { type BatchRefundOptions, refundBatchChannel } from "./refund";
+import {
+  type BatchServerSignedChannelsConfig,
+  type ResolvedServerSignedTrust,
+  ServerSignedTrustPolicy,
+  untrustedOperatorMessage,
+} from "./trust";
 
 interface OpenChannel {
   tracker: BatchChannelTracker;
@@ -108,6 +114,16 @@ export interface BatchSvmClientConfig extends ClientSvmConfig {
    * wants to avoid the scan can turn it off.
    */
   discoverChannels?: boolean | undefined;
+  /**
+   * Which resource operators may hold this client's voucher-signing authority.
+   *
+   * A 402 advertising `extra.voucherSigner: "server"` asks the client to open
+   * a channel whose onchain `authorized_signer` is the operator. Without a
+   * matching grant here the client refuses that accept and falls back to any
+   * client-signed accept the server also offers. Omit to never enter server
+   * mode.
+   */
+  serverSignedChannels?: BatchServerSignedChannelsConfig | undefined;
 }
 
 export class BatchSvmScheme implements SchemeNetworkClient {
@@ -121,6 +137,7 @@ export class BatchSvmScheme implements SchemeNetworkClient {
   };
   private readonly channels = new Map<string, OpenChannel>();
   private readonly pending = new Map<string, PendingChannel>();
+  private readonly trust: ServerSignedTrustPolicy;
 
   constructor(
     private readonly signer: BatchClientSigner,
@@ -130,7 +147,28 @@ export class BatchSvmScheme implements SchemeNetworkClient {
     if (multiplier !== undefined && (!Number.isInteger(multiplier) || multiplier < 3)) {
       throw new Error("depositMultiplier must be an integer >= 3");
     }
+    this.trust = new ServerSignedTrustPolicy(config.serverSignedChannels?.trust ?? []);
   }
+
+  /**
+   * Register on `x402HTTPClient.onPaymentRequired` so origin-based trust
+   * grants can see the URL that was actually requested. Untrusted server-signed
+   * accepts are dropped from the 402 before payment selection; trusted ones
+   * are preferred over the same route's client-signed accept.
+   *
+   * Bound to the scheme so it can be passed as a bare function.
+   *
+   * @param context - Hook context from the HTTP client
+   * @param context.paymentRequired - Decoded 402 body, filtered in place
+   * @param context.paymentRequired.accepts - Offered payment requirements
+   * @param context.requestUrl - URL the client actually requested
+   */
+  readonly paymentRequiredHook = async (context: {
+    paymentRequired: { accepts: PaymentRequirements[] };
+    requestUrl: string;
+  }): Promise<void> => {
+    this.trust.authorize(context.paymentRequired, context.requestUrl);
+  };
 
   async createPaymentPayload(
     x402Version: number,
@@ -207,6 +245,8 @@ export class BatchSvmScheme implements SchemeNetworkClient {
         charge,
         cumulative - existing.deposit,
         context,
+        terms.trust,
+        existing.deposit,
       );
       const rpc = createRpcClient(requirements.network, this.config.rpcUrl);
       const blockhash = await resolveBlockhash(rpc, requirements);
@@ -272,7 +312,14 @@ export class BatchSvmScheme implements SchemeNetworkClient {
     ) {
       throw new Error("depositAmount must cover the current request");
     }
-    const deposit = this.resolveDepositAmount(requirements, charge, charge, context);
+    const deposit = this.resolveDepositAmount(
+      requirements,
+      charge,
+      charge,
+      context,
+      terms.trust,
+      0n,
+    );
     const rpc = createRpcClient(requirements.network, this.config.rpcUrl);
     const [blockhash, openSlot] = await Promise.all([
       resolveBlockhash(rpc, requirements),
@@ -375,6 +422,8 @@ export class BatchSvmScheme implements SchemeNetworkClient {
     requestAmount: bigint,
     needed: bigint,
     context: PaymentPayloadContext | undefined,
+    trust: ResolvedServerSignedTrust | undefined,
+    existingDeposit: bigint,
   ): bigint {
     const multiplier = this.config.depositPolicy?.depositMultiplier ?? 5;
     const configured =
@@ -383,7 +432,7 @@ export class BatchSvmScheme implements SchemeNetworkClient {
         : parseU64(this.config.depositAmount, "depositAmount");
     const announced = parseAnnouncedMinDeposit(requirements.extra?.minDeposit, requestAmount);
     const target = configured ?? announced ?? requestAmount * BigInt(multiplier);
-    const proposed = target > needed ? target : needed;
+    let proposed = target > needed ? target : needed;
     const maxDeposit = maxDepositFromSpendCap(context?.maxAmountPerPayment, multiplier);
     if (maxDeposit !== undefined && needed > maxDeposit) {
       throw new Error(
@@ -391,7 +440,22 @@ export class BatchSvmScheme implements SchemeNetworkClient {
           "Raise maxAmountPerPayment or depositMultiplier.",
       );
     }
-    return maxDeposit !== undefined && proposed > maxDeposit ? maxDeposit : proposed;
+    if (maxDeposit !== undefined && proposed > maxDeposit) proposed = maxDeposit;
+    // In server mode the escrow is what a dishonest operator could take, so
+    // the trust grant's cap wins over every hint, including the server's own
+    // `minDeposit`, and over this client's fixed `depositAmount`.
+    if (trust?.maxDeposit !== undefined) {
+      const room = trust.maxDeposit - existingDeposit;
+      if (needed > room) {
+        throw new Error(
+          `Required deposit ${needed} exceeds the remaining serverSignedChannels.trust maxDeposit ` +
+            `(${trust.maxDeposit} total, ${existingDeposit} already escrowed). ` +
+            "Raise maxDeposit for this operator or use a client-signed accept.",
+        );
+      }
+      if (proposed > room) proposed = room;
+    }
+    return proposed;
   }
 
   /**
@@ -716,6 +780,21 @@ export class BatchSvmScheme implements SchemeNetworkClient {
     // A server may never claim to have charged less than the chain has already
     // settled, nor more than the client signed for.
     if (charged < claimed) return false;
+    if (pending.tracker.channelConfig.voucherSigner === "server") {
+      // In server mode `voucherState` is signed by the operator, so its
+      // signature proves nothing about what this client authorized. The only
+      // bound the client can assert itself is what it agreed to: its confirmed
+      // watermark plus the ceilings of its own requests whose outcome it never
+      // saw. Anything above that is an operator claim it has no basis to adopt.
+      const unresolved = [...this.pending.values()]
+        .filter(candidate => candidate.key === pending.key)
+        .reduce((sum, candidate) => sum + parseU64(candidate.amount, "pending amount"), 0n);
+      const authorized =
+        (pending.confirmed?.tracker.cumulative ?? 0n) +
+        parseU64(pending.amount, "pending amount") +
+        unresolved;
+      if (charged > authorized) return false;
+    }
 
     const voucherState = accept?.extra?.voucherState as BatchVoucherState | undefined;
     if (voucherState) {
@@ -812,6 +891,8 @@ export class BatchSvmScheme implements SchemeNetworkClient {
     memo?: string | undefined;
     voucherSigner: "client" | "server";
     operator?: string | undefined;
+    /** Grant under which server mode was allowed; absent in client mode. */
+    trust?: ResolvedServerSignedTrust | undefined;
   }> {
     const extra = requirements.extra;
     if (!extra) throw new Error("requirements.extra is required");
@@ -860,6 +941,15 @@ export class BatchSvmScheme implements SchemeNetworkClient {
     if (voucherSigner === "client" && operator !== undefined) {
       throw new Error("extra.operator is only valid for operator voucher signing");
     }
+    // Server mode hands the operator this client's onchain signing authority.
+    // That is never implied by a 402; it has to be a grant this client
+    // configured, either for the origin it requested or for the operator key.
+    const trust = voucherSigner === "server" ? this.trust.grantFor(requirements) : undefined;
+    if (voucherSigner === "server" && !trust) {
+      throw new Error(
+        untrustedOperatorMessage(undefined, typeof operator === "string" ? [operator] : []),
+      );
+    }
     return {
       feePayer,
       ...(memo !== undefined ? { memo } : {}),
@@ -868,6 +958,7 @@ export class BatchSvmScheme implements SchemeNetworkClient {
       withdrawDelay,
       voucherSigner,
       ...(typeof operator === "string" ? { operator } : {}),
+      ...(trust ? { trust } : {}),
     };
   }
 }

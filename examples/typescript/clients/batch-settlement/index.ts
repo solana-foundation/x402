@@ -27,6 +27,14 @@ const refundAmount = process.env.REFUND_AMOUNT;
 const depositMultiplier = Number(process.env.DEPOSIT_MULTIPLIER ?? "5");
 const svmRpcUrl = process.env.SVM_RPC_URL;
 const svmDepositAmount = process.env.SVM_DEPOSIT_AMOUNT;
+// Origins whose SVM operator may sign vouchers on this client's behalf. A
+// server-signed channel lets that operator claim up to the whole escrow, so
+// nothing here is trusted because a 402 asked for it.
+const svmTrustedOrigins = (process.env.SVM_SERVER_SIGNED_TRUSTED_ORIGINS ?? "")
+  .split(",")
+  .map(origin => origin.trim())
+  .filter(Boolean);
+const svmServerSignedMaxDeposit = process.env.SVM_SERVER_SIGNED_MAX_DEPOSIT?.trim() || undefined;
 
 if (!evmPrivateKeyRaw && !svmPrivateKeyRaw) {
   console.error("At least one of EVM_PRIVATE_KEY or SVM_PRIVATE_KEY is required");
@@ -78,14 +86,36 @@ async function main(): Promise<void> {
       depositPolicy: { depositMultiplier },
       ...(svmRpcUrl ? { rpcUrl: svmRpcUrl } : {}),
       ...(svmDepositAmount ? { depositAmount: svmDepositAmount } : {}),
+      ...(svmTrustedOrigins.length > 0
+        ? {
+            serverSignedChannels: {
+              trust: svmTrustedOrigins.map(origin => ({
+                origin,
+                ...(svmServerSignedMaxDeposit ? { maxDeposit: svmServerSignedMaxDeposit } : {}),
+              })),
+            },
+          }
+        : {}),
     });
     client.register("solana:*", svmScheme);
 
     console.log("SVM payer:", svmSigner.address);
+    console.log(
+      "SVM server-signed channels:",
+      svmTrustedOrigins.length > 0
+        ? `trusted for ${svmTrustedOrigins.join(", ")}` +
+            (svmServerSignedMaxDeposit ? ` up to ${svmServerSignedMaxDeposit} base units` : "")
+        : "refused (client-signed vouchers only)",
+    );
   }
 
-  const fetchWithPayment = wrapFetchWithPayment(fetch, client);
   const httpClient = new x402HTTPClient(client);
+  if (svmScheme) {
+    // Origin grants need the URL that was actually fetched. Only the HTTP
+    // layer has it, so the hook runs there, before payment selection.
+    httpClient.onPaymentRequired(svmScheme.paymentRequiredHook);
+  }
+  const fetchWithPayment = wrapFetchWithPayment(fetch, httpClient);
 
   console.log(`Base URL: ${baseURL}, endpoint: ${endpointPath}\n`);
 

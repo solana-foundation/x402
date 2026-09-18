@@ -17,6 +17,13 @@ export type BatchExtra = {
   voucherState?: BatchVoucherState | undefined;
   voucherSigner?: BatchVoucherSigner | undefined;
   operator?: string | undefined;
+  /**
+   * Facilitator idle window in seconds, copied from `/supported`. After this
+   * long with no facilitator-visible lifecycle activity an `Open` channel may
+   * be abandon-closed at its onchain settled watermark. Absent means the
+   * facilitator does not idle-close.
+   */
+  maxIdleSecs?: number | undefined;
 };
 
 export type BatchVoucherSigner = "client" | "server";
