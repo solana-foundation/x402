@@ -40,6 +40,8 @@ export interface PaymentChannelStorage {
    */
   list(): Promise<PaymentChannelRecord[]>;
   upsert(record: PaymentChannelRecord): Promise<void>;
+  /** Persist records with the same merge semantics as calling `upsert` for each one. */
+  upsertMany?(records: readonly PaymentChannelRecord[]): Promise<void>;
   delete(channelId: string): Promise<void>;
 }
 

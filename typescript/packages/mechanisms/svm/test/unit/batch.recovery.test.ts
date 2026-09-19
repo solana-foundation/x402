@@ -6,7 +6,10 @@ import { beforeAll, describe, expect, it, vi } from "vitest";
 
 import { signBatchVoucher } from "../../src/batch-settlement/client/channel";
 import { BatchError } from "../../src/batch-settlement/errors";
-import { InMemoryBatchPendingSettlementStore } from "../../src/batch-settlement/facilitator/recovery";
+import {
+  forgetBroadcastReservation,
+  InMemoryBatchPendingSettlementStore,
+} from "../../src/batch-settlement/facilitator/recovery";
 import { BatchSvmScheme } from "../../src/batch-settlement/facilitator/scheme";
 import type {
   BatchChannelConfig,
@@ -110,7 +113,6 @@ type RecoveryInternals = {
   fetchChannel: ReturnType<typeof vi.fn>;
   fetchChannelsUntil: ReturnType<typeof vi.fn>;
   fetchChannelUntil: ReturnType<typeof vi.fn>;
-  forgetPending(key: string): Promise<void>;
   prepareRefund: ReturnType<typeof vi.fn>;
   readChannel: ReturnType<typeof vi.fn>;
   reconcileBroadcast: ReturnType<typeof vi.fn>;
@@ -171,6 +173,105 @@ function payment(payload: unknown): PaymentPayload {
 }
 
 describe("batch-settlement outcome recovery", () => {
+  it("persists multi-channel lifecycle activity in one storage batch", async () => {
+    const upsert = vi.fn().mockResolvedValue(undefined);
+    const upsertMany = vi.fn().mockResolvedValue(undefined);
+    const scheme = new BatchSvmScheme(signer() as never, {
+      channelStorage: {
+        delete: vi.fn().mockResolvedValue(undefined),
+        get: vi.fn().mockResolvedValue(undefined),
+        list: vi.fn().mockResolvedValue([]),
+        upsert,
+        upsertMany,
+      },
+    });
+    const api = scheme as unknown as {
+      trackChannels(
+        records: readonly {
+          channelId: string;
+          expiresAt: number;
+          network: typeof NETWORK;
+          payTo: string;
+          tokenProgram: string;
+        }[],
+      ): Promise<void>;
+    };
+
+    await api.trackChannels([
+      {
+        channelId: "channel-a",
+        expiresAt: 1,
+        network: NETWORK,
+        payTo: RECEIVER,
+        tokenProgram: TOKEN_PROGRAM_ADDRESS,
+      },
+      {
+        channelId: "channel-b",
+        expiresAt: 2,
+        network: NETWORK,
+        payTo: RECEIVER,
+        tokenProgram: TOKEN_PROGRAM_ADDRESS,
+      },
+    ]);
+
+    expect(upsert).not.toHaveBeenCalled();
+    expect(upsertMany).toHaveBeenCalledOnce();
+    const records = upsertMany.mock.calls[0]![0];
+    expect(records).toEqual([
+      expect.objectContaining({ channelId: "channel-a" }),
+      expect.objectContaining({ channelId: "channel-b" }),
+    ]);
+    expect(records[0].firstSeenAt).toBe(records[0].lastActivityAt);
+    expect(records[1].firstSeenAt).toBe(records[0].firstSeenAt);
+    expect(records[1].lastActivityAt).toBe(records[0].lastActivityAt);
+  });
+
+  it("falls back to individual lifecycle upserts", async () => {
+    const upsert = vi.fn().mockResolvedValue(undefined);
+    const scheme = new BatchSvmScheme(signer() as never, {
+      channelStorage: {
+        delete: vi.fn().mockResolvedValue(undefined),
+        get: vi.fn().mockResolvedValue(undefined),
+        list: vi.fn().mockResolvedValue([]),
+        upsert,
+      },
+    });
+    const api = scheme as unknown as {
+      trackChannels(
+        records: readonly {
+          channelId: string;
+          expiresAt: number;
+          network: typeof NETWORK;
+          payTo: string;
+          tokenProgram: string;
+        }[],
+      ): Promise<void>;
+    };
+
+    await api.trackChannels([
+      {
+        channelId: "channel-a",
+        expiresAt: 1,
+        network: NETWORK,
+        payTo: RECEIVER,
+        tokenProgram: TOKEN_PROGRAM_ADDRESS,
+      },
+      {
+        channelId: "channel-b",
+        expiresAt: 2,
+        network: NETWORK,
+        payTo: RECEIVER,
+        tokenProgram: TOKEN_PROGRAM_ADDRESS,
+      },
+    ]);
+
+    expect(upsert).toHaveBeenCalledTimes(2);
+    for (const [record] of upsert.mock.calls) {
+      expect(record.firstSeenAt).toEqual(expect.any(Number));
+      expect(record.lastActivityAt).toBe(record.firstSeenAt);
+    }
+  });
+
   it("recovers a completed claim after cleanup without recreating its lifecycle record", async () => {
     const payload = await claimPayload();
     const store = new InMemoryPendingSettlementStore();
@@ -667,7 +768,7 @@ describe("batch-settlement outcome recovery", () => {
       errorReason: "settlement_pending",
       transaction: TX,
     });
-    await expect(api.forgetPending("key")).resolves.toBeUndefined();
+    await expect(forgetBroadcastReservation(store, "key", TX)).resolves.toBeUndefined();
 
     api.readChannel = vi.fn().mockResolvedValue(channel());
     api.waitForChannelRead = vi.fn().mockResolvedValue(undefined);

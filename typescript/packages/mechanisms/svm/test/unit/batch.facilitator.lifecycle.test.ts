@@ -1,5 +1,6 @@
 import { findAssociatedTokenPda } from "@solana-program/token-2022";
 import { address, generateKeyPairSigner, type Signature } from "@solana/kit";
+import { InMemoryPendingSettlementStore } from "@x402/core/facilitator";
 import type { PaymentPayload, PaymentRequirements } from "@x402/core/types";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 
@@ -14,6 +15,10 @@ import {
   calculateDistributionAmount,
   MAX_CHANNELS_PER_SETTLE_TX,
 } from "../../src/batch-settlement/facilitator/scheme";
+import {
+  decodeBroadcastReservation,
+  encodeBroadcastReservation,
+} from "../../src/batch-settlement/facilitator/recovery";
 import type {
   BatchChannelConfig,
   BatchClaimPayload,
@@ -29,6 +34,7 @@ import type { Channel } from "../../src/payment-channels/generated/accounts/chan
 import { ChannelStatus } from "../../src/payment-channels/onchain";
 import { getChannelDistributionHash } from "../../src/payment-channels/facilitator";
 import { ChannelBroadcastConfirmationError } from "../../src/payment-channels/facilitator";
+import { buildTopUpPaymentChannelTransaction } from "../../src/payment-channels/open";
 import { TransactionOnchainFailureError } from "../../src/utils";
 
 const NETWORK = SOLANA_DEVNET_CAIP2;
@@ -147,7 +153,8 @@ type FacilitatorInternals = {
     key: string,
     network: typeof NETWORK,
     payerAddress: string,
-    broadcast: (onBroadcast: (signature: string) => Promise<void>) => Promise<string>,
+    broadcast: (onBroadcast: (signature: string, wire: string) => Promise<void>) => Promise<string>,
+    expectedDeposit?: bigint,
   ): Promise<unknown>;
   validateDeposit: ReturnType<typeof vi.fn>;
   validateRefund: ReturnType<typeof vi.fn>;
@@ -182,6 +189,7 @@ type FacilitatorInternals = {
     tokenProgram: string,
   ): Promise<void>;
   readChannel: ReturnType<typeof vi.fn>;
+  waitForChannelRead: ReturnType<typeof vi.fn>;
   settlementCache: {
     delete: ReturnType<typeof vi.fn>;
     isDuplicate: ReturnType<typeof vi.fn>;
@@ -500,6 +508,20 @@ describe("batch facilitator lifecycle", () => {
         requirements(),
       ),
     ).resolves.toMatchObject({ isValid: true, extra: { channelId: actualChannelId } });
+    api.readChannel = vi.fn().mockResolvedValue(
+      channel({
+        authorizedSigner: address(payer.address),
+        deposit: 10_000n,
+        openSlot: 123n,
+      }),
+    );
+    await expect(
+      scheme.verify(
+        { accepted: requirements(), payload: actualDeposit, x402Version: 2 },
+        requirements(),
+      ),
+    ).resolves.toMatchObject({ isValid: true, extra: { channelId: actualChannelId } });
+    expect(api.readChannel).not.toHaveBeenCalled();
 
     const voucherPayment = {
       channelConfig: actualDeposit.channelConfig,
@@ -663,7 +685,10 @@ describe("batch facilitator lifecycle", () => {
 
   it("settles top-ups, idempotent opens, vouchers, and refunds", async () => {
     const facilitatorSigner = signer();
-    const scheme = new BatchSvmScheme(facilitatorSigner as never);
+    const store = new InMemoryPendingSettlementStore();
+    const scheme = new BatchSvmScheme(facilitatorSigner as never, {
+      pendingSettlementStore: store,
+    });
     const api = internals(scheme);
     const voucher = await signBatchVoucher(payer, {
       channelId,
@@ -692,8 +717,10 @@ describe("batch facilitator lifecycle", () => {
     });
     api.readChannel = vi.fn().mockResolvedValue(undefined);
     api.trackChannel = vi.fn().mockResolvedValue(undefined);
-    api.broadcastDurably = vi.fn().mockResolvedValue({ ok: true, signature: SIGNATURE });
-    api.fetchChannel = vi.fn().mockResolvedValue(channel({ deposit: 11_000n }));
+    api.broadcastDurably = vi
+      .fn()
+      .mockResolvedValue({ ok: true, replayed: false, signature: SIGNATURE });
+    api.fetchChannelUntil = vi.fn().mockResolvedValue(channel({ deposit: 11_000n }));
     api.assertClaimChannel = vi.fn();
     await expect(
       api.settleDeposit(
@@ -721,6 +748,9 @@ describe("batch facilitator lifecycle", () => {
         requirements(),
       ),
     ).resolves.toMatchObject({ success: true, transaction: "" });
+    expect(
+      await store.get(`batch:deposit:${NETWORK}:${channelId}:expected-deposit`),
+    ).toBeUndefined();
 
     await expect(
       api.settleVoucher(
@@ -763,6 +793,287 @@ describe("batch facilitator lifecycle", () => {
         requirements(),
       ),
     ).resolves.toMatchObject({ success: true, transaction: SIGNATURE });
+  });
+
+  it.each([
+    ["open", false, undefined, 1_000n],
+    ["top-up", true, 10_000n, 11_000n],
+  ])("polls the full %s postcondition after confirmation", async (_, isTopUp, stale, expected) => {
+    const facilitatorSigner = signer();
+    const store = new InMemoryPendingSettlementStore();
+    const key = isTopUp ? `batch:topup:${NETWORK}:setup` : `batch:deposit:${NETWORK}:${channelId}`;
+    await store.set(key, encodeBroadcastReservation(SIGNATURE, isTopUp ? expected : undefined));
+    const scheme = new BatchSvmScheme(facilitatorSigner as never, {
+      pendingSettlementStore: store,
+    });
+    const api = internals(scheme);
+    const deposit = {
+      channelConfig,
+      deposit: { amount: "1000", transaction: "setup" },
+      type: "deposit" as const,
+      voucher: await signBatchVoucher(payer, {
+        channelId,
+        expiresAt: 0,
+        maxClaimableAmount: 1_000n,
+      }),
+    };
+    api.validateDeposit = vi.fn().mockResolvedValue({
+      channelId,
+      deposit: 1_000n,
+      expectedDeposit: expected,
+      isTopUp,
+      payload: deposit,
+      terms: {
+        feePayer: feePayer.address,
+        feePayerSigner: feePayer,
+        tokenProgram: TOKEN_PROGRAM_ADDRESS,
+        withdrawDelay: 900,
+      },
+    });
+    api.readChannel = vi
+      .fn()
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce(stale === undefined ? undefined : channel({ deposit: stale }))
+      .mockResolvedValueOnce(channel({ deposit: expected, payee: address(payer.address) }))
+      .mockResolvedValue(channel({ deposit: expected }));
+    api.waitForChannelRead = vi.fn().mockResolvedValue(undefined);
+
+    await expect(
+      api.settleDeposit(
+        { accepted: requirements(), payload: deposit, x402Version: 2 },
+        deposit,
+        requirements(),
+      ),
+    ).resolves.toMatchObject({
+      amount: expected.toString(),
+      success: true,
+      transaction: SIGNATURE,
+    });
+    expect(api.readChannel).toHaveBeenCalledTimes(4);
+  });
+
+  it("keeps a confirmed deposit pending when its postcondition stays stale", async () => {
+    const deposit = {
+      channelConfig,
+      deposit: { amount: "1000", transaction: "setup" },
+      type: "deposit" as const,
+      voucher: await signBatchVoucher(payer, {
+        channelId,
+        expiresAt: 0,
+        maxClaimableAmount: 1_000n,
+      }),
+    };
+    const key = `batch:topup:${NETWORK}:setup`;
+    const store = new InMemoryPendingSettlementStore();
+    await store.set(key, encodeBroadcastReservation(SIGNATURE, 11_000n));
+    const facilitatorSigner = signer();
+    const scheme = new BatchSvmScheme(facilitatorSigner as never, {
+      pendingSettlementStore: store,
+    });
+    const api = internals(scheme);
+    api.validateDeposit = vi.fn().mockResolvedValue({
+      channelId,
+      deposit: 1_000n,
+      expectedDeposit: 11_000n,
+      isTopUp: true,
+      payload: deposit,
+      terms: {
+        feePayer: feePayer.address,
+        feePayerSigner: feePayer,
+        tokenProgram: TOKEN_PROGRAM_ADDRESS,
+        withdrawDelay: 900,
+      },
+    });
+    api.readChannel = vi.fn().mockResolvedValue(channel({ deposit: 10_000n }));
+    api.waitForChannelRead = vi.fn().mockResolvedValue(undefined);
+
+    await expect(
+      api.settleDeposit(
+        { accepted: requirements(), payload: deposit, x402Version: 2 },
+        deposit,
+        requirements(),
+      ),
+    ).resolves.toMatchObject({
+      errorReason: "settlement_pending",
+      success: false,
+      transaction: SIGNATURE,
+    });
+    expect(decodeBroadcastReservation((await store.get(key))!)).toEqual({
+      expectedDeposit: 11_000n,
+      signature: SIGNATURE,
+    });
+    expect(facilitatorSigner.simulateTransaction).not.toHaveBeenCalled();
+    expect(facilitatorSigner.sendTransaction).not.toHaveBeenCalled();
+  });
+
+  it("keeps the winner's target when replicas derive different top-up targets", async () => {
+    const records = new Map<string, string>();
+    let releaseWinner!: () => void;
+    const loserReachedReservation = new Promise<void>(resolve => {
+      releaseWinner = resolve;
+    });
+    const store = {
+      async delete(key: string) {
+        records.delete(key);
+      },
+      async deleteIfEquals(key: string, value: string) {
+        if (records.get(key) !== value) return false;
+        records.delete(key);
+        return true;
+      },
+      async get(key: string) {
+        return records.get(key);
+      },
+      async set(key: string, value: string) {
+        records.set(key, value);
+      },
+      async setIfAbsent(key: string, value: string) {
+        if (records.has(key)) {
+          releaseWinner();
+          return false;
+        }
+        records.set(key, value);
+        await loserReachedReservation;
+        return true;
+      },
+    };
+    const api = internals(new BatchSvmScheme(signer() as never, { pendingSettlementStore: store }));
+    const key = `batch:topup:${NETWORK}:same-transaction`;
+    const attempt = (expectedDeposit: bigint) =>
+      api.broadcastDurably(
+        key,
+        NETWORK,
+        payer.address,
+        async onBroadcast => {
+          await onBroadcast(SIGNATURE, "signed-wire");
+          return SIGNATURE;
+        },
+        expectedDeposit,
+      );
+
+    await expect(Promise.all([attempt(11_000n), attempt(10_000n)])).resolves.toEqual([
+      { expectedDeposit: 11_000n, ok: true, replayed: false, signature: SIGNATURE },
+      { expectedDeposit: 11_000n, ok: true, replayed: false, signature: SIGNATURE },
+    ]);
+    expect(decodeBroadcastReservation(records.get(key)!)).toEqual({
+      expectedDeposit: 11_000n,
+      signature: SIGNATURE,
+    });
+    expect(records.get(`batch:transaction:${NETWORK}:${SIGNATURE}:wire`)).toBe("signed-wire");
+  });
+
+  it("treats legacy and malformed reservation values as plain signatures", () => {
+    expect(decodeBroadcastReservation(SIGNATURE)).toEqual({ signature: SIGNATURE });
+    for (const malformed of ["batch:deposit:v1:", "batch:deposit:v1:nope:signature"]) {
+      expect(decodeBroadcastReservation(malformed)).toEqual({ signature: malformed });
+    }
+  });
+
+  it("removes top-up recovery data after terminal reconciliation", async () => {
+    const key = `batch:topup:${NETWORK}:top-up`;
+    const wireKey = `batch:transaction:${NETWORK}:${SIGNATURE}:wire`;
+    const store = new InMemoryPendingSettlementStore();
+    await store.set(key, encodeBroadcastReservation(SIGNATURE, 11_000n));
+    await store.set(wireKey, "signed-wire");
+    const scheme = new BatchSvmScheme(
+      signer({
+        confirmTransaction: vi.fn().mockRejectedValue(new TransactionOnchainFailureError("failed")),
+      }) as never,
+      { pendingSettlementStore: store },
+    );
+    const api = internals(scheme);
+    const deposit = {
+      channelConfig,
+      deposit: { amount: "1000", transaction: "top-up" },
+      type: "deposit" as const,
+      voucher: await signBatchVoucher(payer, {
+        channelId,
+        expiresAt: 0,
+        maxClaimableAmount: 1_000n,
+      }),
+    };
+    api.validateDeposit = vi.fn().mockResolvedValue({
+      channelId,
+      deposit: 1_000n,
+      expectedDeposit: 11_000n,
+      isTopUp: true,
+      payload: deposit,
+      terms: {
+        feePayer: feePayer.address,
+        feePayerSigner: feePayer,
+        tokenProgram: TOKEN_PROGRAM_ADDRESS,
+        withdrawDelay: 900,
+      },
+    });
+    api.readChannel = vi.fn().mockResolvedValue(channel());
+
+    await expect(
+      api.settleDeposit(
+        { accepted: requirements(), payload: deposit, x402Version: 2 },
+        deposit,
+        requirements(),
+      ),
+    ).resolves.toMatchObject({
+      errorReason: "transaction_failed",
+      success: false,
+      transaction: SIGNATURE,
+    });
+    expect(await store.get(key)).toBeUndefined();
+    expect(await store.get(wireKey)).toBeUndefined();
+  });
+
+  it("recovers a landed top-up with its recorded target and original signature", async () => {
+    const topUp = await buildTopUpPaymentChannelTransaction({
+      amount: 1_000n,
+      blockhash: { blockhash: USDC_MAINNET_ADDRESS, lastValidBlockHeight: 1n },
+      channelId,
+      feePayer: feePayer.address,
+      mint: MINT,
+      payer,
+      tokenProgram: TOKEN_PROGRAM_ADDRESS,
+    });
+    const deposit = {
+      channelConfig,
+      deposit: { amount: "1000", transaction: topUp.transaction },
+      type: "deposit" as const,
+      voucher: await signBatchVoucher(payer, {
+        channelId,
+        expiresAt: 0,
+        maxClaimableAmount: 1_000n,
+      }),
+    };
+    const key = `batch:topup:${NETWORK}:${topUp.transaction}`;
+    const store = new InMemoryPendingSettlementStore();
+    await store.set(key, encodeBroadcastReservation(SIGNATURE, 11_000n));
+    const facilitatorSigner = signer();
+    const scheme = new BatchSvmScheme(facilitatorSigner as never, {
+      pendingSettlementStore: store,
+    });
+    const api = internals(scheme);
+    api.resolveTerms = vi.fn().mockResolvedValue({
+      feePayer: feePayer.address,
+      feePayerSigner: feePayer,
+      tokenProgram: TOKEN_PROGRAM_ADDRESS,
+      voucherSigner: "client",
+      withdrawDelay: 900,
+    });
+    api.deriveChannelId = vi.fn().mockResolvedValue(channelId);
+    api.assertSettlementAccounts = vi.fn().mockResolvedValue(undefined);
+    api.readChannel = vi.fn().mockResolvedValue(channel({ deposit: 11_000n }));
+    api.waitForChannelRead = vi.fn().mockResolvedValue(undefined);
+
+    await expect(
+      api.settleDeposit(
+        { accepted: requirements(), payload: deposit, x402Version: 2 },
+        deposit,
+        requirements(),
+      ),
+    ).resolves.toMatchObject({ amount: "11000", success: true, transaction: SIGNATURE });
+    expect(facilitatorSigner.simulateTransaction).not.toHaveBeenCalled();
+    expect(facilitatorSigner.sendTransaction).not.toHaveBeenCalled();
+    expect(await store.get(key)).toBeUndefined();
+    expect(await store.get(`${key}:completed`)).toBe(SIGNATURE);
+    expect(await store.get(`${key}:expected-deposit`)).toBe("11000");
   });
 
   it("serializes opens by channel and releases the lock before broadcast failures", async () => {
@@ -1284,22 +1595,22 @@ describe("batch facilitator lifecycle", () => {
     };
     expect(() => api.assertExpiry(1)).toThrow(BatchError.VOUCHER_EXPIRY);
     expect(() => api.resolveFeePayer(payer.address)).toThrow(BatchError.FEE_PAYER_MISMATCH);
+    const validated = {
+      expectedDeposit: 2n,
+      payload: { channelConfig },
+      terms: {
+        feePayer: feePayer.address,
+        feePayerSigner: feePayer,
+        tokenProgram: TOKEN_PROGRAM_ADDRESS,
+        withdrawDelay: 900,
+      },
+    };
     expect(() =>
-      api.assertDepositChannel(
-        channel({ deposit: 1n }),
-        {
-          expectedDeposit: 2n,
-          payload: { channelConfig },
-          terms: {
-            feePayer: feePayer.address,
-            feePayerSigner: feePayer,
-            tokenProgram: TOKEN_PROGRAM_ADDRESS,
-            withdrawDelay: 900,
-          },
-        },
-        requirements(),
-      ),
+      api.assertDepositChannel(channel({ deposit: 1n }), validated, requirements()),
     ).toThrow(/confirmed deposit mismatch/);
+    expect(() =>
+      api.assertDepositChannel(channel({ deposit: 3n }), validated, requirements()),
+    ).not.toThrow();
     expect(() => calculateDistributionAmount([{ payoutWatermark: 2n, settled: 1n }])).toThrow(
       /payout watermark exceeds/,
     );
