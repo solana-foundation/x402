@@ -358,6 +358,7 @@ export class TransactionOnchainFailureError extends Error {
  * @param pendingReason - Error reason to report when the store write succeeds
  * @param terminalReason - Error reason to report when the store write fails
  * @param error - The confirmation-wait error that triggered this call
+ * @param record - Recovery record to persist; defaults to the signature
  * @returns The settlement_pending or terminal SettleResponse
  */
 export async function recordPendingOrTerminal(
@@ -369,9 +370,10 @@ export async function recordPendingOrTerminal(
   pendingReason: string,
   terminalReason: string,
   error: unknown,
+  record = signature,
 ): Promise<SettleResponse> {
   try {
-    await store.set(key, signature);
+    await store.set(key, record);
   } catch (storeError) {
     return {
       success: false,
