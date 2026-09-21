@@ -428,16 +428,14 @@ export class BatchSvmScheme implements SchemeNetworkFacilitator {
     if (completed) return claimResponse(prepared, requirements.network, completed);
 
     // A completed replay must not re-register a channel already reclaimed by cleanup.
-    await Promise.all(
-      prepared.map(item =>
-        this.trackChannel({
-          channelId: item.channelId,
-          expiresAt: item.expiresAt,
-          network: requirements.network,
-          payTo: item.payTo,
-          tokenProgram: item.tokenProgram,
-        }),
-      ),
+    await this.trackChannels(
+      prepared.map(item => ({
+        channelId: item.channelId,
+        expiresAt: item.expiresAt,
+        network: requirements.network,
+        payTo: item.payTo,
+        tokenProgram: item.tokenProgram,
+      })),
     );
 
     const pending = await this.pendingStore.get(claimKey);
@@ -1978,6 +1976,17 @@ export class BatchSvmScheme implements SchemeNetworkFacilitator {
     // Every upsert is facilitator-visible activity: it resets the idle clock.
     const now = Date.now();
     return this.channelStorage.upsert({ ...record, firstSeenAt: now, lastActivityAt: now });
+  }
+  private trackChannels(
+    records: readonly Omit<PaymentChannelRecord, "firstSeenAt" | "lastActivityAt">[],
+  ): Promise<void> {
+    if (!this.channelStorage.upsertMany) {
+      return Promise.all(records.map(record => this.trackChannel(record))).then(() => undefined);
+    }
+    const now = Date.now();
+    return this.channelStorage.upsertMany(
+      records.map(record => ({ ...record, firstSeenAt: now, lastActivityAt: now })),
+    );
   }
 }
 
