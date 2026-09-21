@@ -149,9 +149,10 @@ interoperability.
 
 If the client invokes `request_close`, the channel enters `Closing` and regular
 `settle` is no longer available. Only the `payee` can apply a final voucher with
-`settle_and_seal` during the grace period. After the grace period, anyone can
-call `seal`; the payer can recover unspent escrow through `withdraw_payer` or
-sealed `distribute`.
+`settle_and_seal` during the grace period; the server supplies that voucher
+through the `seal` settlement payload of section 4.5, authenticated by its
+receiver authorizer. After the grace period, anyone can call `seal`; the payer
+can recover unspent escrow through `withdraw_payer` or sealed `distribute`.
 
 ## 4. Wire Format
 
@@ -730,6 +731,7 @@ instruction it invokes:
 | `authorization` | Client | Ask the operator to accept and sign the next cumulative voucher; no funds move. | None |
 | `claim` | Server | Advance accounting; no funds move to the receiver. | `settle` |
 | `settle` | Server | Move earned funds to the receiver. | `distribute` |
+| `seal` | Server | Finalize a `Closing` channel with the server's latest voucher during the grace period; pays the receiver and returns unused escrow to the payer. | `settle_and_seal` + sealed `distribute` |
 | `refund` | Client, optionally server-enriched | Start a payer-forced close; after the grace period, finalize and return all unused escrow, or use an authenticated immediate cooperative close. | `request_close` then `seal` + sealed `distribute`, or `settle_and_seal` + sealed `distribute` |
 
 The examples in this subsection show the inner `paymentPayload.payload`; the
@@ -752,6 +754,11 @@ server-authored or server-enriched variants are:
 | Settle | `channels` | array | One to four channels to distribute in one transaction. |
 | Settle | `channels[].channelId` | string | Channel PDA. |
 | Settle | `channels[].channelConfig` | `ChannelConfig` | Full configuration used to derive accounts, validate the channel, and reconstruct the distribution. |
+| Seal | `type` | string | `"seal"` |
+| Seal | `channelId` | string | Channel PDA. |
+| Seal | `channelConfig` | `ChannelConfig` | Full channel configuration. |
+| Seal | `voucher` | `BatchVoucher` | Latest accepted voucher; its `maxClaimableAmount` becomes the final settled watermark. `expiresAt` MUST be `0`. |
+| Seal | `closeAuthorization` | `CloseAuthorization` | REQUIRED unless the facilitator authenticates the server out of band. Binds this exact close. |
 | Refund | `type` | string | `"refund"` |
 | Refund | `channelConfig` | `ChannelConfig` | Client-provided channel configuration. |
 | Refund | `transaction` | string | Client-signed `request_close` transaction forwarded to the facilitator. |
@@ -926,6 +933,62 @@ every `channels[]` entry in one transaction and MUST process every entry or
 fail the request; it MUST NOT silently truncate a batch. It MUST confirm the
 transaction onchain before returning success.
 
+Once the payer has broadcast `request_close`, the channel is `Closing` and
+program `settle` is unavailable: a `claim` for that channel, and a `voucher` or
+`authorization` verification against it, MUST fail with
+`invalid_batch_settlement_svm_channel_closing`. The server's only way to
+collect voucher value above the onchain `settled` watermark is a `seal`
+payload, which the facilitator executes as `payee` before the grace period
+ends. A server SHOULD retry a claim that failed with that code as a `seal`,
+and SHOULD set `withdrawDelay` comfortably above its claim cadence so the
+grace period always covers a scheduled redemption:
+
+```json
+{
+  "type": "seal",
+  "channelId": "<channel-pda>",
+  "channelConfig": {
+    "payer": "<client-wallet>",
+    "payerAuthorizer": "<client-voucher-signer>",
+    "receiver": "<server-receiver>",
+    "receiverAuthorizer": "<server-close-authorizer>",
+    "token": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+    "withdrawDelay": 3600,
+    "salt": "42",
+    "openSlot": 341000000
+  },
+  "voucher": {
+    "channelId": "<channel-pda>",
+    "maxClaimableAmount": "5000",
+    "expiresAt": 0,
+    "signature": "<base58-ed25519-latest-voucher-signature>"
+  },
+  "closeAuthorization": {
+    "validBefore": 1785341100,
+    "signature": "<base58-server-close-authorization-signature>"
+  }
+}
+```
+
+The facilitator MUST authenticate the server before acting on a `seal`: from
+its trusted request context, or by verifying `closeAuthorization` against the
+receiver authorizer bound to the channel at its first deposit (or a key it
+registered for `payTo` out of band), requiring `now < validBefore <= now +
+maxTimeoutSeconds`. A key that merely appears in the request MUST NOT be
+trusted, because a payer holding an older voucher could otherwise freeze the
+watermark below the server's latest. It MUST verify the voucher signature
+against `channelConfig.payerAuthorizer`, confirm the channel is `Closing` with
+`now < closure_started_at + grace_period`, and require `Channel.settled <=
+voucher.maxClaimableAmount <= Channel.deposit`. When `settled <
+maxClaimableAmount` it emits the voucher's Ed25519 precompile instruction
+immediately followed by `settle_and_seal` with `has_voucher = 1`; when equal it
+invokes `settle_and_seal` with `has_voucher = 0`. It then invokes sealed
+`distribute` in the same transaction, confirms it onchain, and reports
+`amount` as the funds moved to `payTo`; the payer receives `deposit -
+maxClaimableAmount` in the same transaction. Any other state MUST be rejected
+with `invalid_batch_settlement_svm_close_state`. A `seal` occupies the
+`("close", channelId, maxClaimableAmount)` namespace of Phase 5.
+
 Successful responses have operation-specific `amount` semantics:
 
 Claim (`amount` is empty because no funds move):
@@ -958,6 +1021,28 @@ server MUST NOT require either field. When they are absent, it reconciles the
 `settled` and `payout_watermark` values by reading the channel account after
 the transaction confirms; when they are present, it MAY use them only if they
 name exactly the channels it submitted.
+
+Seal (`amount` is the delta paid to the receiver; `extra.channelState`
+carries the final watermark, and `balance - totalClaimed` went back to the
+payer):
+
+```json
+{
+  "success": true,
+  "transaction": "<base58-transaction-signature>",
+  "network": "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+  "payer": "<client-wallet>",
+  "amount": "2000",
+  "extra": {
+    "channelState": {
+      "channelId": "<channel-pda>",
+      "balance": "100000",
+      "totalClaimed": "5000",
+      "withdrawRequestedAt": 0
+    }
+  }
+}
+```
 
 Deposit (`amount` is the amount deposited or topped up):
 
@@ -1451,6 +1536,11 @@ the request path:
 - **Settle (`type: "settle"`).** Call program `distribute` to pay the newly
   claimed delta to `payTo` and advance `payout_watermark`. The channel remains
   open.
+- **Seal (`type: "seal"`).** For a channel the payer has moved to `Closing`,
+  the server submits its latest voucher with a `CloseAuthorization`; the
+  facilitator, as `payee`, applies it with `settle_and_seal` and pays out with
+  sealed `distribute` before the grace period ends. This is how a server
+  collects voucher value above the onchain watermark once the payer walks.
 - **Refund (`type: "refund"`).** The facilitator broadcasts the client's
   payer-signed `request_close` transaction with its fee-payer signature. After
   the configured grace period, it or another permissionless crank calls `seal`
@@ -1527,10 +1617,11 @@ duplicate request from executing but is not an HTTP response-recovery protocol:
   Once `Closing`, later retries return the observed channel state. A client
   refund does not occupy the cooperative-close authorization namespace and does
   not require a server signature. If the server supplies a cooperative close,
-  the latest voucher and its authorization occupy a distinct `("close",
-  channelId, maxClaimableAmount)` namespace; the server and facilitator MUST
-  cache that result through `closeAuthorization.validBefore` or the replay
-  window of the trusted out-of-band request authentication.
+  as a `seal` payload or a server-enriched refund, the latest voucher and its
+  authorization occupy a distinct `("close", channelId, maxClaimableAmount)`
+  namespace; the server and facilitator MUST cache that result through
+  `closeAuthorization.validBefore` or the replay window of the trusted
+  out-of-band request authentication.
 - **Reclaim.** A channel can transition from `Distributed` to deallocated only
   once. Concurrent reclaim attempts require no additional replay mitigation;
   later attempts observe an absent account or invalid status.
@@ -1668,6 +1759,10 @@ Standard x402 codes apply. The facilitator reports verification failures in
 - `invalid_batch_settlement_svm_close_state` - the channel cannot be closed, or
   an optional cooperative voucher does not equal server state or is behind the
   channel's onchain `settled` value.
+- `invalid_batch_settlement_svm_channel_closing` - the payer has started a
+  forced close, so program `settle` is unavailable: a `claim`, `voucher`, or
+  `authorization` for the channel is refused and the server retries with a
+  `seal` payload inside the grace period.
 - `invalid_batch_settlement_svm_withdraw_delay_mismatch` - channel grace period
   does not match `extra.withdrawDelay`.
 - `invalid_batch_settlement_svm_withdraw_delay_out_of_range` - `withdrawDelay`

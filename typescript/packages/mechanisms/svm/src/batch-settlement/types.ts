@@ -136,7 +136,29 @@ export type BatchSettlePayload = {
   channels: { channelId: string; channelConfig: BatchChannelConfig }[];
 };
 
-export type BatchFacilitatorPayload = BatchPayload | BatchClaimPayload | BatchSettlePayload;
+/**
+ * Server-authored cooperative close of a `Closing` channel: apply the server's
+ * latest accepted voucher with `settle_and_seal` and pay out with a sealed
+ * `distribute` before the payer's grace period ends (spec 4.5).
+ */
+export type BatchSealPayload = {
+  type: "seal";
+  channelId: string;
+  channelConfig: BatchChannelConfig;
+  /** Latest accepted voucher; its cumulative becomes the final settled watermark. */
+  voucher: BatchVoucher;
+  /**
+   * Receiver-authorizer signature binding this exact close. Required unless
+   * the facilitator authenticates the server out of band.
+   */
+  closeAuthorization?: CloseAuthorization | undefined;
+};
+
+export type BatchFacilitatorPayload =
+  | BatchPayload
+  | BatchClaimPayload
+  | BatchSettlePayload
+  | BatchSealPayload;
 
 export type BatchChannelState = {
   channelId: string;
@@ -241,6 +263,14 @@ export function isBatchFacilitatorPayload(value: unknown): value is BatchFacilit
       value.claims.every(isBatchVoucherClaim)
     );
   }
+  if (value.type === "seal") {
+    return (
+      typeof value.channelId === "string" &&
+      isBatchChannelConfig(value.channelConfig) &&
+      isBatchVoucher(value.voucher) &&
+      (value.closeAuthorization === undefined || isCloseAuthorization(value.closeAuthorization))
+    );
+  }
   return (
     value.type === "settle" &&
     Array.isArray(value.channels) &&
@@ -268,7 +298,11 @@ function isBatchVoucherClaim(value: unknown): value is BatchVoucherClaim {
 
 function isCloseAuthorization(value: unknown): value is CloseAuthorization {
   return (
-    isRecord(value) && typeof value.validBefore === "number" && typeof value.signature === "string"
+    isRecord(value) &&
+    typeof value.validBefore === "number" &&
+    Number.isSafeInteger(value.validBefore) &&
+    value.validBefore > 0 &&
+    typeof value.signature === "string"
   );
 }
 

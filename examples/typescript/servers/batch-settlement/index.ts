@@ -107,9 +107,9 @@ async function main() {
   if (svmAddress) {
     const batchedSvmScheme = new BatchSvmScheme({
       withdrawDelay,
-      ...(svmReceiverAuthorizerSigner
-        ? { receiverAuthorizer: svmReceiverAuthorizerSigner.address }
-        : {}),
+      // Advertised as extra.receiverAuthorizer and used by the redemption
+      // worker to seal a channel the payer is closing with the latest voucher.
+      ...(svmReceiverAuthorizerSigner ? { closeAuthorizer: svmReceiverAuthorizerSigner } : {}),
       ...(svmOperatorSigner ? { operator: svmOperatorSigner } : {}),
       store: new MemoryChannelStore(),
     });

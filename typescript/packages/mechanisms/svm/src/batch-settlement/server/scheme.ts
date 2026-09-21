@@ -80,7 +80,14 @@ const DEFAULT_SERVER_SIGNED_MIN_DEPOSIT_MULTIPLIER = 3n;
 
 export interface BatchSvmServerConfig {
   withdrawDelay?: number | undefined;
+  /** Receiver-authorizer address to advertise; derived from `closeAuthorizer` when omitted. */
   receiverAuthorizer?: string | undefined;
+  /**
+   * Receiver-authorizer signer. Advertised as `extra.receiverAuthorizer` and
+   * used by the redemption worker to sign `CloseAuthorization`s, so a channel
+   * the payer is closing can still be finalized with the latest voucher.
+   */
+  closeAuthorizer?: MessagePartialSigner | undefined;
   store?: ChannelStore | undefined;
   /** Maximum age of onchain state used to verify vouchers locally. */
   onchainStateTtlMs?: number | undefined;
@@ -119,6 +126,13 @@ export class BatchSvmScheme implements SchemeNetworkServer {
   private reservationSequence = 0;
 
   constructor(private readonly config: BatchSvmServerConfig = {}) {
+    if (
+      config.receiverAuthorizer !== undefined &&
+      config.closeAuthorizer !== undefined &&
+      config.receiverAuthorizer !== config.closeAuthorizer.address
+    ) {
+      throw new Error("receiverAuthorizer must be the closeAuthorizer's address when both are set");
+    }
     this.store = config.store ?? new MemoryChannelStore();
     this.operationStore = config.operationStore ?? new MemoryBatchOperationStore();
     this.schemeHooks = {
@@ -258,9 +272,7 @@ export class BatchSvmScheme implements SchemeNetworkServer {
         ),
         withdrawDelay,
         minDeposit: this.resolveMinDepositHint(paymentRequirements),
-        ...(this.config.receiverAuthorizer
-          ? { receiverAuthorizer: this.config.receiverAuthorizer }
-          : {}),
+        ...(this.receiverAuthorizer() ? { receiverAuthorizer: this.receiverAuthorizer() } : {}),
         ...(serverSigned
           ? { operator: this.config.operator!.address, voucherSigner: "server" }
           : {}),
@@ -318,6 +330,7 @@ export class BatchSvmScheme implements SchemeNetworkServer {
       );
     }
     return new BatchChannelManager({
+      closeAuthorizer: this.config.closeAuthorizer,
       ...options,
       requirements,
       settle: (payload, accepted) =>
@@ -910,6 +923,15 @@ export class BatchSvmScheme implements SchemeNetworkServer {
    * @param snapshot - Confirmed onchain snapshot from the facilitator
    * @returns Whether the snapshot may be persisted
    */
+  /**
+   * The receiver-authorizer address this server advertises, if any.
+   *
+   * @returns The configured address, or the close authorizer's
+   */
+  private receiverAuthorizer(): string | undefined {
+    return this.config.receiverAuthorizer ?? this.config.closeAuthorizer?.address;
+  }
+
   private applySnapshot(channelId: string, snapshot: VerifiedChannelState): boolean {
     if (snapshot.channelId !== undefined && snapshot.channelId !== channelId) return false;
     if (snapshot.withdrawRequestedAt !== 0) return false;

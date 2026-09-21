@@ -79,11 +79,15 @@ import {
   pendingSignatureOf,
   recoveredRefundResponse,
   refundResponse,
+  settleFailure,
+  settlementPending,
   verifiedChannelExtra,
+  verifyFailure,
 } from "./responses";
 
 import { recordPendingOrTerminal, TransactionOnchainFailureError } from "../../utils";
 import { ErrSettlementPending } from "../../exact/facilitator/errors";
+import { assertNotClosing, type SealDependencies, settleSeal } from "./seal";
 import { BatchError } from "../errors";
 import {
   BATCH_SETTLEMENT_SCHEME,
@@ -131,6 +135,14 @@ export interface BatchSvmFacilitatorConfig {
   maxPriorityFeeMicroLamports?: number | undefined;
   maxComputeUnits?: number | undefined;
   maxRequiredSignatures?: number | undefined;
+  /**
+   * Receiver-authorizer keys registered out of band, by `payTo`. A `seal`
+   * request is normally authenticated against the key bound to the channel at
+   * its first deposit; this registry covers channels whose binding was lost
+   * with facilitator storage. A key that merely appears in a request is never
+   * trusted.
+   */
+  trustedReceiverAuthorizers?: Readonly<Record<string, readonly string[]>> | undefined;
 }
 
 type BatchTerms = {
@@ -255,15 +267,15 @@ export class BatchSvmScheme implements SchemeNetworkFacilitator {
     requirements: PaymentRequirements,
   ): Promise<VerifyResponse> {
     const payload = payment.payload;
-    if (!isBatchPayload(payload)) return this.verifyFailure(BatchError.PAYLOAD_TYPE, "");
+    if (!isBatchPayload(payload)) return verifyFailure(BatchError.PAYLOAD_TYPE, "");
     if (
       payment.accepted.scheme !== BATCH_SETTLEMENT_SCHEME ||
       requirements.scheme !== BATCH_SETTLEMENT_SCHEME
     ) {
-      return this.verifyFailure("unsupported_scheme", payload.channelConfig.payer);
+      return verifyFailure("unsupported_scheme", payload.channelConfig.payer);
     }
     if (payment.accepted.network !== requirements.network) {
-      return this.verifyFailure("network_mismatch", payload.channelConfig.payer);
+      return verifyFailure("network_mismatch", payload.channelConfig.payer);
     }
 
     try {
@@ -280,7 +292,7 @@ export class BatchSvmScheme implements SchemeNetworkFacilitator {
           const terms = await this.resolveTerms(payload.channelConfig, requirements);
           const channelId = await this.deriveChannelId(payload.channelConfig, terms.feePayer);
           if (payload.voucher.channelId !== channelId) {
-            return this.verifyFailure(BatchError.CHANNEL_ID_MISMATCH, payload.channelConfig.payer);
+            return verifyFailure(BatchError.CHANNEL_ID_MISMATCH, payload.channelConfig.payer);
           }
           const channel = await this.validateVoucherOnly(payload, requirements, terms, channelId);
           return {
@@ -294,6 +306,7 @@ export class BatchSvmScheme implements SchemeNetworkFacilitator {
           const channelId = await this.deriveChannelId(payload.channelConfig, terms.feePayer);
           await this.assertServerModeProof(payload, channelId, requirements);
           const channel = await this.fetchChannel(requirements.network, channelId);
+          assertNotClosing(channel, channelId);
           this.assertClaimChannel(channel, payload.channelConfig, terms, requirements, [
             ChannelStatus.Open,
           ]);
@@ -317,7 +330,7 @@ export class BatchSvmScheme implements SchemeNetworkFacilitator {
         }
       }
     } catch (error) {
-      return this.verifyFailure(
+      return verifyFailure(
         classifyError(error),
         payload.channelConfig.payer,
         error instanceof Error ? error.message : String(error),
@@ -331,7 +344,7 @@ export class BatchSvmScheme implements SchemeNetworkFacilitator {
   ): Promise<SettleResponse> {
     const payload = payment.payload;
     if (!isBatchFacilitatorPayload(payload)) {
-      return this.settleFailure(payment, BatchError.PAYLOAD_TYPE, "");
+      return settleFailure(payment.accepted.network, BatchError.PAYLOAD_TYPE, "");
     }
     try {
       switch (payload.type) {
@@ -347,10 +360,12 @@ export class BatchSvmScheme implements SchemeNetworkFacilitator {
           return await this.settleClaims(payment, payload, requirements);
         case "settle":
           return await this.settleDistributions(payment, payload, requirements);
+        case "seal":
+          return await settleSeal(this.sealDependencies(), payment, payload, requirements);
       }
     } catch (error) {
-      return this.settleFailure(
-        payment,
+      return settleFailure(
+        payment.accepted.network,
         classifyError(error),
         "channelConfig" in payload ? payload.channelConfig.payer : "",
         error instanceof Error ? error.message : String(error),
@@ -442,7 +457,7 @@ export class BatchSvmScheme implements SchemeNetworkFacilitator {
           ),
       );
       if (!confirmed) {
-        return this.settlementPending(
+        return settlementPending(
           requirements.network,
           prepared[0]?.claim.voucher.channelConfig.payer ?? "",
           recovered.signature,
@@ -466,6 +481,7 @@ export class BatchSvmScheme implements SchemeNetworkFacilitator {
     for (let index = 0; index < prepared.length; index += 1) {
       const item = prepared[index]!;
       const channel = channels[index]!;
+      assertNotClosing(channel, item.channelId);
       this.assertClaimChannel(channel, item.claim.voucher.channelConfig, item.terms, requirements, [
         ChannelStatus.Open,
       ]);
@@ -485,8 +501,8 @@ export class BatchSvmScheme implements SchemeNetworkFacilitator {
       );
     }
     if (this.settlementCache.isDuplicate(claimKey)) {
-      return this.settleFailure(
-        payment,
+      return settleFailure(
+        payment.accepted.network,
         CHANNEL_BUSY,
         prepared[0]?.claim.voucher.channelConfig.payer ?? "",
       );
@@ -512,7 +528,7 @@ export class BatchSvmScheme implements SchemeNetworkFacilitator {
         ),
     );
     if (!confirmed) {
-      return this.settlementPending(
+      return settlementPending(
         requirements.network,
         prepared[0]?.claim.voucher.channelConfig.payer ?? "",
         submitted.signature,
@@ -613,7 +629,7 @@ export class BatchSvmScheme implements SchemeNetworkFacilitator {
     if (instructions.length === 0) {
       if (previous) return JSON.parse(previous) as SettleResponse;
       // State alone cannot identify a previous payment or its amount.
-      return this.settleFailure(payment, BatchError.CUMULATIVE_AMOUNT_MISMATCH, "");
+      return settleFailure(payment.accepted.network, BatchError.CUMULATIVE_AMOUNT_MISMATCH, "");
     }
     // Different sweeps can share a recent blockhash. Give each new signed
     // transaction its own identity; recovery always reuses these exact bytes.
@@ -761,7 +777,7 @@ export class BatchSvmScheme implements SchemeNetworkFacilitator {
         await this.completeBroadcast(key, signature, requirements.network);
         return response;
       }
-      return this.settlementPending(requirements.network, "", signature, String(error));
+      return settlementPending(requirements.network, "", signature, String(error));
     }
   }
 
@@ -901,7 +917,11 @@ export class BatchSvmScheme implements SchemeNetworkFacilitator {
       return depositResponse(channelId, existing, requirements.network, "", validated.deposit);
     }
     if (this.settlementCache.isDuplicate(key)) {
-      return this.settleFailure(payment, "duplicate_settlement", payload.channelConfig.payer);
+      return settleFailure(
+        payment.accepted.network,
+        "duplicate_settlement",
+        payload.channelConfig.payer,
+      );
     }
     try {
       if (validated.isTopUp) {
@@ -948,6 +968,9 @@ export class BatchSvmScheme implements SchemeNetworkFacilitator {
         network: requirements.network,
         payTo: requirements.payTo,
         tokenProgram: terms.tokenProgram,
+        // Bound at first deposit and fixed for the channel lifetime; a later
+        // `seal` must carry a CloseAuthorization from this key (spec §3).
+        ...(terms.receiverAuthorizer ? { receiverAuthorizer: terms.receiverAuthorizer } : {}),
       });
     } catch (error) {
       // No transaction has been broadcast. Release the channel lock so a
@@ -1041,7 +1064,11 @@ export class BatchSvmScheme implements SchemeNetworkFacilitator {
     requirements: PaymentRequirements,
   ): Promise<SettleResponse> {
     void requirements;
-    return this.settleFailure(payment, BatchError.PAYLOAD_TYPE, payload.channelConfig.payer);
+    return settleFailure(
+      payment.accepted.network,
+      BatchError.PAYLOAD_TYPE,
+      payload.channelConfig.payer,
+    );
   }
 
   private async validateVoucherOnly(
@@ -1063,6 +1090,7 @@ export class BatchSvmScheme implements SchemeNetworkFacilitator {
     });
     if (!valid) throw new Error(BatchError.VOUCHER_SIGNATURE);
     const channel = await this.fetchChannel(requirements.network, channelId);
+    assertNotClosing(channel, channelId);
     this.assertClaimChannel(channel, payload.channelConfig, terms, requirements, [
       ChannelStatus.Open,
     ]);
@@ -1169,7 +1197,7 @@ export class BatchSvmScheme implements SchemeNetworkFacilitator {
           channel.status === ChannelStatus.Distributed,
       );
       if (observed === false) {
-        return this.settlementPending(
+        return settlementPending(
           requirements.network,
           payload.channelConfig.payer,
           recovered.signature,
@@ -1209,7 +1237,7 @@ export class BatchSvmScheme implements SchemeNetworkFacilitator {
       return refundResponse(channelId, channel, requirements.network, "");
     }
     if (this.settlementCache.isDuplicate(key)) {
-      return this.settleFailure(payment, "duplicate_settlement", channel.payer);
+      return settleFailure(payment.accepted.network, "duplicate_settlement", channel.payer);
     }
     await this.trackChannel({
       channelId,
@@ -1261,7 +1289,7 @@ export class BatchSvmScheme implements SchemeNetworkFacilitator {
           observed.status === ChannelStatus.Distributed),
     );
     if (!closing) {
-      return this.settlementPending(
+      return settlementPending(
         requirements.network,
         payload.channelConfig.payer,
         broadcast.signature,
@@ -1596,7 +1624,7 @@ export class BatchSvmScheme implements SchemeNetworkFacilitator {
       await this.completeBroadcast(key, signature, network);
       return undefined;
     } catch (error) {
-      return this.settlementPending(
+      return settlementPending(
         network,
         payer,
         signature,
@@ -1607,22 +1635,6 @@ export class BatchSvmScheme implements SchemeNetworkFacilitator {
 
   private completedBroadcastKey(key: string): string {
     return `${key}${COMPLETED_BROADCAST_SUFFIX}`;
-  }
-
-  private settlementPending(
-    network: Network,
-    payer: string,
-    signature: string,
-    message: string,
-  ): SettleResponse {
-    return {
-      errorMessage: message,
-      errorReason: ErrSettlementPending,
-      network,
-      payer,
-      success: false,
-      transaction: signature,
-    };
   }
 
   /**
@@ -1935,37 +1947,35 @@ export class BatchSvmScheme implements SchemeNetworkFacilitator {
     });
   }
 
+  private sealDependencies(): SealDependencies {
+    return {
+      assertClaimChannel: (channel, config, terms, requirements, allowed) =>
+        this.assertClaimChannel(channel, config, terms as BatchTerms, requirements, allowed),
+      channelStorage: this.channelStorage,
+      completeOrPending: (key, signature, network, payer) =>
+        this.completeOrPending(key, signature, network, payer),
+      deriveChannelId: (config, feePayer) => this.deriveChannelId(config, feePayer),
+      distributeInstruction: (channelId, channel, terms, requirements) =>
+        this.distributeInstruction(channelId, channel, terms as BatchTerms, requirements),
+      fetchChannel: (network, channelId) => this.fetchChannel(network, channelId),
+      nowSeconds: () => Math.floor(Date.now() / 1000),
+      pendingStore: this.pendingStore,
+      readChannel: (network, channelId) => this.readChannel(network, channelId),
+      resolveTerms: (config, requirements) => this.resolveTerms(config, requirements),
+      settlementCache: this.settlementCache,
+      submitRedemption: (feePayer, network, instructions, key, payer) =>
+        this.submitRedemption(feePayer, network, instructions, key, payer),
+      trackChannel: record => this.trackChannel(record),
+      trustedReceiverAuthorizers: this.config.trustedReceiverAuthorizers,
+    };
+  }
+
   private trackChannel(
     record: Omit<PaymentChannelRecord, "firstSeenAt" | "lastActivityAt">,
   ): Promise<void> {
     // Every upsert is facilitator-visible activity: it resets the idle clock.
     const now = Date.now();
     return this.channelStorage.upsert({ ...record, firstSeenAt: now, lastActivityAt: now });
-  }
-
-  private verifyFailure(reason: string, payer: string, message?: string): VerifyResponse {
-    return {
-      isValid: false,
-      invalidReason: reason,
-      ...(message ? { invalidMessage: message } : {}),
-      payer,
-    };
-  }
-
-  private settleFailure(
-    payment: PaymentPayload,
-    reason: string,
-    payer: string,
-    message?: string,
-  ): SettleResponse {
-    return {
-      success: false,
-      network: payment.accepted.network,
-      transaction: "",
-      errorReason: reason,
-      ...(message ? { errorMessage: message } : {}),
-      payer,
-    };
   }
 }
 

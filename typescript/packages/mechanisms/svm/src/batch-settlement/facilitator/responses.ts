@@ -4,7 +4,9 @@
  * outcomes, kept apart from the scheme's request handling.
  */
 
-import type { Network, SettleResponse } from "@x402/core/types";
+import type { Network, SettleResponse, VerifyResponse } from "@x402/core/types";
+
+import { ErrSettlementPending } from "../../exact/facilitator/errors";
 
 import type { Channel } from "../../payment-channels/generated/accounts/channel";
 import {
@@ -222,6 +224,115 @@ export function recoveredRefundResponse(
     payer,
     success: true,
     transaction,
+  };
+}
+
+/**
+ * Successful `seal` response: the final voucher was applied with
+ * `settle_and_seal` and the sealed `distribute` paid the receiver and returned
+ * the remainder to the payer in the same transaction.
+ *
+ * @param args - Final channel accounting
+ * @param args.channelId - Channel PDA
+ * @param args.payer - Channel payer
+ * @param args.network - CAIP-2 network
+ * @param args.transaction - Confirmed transaction signature
+ * @param args.paidToReceiver - Amount this transaction moved to `payTo`
+ * @param args.deposit - Channel deposit before the close
+ * @param args.finalSettled - Final settled watermark; `deposit - finalSettled` went back to the payer
+ * @returns The settle response
+ */
+export function sealResponse(args: {
+  channelId: string;
+  payer: string;
+  network: Network;
+  transaction: string;
+  paidToReceiver: bigint;
+  deposit: bigint;
+  finalSettled: bigint;
+}): SettleResponse {
+  return {
+    success: true,
+    payer: args.payer,
+    transaction: args.transaction,
+    network: args.network,
+    amount: args.paidToReceiver.toString(),
+    extra: {
+      channelState: {
+        channelId: args.channelId,
+        balance: args.deposit.toString(),
+        totalClaimed: args.finalSettled.toString(),
+        withdrawRequestedAt: 0,
+      } satisfies BatchChannelState,
+    },
+  };
+}
+
+/**
+ * A failed verification response.
+ *
+ * @param reason - Machine-readable reason
+ * @param payer - Channel payer when recoverable
+ * @param message - Optional human-readable detail
+ * @returns The verify response
+ */
+export function verifyFailure(reason: string, payer: string, message?: string): VerifyResponse {
+  return {
+    isValid: false,
+    invalidReason: reason,
+    ...(message ? { invalidMessage: message } : {}),
+    payer,
+  };
+}
+
+/**
+ * A failed settlement response.
+ *
+ * @param network - CAIP-2 network of the request
+ * @param reason - Machine-readable reason
+ * @param payer - Channel payer when recoverable
+ * @param message - Optional human-readable detail
+ * @returns The settle response
+ */
+export function settleFailure(
+  network: Network,
+  reason: string,
+  payer: string,
+  message?: string,
+): SettleResponse {
+  return {
+    success: false,
+    network,
+    transaction: "",
+    errorReason: reason,
+    ...(message ? { errorMessage: message } : {}),
+    payer,
+  };
+}
+
+/**
+ * A response for work that was broadcast but whose outcome is not yet
+ * confirmed; the caller retries with the same request.
+ *
+ * @param network - CAIP-2 network
+ * @param payer - Channel payer when recoverable
+ * @param signature - The broadcast signature
+ * @param message - What is still pending
+ * @returns The settle response
+ */
+export function settlementPending(
+  network: Network,
+  payer: string,
+  signature: string,
+  message: string,
+): SettleResponse {
+  return {
+    errorMessage: message,
+    errorReason: ErrSettlementPending,
+    network,
+    payer,
+    success: false,
+    transaction: signature,
   };
 }
 

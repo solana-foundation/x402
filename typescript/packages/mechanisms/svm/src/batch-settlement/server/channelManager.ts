@@ -7,14 +7,16 @@
  * that redemption on an interval, out of the request path.
  */
 
-import { address } from "@solana/kit";
+import { address, type MessagePartialSigner } from "@solana/kit";
 import { createRpcClient } from "../../utils";
 import type { ChannelRpc } from "../../payment-channels/facilitator";
 import { getChannelDecoder } from "../../payment-channels/generated/accounts/channel";
 import { PAYMENT_CHANNELS_PROGRAM_ID } from "../../payment-channels/onchain";
 import type { PaymentRequirements, SettleResponse } from "@x402/core/types";
 
-import { BATCH_SETTLEMENT_SCHEME } from "../types";
+import { signCloseAuthorization } from "../closeAuthorization";
+import { BatchError } from "../errors";
+import { BATCH_SETTLEMENT_SCHEME, type BatchSealPayload } from "../types";
 import type { ChannelState, ChannelStore } from "./storage";
 
 /**
@@ -56,12 +58,22 @@ export interface BatchChannelManagerConfig {
   readSettledWatermark?: ((channelId: string) => Promise<bigint | undefined>) | undefined;
   /** Reports a pass that failed, so an operator can see it. */
   onError?: ((error: unknown) => void) | undefined;
+  /**
+   * Receiver-authorizer key advertised as `extra.receiverAuthorizer`. When a
+   * claim finds the payer has started a forced close, the worker signs a
+   * `CloseAuthorization` with it and retries as a `seal`, so vouchers above
+   * the onchain watermark are collected inside the grace period instead of
+   * forfeited. Without it a closing channel is only marked closing.
+   */
+  closeAuthorizer?: MessagePartialSigner | undefined;
 }
 
 /** What one redemption pass moved. */
 export interface RedemptionResult {
   claimed: string[];
   distributed: string[];
+  /** Closing channels finalized with the latest voucher through `seal`. */
+  sealed: string[];
 }
 
 /**
@@ -139,12 +151,12 @@ export class BatchChannelManager {
       throw new Error("BatchChannelManager requires a channel store that can list its channels");
     }
     const list = this.config.store.list.bind(this.config.store);
-    const claimed = await this.claim(await list());
+    const { claimed, sealed } = await this.claim(await list());
     // Re-read before paying out: a claim in this same pass just advanced the
     // watermarks that decide what there is to distribute, so the snapshot the
     // pass opened with is already stale.
     const distributed = await this.distribute(await list());
-    return { claimed, distributed };
+    return { claimed, distributed, sealed };
   }
 
   /**
@@ -153,50 +165,79 @@ export class BatchChannelManager {
    * @param channels - Channels to consider claiming
    * @returns The channels whose claim landed
    */
-  private async claim(channels: ChannelState[]): Promise<string[]> {
+  private async claim(channels: ChannelState[]): Promise<{ claimed: string[]; sealed: string[] }> {
     const claimable = channels.filter(
       channel =>
         channel.status === "open" &&
         channel.highestVoucherSignature !== undefined &&
         channel.signedMaxClaimable > channel.settled,
     );
-    const claimed: string[] = [];
+    const result = { claimed: [] as string[], sealed: [] as string[] };
     for (const batch of chunk(claimable, this.batchSize())) {
-      const response = await this.config.settle(
-        {
-          accepted: this.config.requirements,
-          payload: {
-            claims: batch.map(channel => ({
-              signature: channel.highestVoucherSignature!,
-              voucher: {
-                channelConfig: channel.channelConfig,
-                channelId: channel.channelId,
-                expiresAt: channel.highestVoucherExpiresAt ?? 0,
-                maxClaimableAmount: channel.signedMaxClaimable.toString(),
-              },
-            })),
-            type: "claim",
-          },
-          x402Version: 2,
+      await this.claimBatch(batch, result);
+    }
+    return result;
+  }
+
+  /**
+   * Claim one batch, or fall back to `seal` for a channel the payer is closing.
+   *
+   * @param batch - Channels packed into one claim transaction
+   * @param result - Accumulates the pass outcome
+   * @param result.claimed - Channels whose claim landed
+   * @param result.sealed - Closing channels finalized through `seal`
+   */
+  private async claimBatch(
+    batch: ChannelState[],
+    result: { claimed: string[]; sealed: string[] },
+  ): Promise<void> {
+    const response = await this.config.settle(
+      {
+        accepted: this.config.requirements,
+        payload: {
+          claims: batch.map(channel => ({
+            signature: channel.highestVoucherSignature!,
+            voucher: {
+              channelConfig: channel.channelConfig,
+              channelId: channel.channelId,
+              expiresAt: channel.highestVoucherExpiresAt ?? 0,
+              maxClaimableAmount: channel.signedMaxClaimable.toString(),
+            },
+          })),
+          type: "claim",
         },
-        this.config.requirements,
+        x402Version: 2,
+      },
+      this.config.requirements,
+    );
+    if (!response.success) {
+      if (response.errorReason === BatchError.CHANNEL_CLOSING) {
+        // The payer started a forced close on at least one channel in the
+        // batch, so program `settle` is no longer available for it. Claim the
+        // others one by one and finalize the closing one with its latest
+        // voucher through `seal` while the grace period still allows it.
+        if (batch.length > 1) {
+          for (const channel of batch) await this.claimBatch([channel], result);
+          return;
+        }
+        const channel = batch[0]!;
+        if (await this.seal(channel)) result.sealed.push(channel.channelId);
+        return;
+      }
+      // A batch that did not land leaves its channels for the next pass;
+      // the watermark is monotonic, so a repeat is harmless.
+      this.config.onError?.(
+        new Error(`${BATCH_SETTLEMENT_SCHEME} claim failed: ${response.errorReason ?? "unknown"}`),
       );
-      if (!response.success) {
-        // A batch that did not land leaves its channels for the next pass;
-        // the watermark is monotonic, so a repeat is harmless.
-        this.config.onError?.(
-          new Error(
-            `${BATCH_SETTLEMENT_SCHEME} claim failed: ${response.errorReason ?? "unknown"}`,
-          ),
-        );
-        continue;
-      }
-      if (response.network !== this.config.requirements.network) {
-        this.config.onError?.(
-          new Error(`${BATCH_SETTLEMENT_SCHEME} claim response bound to another network`),
-        );
-        continue;
-      }
+      return;
+    }
+    if (response.network !== this.config.requirements.network) {
+      this.config.onError?.(
+        new Error(`${BATCH_SETTLEMENT_SCHEME} claim response bound to another network`),
+      );
+      return;
+    }
+    {
       // The spec's claim response is just `success`/`transaction`/`network`/
       // `amount`; the reference facilitator adds `extra.accepts[]` with each
       // channel's confirmed watermark. Use it when present, otherwise read the
@@ -224,7 +265,7 @@ export class BatchChannelManager {
           this.config.onError?.(
             new Error(`${BATCH_SETTLEMENT_SCHEME} claim missing confirmed settled watermark`),
           );
-          continue;
+          return;
         }
       }
       for (const channel of batch) {
@@ -248,10 +289,80 @@ export class BatchChannelManager {
           onchainSyncedAt: Date.now(),
           settled: state.settled > settled ? state.settled : settled,
         }));
-        claimed.push(channel.channelId);
+        result.claimed.push(channel.channelId);
       }
     }
-    return claimed;
+  }
+
+  /**
+   * Finalize a channel the payer is closing with the server's latest voucher.
+   *
+   * Program `settle` is unavailable once a channel is `Closing`; only the
+   * facilitator, as channel payee, can apply a final voucher through
+   * `settle_and_seal` during the grace period. The server proves it authored
+   * the request with a `CloseAuthorization` from its receiver authorizer.
+   *
+   * @param channel - The closing channel and its latest voucher
+   * @returns Whether the seal landed
+   */
+  private async seal(channel: ChannelState): Promise<boolean> {
+    // Whatever happens next, the payer has started a forced close: stop
+    // serving paid requests against this channel.
+    await this.record(channel.channelId, state =>
+      state.status === "open" ? { ...state, status: "closing" } : state,
+    );
+    const authorizer = this.config.closeAuthorizer;
+    const feePayer = this.config.requirements.extra?.feePayer;
+    if (!authorizer || typeof feePayer !== "string") {
+      this.config.onError?.(
+        new Error(
+          `${BATCH_SETTLEMENT_SCHEME} channel ${channel.channelId} is closing and no closeAuthorizer is configured: ` +
+            `voucher value above the onchain watermark cannot be sealed`,
+        ),
+      );
+      return false;
+    }
+    const { network, maxTimeoutSeconds } = this.config.requirements;
+    const expiresAt = channel.highestVoucherExpiresAt ?? 0;
+    const closeAuthorization = await signCloseAuthorization(authorizer, {
+      channelId: channel.channelId,
+      feePayer,
+      maxClaimableAmount: channel.signedMaxClaimable,
+      network,
+      validBefore: Math.floor(Date.now() / 1000) + maxTimeoutSeconds,
+      voucherExpiresAt: BigInt(expiresAt),
+    });
+    const payload: BatchSealPayload = {
+      channelConfig: channel.channelConfig,
+      channelId: channel.channelId,
+      closeAuthorization,
+      type: "seal",
+      voucher: {
+        channelId: channel.channelId,
+        expiresAt,
+        maxClaimableAmount: channel.signedMaxClaimable.toString(),
+        signature: channel.highestVoucherSignature!,
+      },
+    };
+    const response = await this.config.settle(
+      { accepted: this.config.requirements, payload, x402Version: 2 },
+      this.config.requirements,
+    );
+    if (!response.success || response.network !== network) {
+      this.config.onError?.(
+        new Error(`${BATCH_SETTLEMENT_SCHEME} seal failed: ${response.errorReason ?? "unknown"}`),
+      );
+      return false;
+    }
+    const final = channel.signedMaxClaimable;
+    await this.record(channel.channelId, state => ({
+      ...state,
+      onchainSyncedAt: Date.now(),
+      payoutWatermark: state.payoutWatermark > final ? state.payoutWatermark : final,
+      settled: state.settled > final ? state.settled : final,
+      status: "distributed",
+    }));
+    return true;
   }
 
   /**
