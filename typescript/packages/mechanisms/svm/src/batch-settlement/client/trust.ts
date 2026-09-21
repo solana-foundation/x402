@@ -4,49 +4,86 @@
  * In server mode the channel's onchain `authorized_signer` is the resource
  * operator, so the operator can sign a voucher for the full unspent deposit
  * without any further client signature. A client must therefore never enter
- * that mode because a 402 asked for it; it enters only for operators it has
- * decided to trust out of band, and only up to a deposit it chose.
+ * that mode because a 402 asked for it; it enters only for operator keys it
+ * has decided to trust out of band, and only up to an escrow it chose.
+ *
+ * The policy mirrors the core `spendControls` shape: a USD cap that applies to
+ * assets `findDefaultAsset` recognizes, and an opt-in list of other assets
+ * with integer atomic caps. Trust is keyed by operator key alone, so it works
+ * the same over HTTP, MCP, or any other transport.
  */
 
-import type { PaymentRequirements } from "@x402/core/types";
+import type { Money, Network, PaymentRequirements } from "@x402/core/types";
+import { convertToTokenAmount, networkMatchesPattern, parseMoney } from "@x402/core/utils";
 
-import { parseU64 } from "../../payment-channels/open";
+import { findDefaultAsset } from "../../defaultAssets";
 import { BATCH_SETTLEMENT_SCHEME } from "../types";
 
-/** One grant of trust for server-signed channels. At least one of `origin` or `operator` is required. */
-export interface BatchServerSignedTrust {
-  /**
-   * Exact origin (`https://host[:port]`) of the resource server, as seen in
-   * the URL this client actually requested. Matching by origin requires the
-   * scheme's `paymentRequiredHook` to be registered on the `x402HTTPClient`,
-   * because only the HTTP layer knows the real request URL; the 402 body is
-   * server-controlled and is never used for this decision.
-   */
-  origin?: string | undefined;
-  /**
-   * Base58 operator key. Alone, trusts that key wherever it is advertised.
-   * Together with `origin`, pins the key the origin is allowed to advertise so
-   * a swapped `extra.operator` cannot open a channel under a different signer.
-   */
-  operator?: string | undefined;
-  /**
-   * Cap on the total escrow (initial deposit plus top-ups) this client will
-   * lock in a channel under this grant, in atomic units. This is the amount a
-   * dishonest operator could take. Server `minDeposit` hints above it are
-   * clamped, not honored.
-   */
-  maxDeposit?: bigint | string | undefined;
+/** Default escrow cap for default assets under a trusted operator. */
+export const DEFAULT_SERVER_SIGNED_MAX_DEPOSIT: Money = "$1";
+
+/** Opt-in asset for {@link BatchServerSignedChannelsPolicy.allowedAssets}. */
+export interface ServerSignedChannelsAsset {
+  network: Network;
+  /** On-chain mint, or a default-asset symbol (e.g. `"USDC"`). */
+  asset: string;
+  /** Optional integer atomic escrow cap (e.g. `"5000000"`), not `"$1"`. Omit to leave it uncapped. */
+  maxDeposit?: string | undefined;
 }
 
-export interface BatchServerSignedChannelsConfig {
-  trust: BatchServerSignedTrust[];
+/**
+ * Which operators may hold this client's voucher-signing authority, and how
+ * much escrow it will lock under them.
+ */
+export interface BatchServerSignedChannelsPolicy {
+  /**
+   * Base58 operator keys this client trusts. A server-signed accept whose
+   * `extra.operator` is not listed is refused and, when the same resource is
+   * also offered client-signed, paid that way instead.
+   */
+  allowedOperators: readonly string[];
+  /**
+   * USD cap on the total escrow (deposit plus top-ups) locked in one channel
+   * under a trusted operator, for assets `findDefaultAsset` recognizes. This is
+   * the amount a dishonest operator could take, so server `minDeposit` hints
+   * above it are clamped, not honored. `false` disables the cap.
+   *
+   * @default "$1"
+   */
+  maxDeposit?: Money | false | undefined;
+  /**
+   * Opt-in non-default assets, each with an optional integer atomic cap. A
+   * server-signed accept for an asset that is neither a default asset nor
+   * listed here is refused.
+   */
+  allowedAssets?: readonly ServerSignedChannelsAsset[] | undefined;
 }
 
-/** A matched grant, with `maxDeposit` parsed. */
+/** A matched grant, with the cap resolved to atomic units for the accept's asset. */
 export interface ResolvedServerSignedTrust {
-  origin?: string | undefined;
-  operator?: string | undefined;
+  operator: string;
   maxDeposit?: bigint | undefined;
+}
+
+/**
+ * A server-signed accept this client will not act on. The scheme's
+ * creation-failure hook recognizes it and falls back to the same resource's
+ * client-signed accept when one is offered.
+ */
+export class UntrustedOperatorError extends Error {
+  /**
+   * Build the refusal with the operator it concerns, so a fallback can name it.
+   *
+   * @param message - Actionable explanation of the refusal
+   * @param operator - The advertised operator key, when the accept carried one
+   */
+  constructor(
+    message: string,
+    readonly operator: string | undefined,
+  ) {
+    super(message);
+    this.name = "UntrustedOperatorError";
+  }
 }
 
 /**
@@ -60,101 +97,126 @@ export function isServerSignedAccept(accept: PaymentRequirements): boolean {
 }
 
 /**
- * Reduce a URL to its origin, rejecting anything that is not http(s).
- *
- * @param value - Absolute URL or origin
- * @param label - Name used in error messages
- * @returns The normalized `scheme://host[:port]` origin
- */
-function normalizeOrigin(value: string, label: string): string {
-  let parsed: URL;
-  try {
-    parsed = new URL(value);
-  } catch {
-    throw new Error(`${label} must be an absolute URL`);
-  }
-  if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
-    throw new Error(`${label} must use http or https`);
-  }
-  return parsed.origin;
-}
-
-/**
- * Decides which server-signed accepts a client may act on.
- *
- * Origin grants are recorded per accept object when the HTTP hook sees the
- * request URL; operator-only grants match any accept advertising that key.
+ * Decides which server-signed accepts a client may act on, and up to what escrow.
  */
 export class ServerSignedTrustPolicy {
-  private readonly entries: ResolvedServerSignedTrust[];
-  private readonly grants = new WeakMap<PaymentRequirements, ResolvedServerSignedTrust>();
+  private readonly operators: ReadonlySet<string>;
+  private readonly usdCap: string | false;
+  private readonly assets: readonly ServerSignedChannelsAsset[];
 
   /**
-   * Validate and normalize the configured grants.
+   * Validate and normalize the configured policy.
    *
-   * @param entries - Grants from `serverSignedChannels.trust`
+   * @param policy - `serverSignedChannelsPolicy`, or undefined to trust nobody
    */
-  constructor(entries: readonly BatchServerSignedTrust[]) {
-    this.entries = entries.map((entry, index) => {
-      const label = `serverSignedChannels.trust[${index}]`;
-      if (entry.origin === undefined && entry.operator === undefined) {
-        throw new Error(`${label} must name an origin, an operator, or both`);
+  constructor(policy?: BatchServerSignedChannelsPolicy | undefined) {
+    const label = "serverSignedChannelsPolicy";
+    const operators = policy?.allowedOperators ?? [];
+    operators.forEach((operator, index) => {
+      if (typeof operator !== "string" || operator.length === 0) {
+        throw new Error(`${label}.allowedOperators[${index}] must be a non-empty base58 key`);
       }
-      if (entry.operator !== undefined && entry.operator.length === 0) {
-        throw new Error(`${label}.operator must be a non-empty base58 key`);
+    });
+    this.operators = new Set(operators);
+    if (policy?.maxDeposit === false) {
+      this.usdCap = false;
+    } else {
+      const money = policy?.maxDeposit ?? DEFAULT_SERVER_SIGNED_MAX_DEPOSIT;
+      const { amount } = parseMoney(money);
+      if (Number(amount) <= 0) throw new Error(`${label}.maxDeposit must be positive`);
+      this.usdCap = amount;
+    }
+    this.assets = policy?.allowedAssets ?? [];
+    this.assets.forEach((entry, index) => {
+      if (entry.maxDeposit !== undefined && !/^[1-9]\d*$/.test(entry.maxDeposit)) {
+        throw new Error(
+          `${label}.allowedAssets[${index}].maxDeposit must be a positive integer atomic amount, not a dollar value; got ${JSON.stringify(entry.maxDeposit)}`,
+        );
       }
-      const maxDeposit =
-        entry.maxDeposit === undefined
-          ? undefined
-          : parseU64(entry.maxDeposit, `${label}.maxDeposit`);
-      if (maxDeposit === 0n) throw new Error(`${label}.maxDeposit must be positive`);
-      return {
-        ...(entry.origin !== undefined
-          ? { origin: normalizeOrigin(entry.origin, `${label}.origin`) }
-          : {}),
-        ...(entry.operator !== undefined ? { operator: entry.operator } : {}),
-        ...(maxDeposit !== undefined ? { maxDeposit } : {}),
-      };
     });
   }
 
   /**
-   * Apply the policy to a 402 before payment selection.
+   * The grant under which this client may pay a server-signed accept.
    *
-   * Server-signed accepts from origins this client does not trust are removed,
-   * so the core falls back to whatever else the server offered (typically the
-   * same route in client mode). Trusted server-signed accepts are moved ahead
-   * of other batch-settlement accepts on the same network so the default
-   * selector picks metered pricing where the client has chosen to allow it.
-   *
-   * Mutates `paymentRequired.accepts` in place: the fetch wrapper hands the
-   * same object to payment creation.
-   *
-   * @param paymentRequired - Decoded 402 body
-   * @param paymentRequired.accepts - Offered payment requirements
-   * @param requestUrl - URL the client actually requested
+   * @param requirements - Selected accept
+   * @returns The operator and the atomic escrow cap for this accept's asset
+   * @throws UntrustedOperatorError when the operator is not allowed or the asset is not permitted
    */
-  authorize(paymentRequired: { accepts: PaymentRequirements[] }, requestUrl: string): void {
-    const origin = normalizeOrigin(requestUrl, "request URL");
-    const dropped = new Set<PaymentRequirements>();
-    const refusedOperators = new Set<string>();
-    for (const accept of paymentRequired.accepts) {
-      if (!isServerSignedAccept(accept)) continue;
-      const operator = accept.extra?.operator;
-      const grant = this.match(origin, typeof operator === "string" ? operator : undefined);
-      if (grant) {
-        this.grants.set(accept, grant);
-      } else {
-        dropped.add(accept);
-        refusedOperators.add(typeof operator === "string" ? operator : "<missing>");
-      }
+  grantFor(requirements: PaymentRequirements): ResolvedServerSignedTrust {
+    const operator = requirements.extra?.operator;
+    if (typeof operator !== "string" || !this.operators.has(operator)) {
+      throw new UntrustedOperatorError(
+        untrustedOperatorMessage(typeof operator === "string" ? operator : undefined),
+        typeof operator === "string" ? operator : undefined,
+      );
     }
-    if (dropped.size === 0 && paymentRequired.accepts.every(a => !this.grants.has(a))) return;
+    const defaultAsset = findDefaultAsset(requirements.asset, requirements.network);
+    const entry = this.assets.find(
+      candidate =>
+        networkMatchesPattern(candidate.network, requirements.network) &&
+        (candidate.asset.toLowerCase() === requirements.asset.toLowerCase() ||
+          (defaultAsset !== undefined &&
+            defaultAsset.symbol.toLowerCase() === candidate.asset.toLowerCase())),
+    );
+    if (entry) {
+      return {
+        operator,
+        ...(entry.maxDeposit !== undefined ? { maxDeposit: BigInt(entry.maxDeposit) } : {}),
+      };
+    }
+    if (!defaultAsset) {
+      throw new UntrustedOperatorError(
+        `batch-settlement: ${requirements.asset} on ${requirements.network} is not a default asset. ` +
+          "Add it to serverSignedChannelsPolicy.allowedAssets with an atomic maxDeposit before " +
+          `locking escrow under operator ${operator}.`,
+        operator,
+      );
+    }
+    if (this.usdCap === false) return { operator };
+    return {
+      operator,
+      maxDeposit: BigInt(convertToTokenAmount(this.usdCap, defaultAsset.decimals)),
+    };
+  }
 
-    const remaining = paymentRequired.accepts.filter(accept => !dropped.has(accept));
-    if (remaining.length === 0) {
-      throw new Error(untrustedOperatorMessage(origin, [...refusedOperators]));
+  /**
+   * Filter a 402's accepts before payment selection.
+   *
+   * Server-signed accepts this client does not trust are removed, so the core
+   * falls back to whatever else the server offered (typically the same route
+   * in client mode). Trusted server-signed accepts are moved ahead of other
+   * batch-settlement accepts on the same network so the default selector
+   * picks metered pricing where the client has chosen to allow it. Accepts of
+   * other schemes keep their positions.
+   *
+   * Usable directly as a core `PaymentPolicy`. Without it the scheme still
+   * refuses untrusted accepts and falls back through its creation-failure
+   * hook; this policy only adds the preference for trusted metered accepts.
+   *
+   * @param accepts - Offered payment requirements
+   * @returns The filtered, reordered accepts
+   * @throws UntrustedOperatorError when every accept required an untrusted operator
+   */
+  filterAccepts(accepts: readonly PaymentRequirements[]): PaymentRequirements[] {
+    const trusted = new Set<PaymentRequirements>();
+    const refused: string[] = [];
+    const remaining = accepts.filter(accept => {
+      if (!isServerSignedAccept(accept)) return true;
+      try {
+        this.grantFor(accept);
+        trusted.add(accept);
+        return true;
+      } catch (error) {
+        if (!(error instanceof UntrustedOperatorError)) throw error;
+        refused.push(error.operator ?? "<missing>");
+        return false;
+      }
+    });
+    if (remaining.length === 0 && refused.length > 0) {
+      throw new UntrustedOperatorError(untrustedOperatorMessage(...refused), refused[0]);
     }
+    if (trusted.size === 0) return remaining;
     const reordered: PaymentRequirements[] = [];
     const networksSeen = new Set<string>();
     for (const accept of remaining) {
@@ -164,72 +226,32 @@ export class ServerSignedTrustPolicy {
           if (
             candidate.scheme === BATCH_SETTLEMENT_SCHEME &&
             candidate.network === accept.network &&
-            this.grants.has(candidate)
+            trusted.has(candidate)
           ) {
             reordered.push(candidate);
           }
         }
       }
-      if (accept.scheme === BATCH_SETTLEMENT_SCHEME && this.grants.has(accept)) continue;
+      if (trusted.has(accept)) continue;
       reordered.push(accept);
     }
-    paymentRequired.accepts = reordered;
-  }
-
-  /**
-   * The grant under which this client may pay a server-signed accept, if any.
-   *
-   * An origin-bound grant exists only when `authorize` saw this exact accept
-   * object with a trusted request URL. An operator-only grant applies to any
-   * accept advertising that key.
-   *
-   * @param requirements - Selected accept
-   * @returns Matching grant, or undefined when the client must refuse
-   */
-  grantFor(requirements: PaymentRequirements): ResolvedServerSignedTrust | undefined {
-    const recorded = this.grants.get(requirements);
-    if (recorded) return recorded;
-    const operator = requirements.extra?.operator;
-    return this.match(undefined, typeof operator === "string" ? operator : undefined);
-  }
-
-  /**
-   * First grant whose origin and operator constraints both hold.
-   *
-   * @param origin - Request origin, or undefined when no hook saw the request
-   * @param operator - Advertised operator key
-   * @returns The matching grant, if any
-   */
-  private match(
-    origin: string | undefined,
-    operator: string | undefined,
-  ): ResolvedServerSignedTrust | undefined {
-    return this.entries.find(
-      entry =>
-        (entry.origin === undefined || entry.origin === origin) &&
-        (entry.operator === undefined || entry.operator === operator),
-    );
+    return reordered;
   }
 }
 
 /**
  * Build the refusal message for an untrusted server-signed accept.
  *
- * @param origin - Request origin, when known
  * @param operators - Operators the server advertised
  * @returns Human-readable, actionable error text
  */
-export function untrustedOperatorMessage(
-  origin: string | undefined,
-  operators: readonly string[],
-): string {
-  const who = origin ? `${origin} ` : "";
-  const keys = operators.length > 0 ? operators.join(", ") : "<unknown>";
+export function untrustedOperatorMessage(...operators: readonly (string | undefined)[]): string {
+  const keys = operators.filter((key): key is string => key !== undefined);
+  const who = keys.length > 0 ? keys.join(", ") : "<unknown>";
   return (
-    `batch-settlement: ${who}requires a server-signed channel whose operator (${keys}) ` +
+    `batch-settlement: this resource requires a server-signed channel whose operator (${who}) ` +
     "can claim up to the full channel deposit without further client signatures. " +
-    "Trust it explicitly via serverSignedChannels.trust: { origin } together with " +
-    "x402HTTPClient.onPaymentRequired(scheme.paymentRequiredHook), or { operator }. " +
-    "Set maxDeposit to bound what the operator could take."
+    "Trust it explicitly by listing the key in serverSignedChannelsPolicy.allowedOperators, " +
+    "and bound what it could take with serverSignedChannelsPolicy.maxDeposit."
   );
 }

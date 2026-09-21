@@ -513,7 +513,7 @@ describe("batch-settlement SVM onchain", () => {
           salt: "2",
           // Delegating voucher signing to the operator is an explicit client
           // decision, never something a 402 can ask for.
-          serverSignedChannels: { trust: [{ operator: voucherOperator.address }] },
+          serverSignedChannelsPolicy: { allowedOperators: [voucherOperator.address] },
         });
         const client = new x402Client().register(NETWORK, clientScheme);
         const accepts: PaymentRequirements[] = [

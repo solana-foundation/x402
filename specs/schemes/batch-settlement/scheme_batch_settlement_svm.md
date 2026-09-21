@@ -1815,15 +1815,18 @@ Standard x402 codes apply. The facilitator reports verification failures in
 - **Server mode is opt-in per operator, never per 402.** A client MUST NOT open
   or pay into a server-mode channel because a `PaymentRequired` advertised
   `voucherSigner: "server"`. It MUST require an explicit, locally configured
-  grant of trust for the operator, bound to the origin of the URL the client
-  actually requested (never to a URL carried in the 402 body), to the
-  `extra.operator` key, or to both. The grant SHOULD carry a maximum escrow the
-  client will lock under that operator; the client MUST clamp every deposit
-  hint, including `extra.minDeposit`, to that cap, since the cap is exactly
-  what a dishonest operator could take. Absent a grant the client MUST drop the
-  server-mode accept and use a client-mode accept if one is offered; servers
-  advertising server mode SHOULD therefore also offer the same resource in
-  client mode, typically at the request ceiling as a fixed price. Because the
+  allowlist of `extra.operator` keys. The grant is keyed by operator alone so
+  it holds on every transport; nothing carried in the 402 body, and no
+  transport-specific attribute such as a request origin, is a trust anchor.
+  The grant SHOULD carry a maximum escrow the client will lock per channel
+  under that operator, expressed per asset; the client MUST clamp every
+  deposit hint, including `extra.minDeposit`, to that cap, since the cap is
+  exactly what a dishonest operator could take. Absent a grant the client MUST
+  refuse the server-mode accept and SHOULD pay a client-mode accept for the
+  same resource, network, and asset at no more than the refused amount when
+  one is offered; servers advertising server mode SHOULD therefore also offer
+  the same resource in client mode, typically at the request ceiling as a
+  fixed price. Because the
   channel derivation binds `voucherSigner` and `operator`, a server that later
   changes either cannot reuse a channel the client opened under the old terms;
   the new terms go through the same trust decision.

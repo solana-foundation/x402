@@ -7,6 +7,7 @@ import { BatchSvmScheme } from "../../src/batch-settlement/client/scheme";
 import {
   isServerSignedAccept,
   ServerSignedTrustPolicy,
+  UntrustedOperatorError,
 } from "../../src/batch-settlement/client/trust";
 import { BatchError } from "../../src/batch-settlement/errors";
 import { SOLANA_DEVNET_CAIP2, TOKEN_PROGRAM_ADDRESS } from "../../src/constants";
@@ -28,7 +29,6 @@ vi.mock("../../src/utils", async importOriginal => ({
 
 const NETWORK = SOLANA_DEVNET_CAIP2;
 const ORIGIN = "https://api.example.test";
-const OTHER_ORIGIN = "https://phishing.example.test";
 
 let payer: Awaited<ReturnType<typeof generateKeyPairSigner>>;
 let feePayer: Awaited<ReturnType<typeof generateKeyPairSigner>>;
@@ -76,8 +76,10 @@ function clientAccept(overrides: Partial<PaymentRequirements> = {}): PaymentRequ
 function serverAccept(
   operatorAddress = operator.address,
   extra: Record<string, unknown> = {},
+  overrides: Partial<PaymentRequirements> = {},
 ): PaymentRequirements {
   return clientAccept({
+    ...overrides,
     extra: {
       ...clientAccept().extra,
       operator: operatorAddress,
@@ -100,90 +102,98 @@ function evmAccept(): PaymentRequirements {
 }
 
 describe("server-signed trust policy", () => {
-  it("rejects grants that name nothing, a zero cap, or a malformed origin", () => {
-    expect(() => new ServerSignedTrustPolicy([{}])).toThrow(/origin, an operator, or both/);
-    expect(() => new ServerSignedTrustPolicy([{ operator: "" }])).toThrow(/non-empty/);
-    expect(() => new ServerSignedTrustPolicy([{ origin: ORIGIN, maxDeposit: "0" }])).toThrow(
-      /positive/,
-    );
-    expect(() => new ServerSignedTrustPolicy([{ origin: "api.example.test" }])).toThrow(
-      /absolute URL/,
-    );
-    expect(() => new ServerSignedTrustPolicy([{ origin: "ftp://api.example.test" }])).toThrow(
-      /http or https/,
-    );
+  it("rejects malformed policies", () => {
+    expect(() => new ServerSignedTrustPolicy({ allowedOperators: [""] })).toThrow(/non-empty/);
+    expect(
+      () => new ServerSignedTrustPolicy({ allowedOperators: [operator.address], maxDeposit: "$0" }),
+    ).toThrow(/positive/);
+    expect(
+      () =>
+        new ServerSignedTrustPolicy({
+          allowedAssets: [{ asset: USDC_DEVNET_ADDRESS, maxDeposit: "$1", network: NETWORK }],
+          allowedOperators: [operator.address],
+        }),
+    ).toThrow(/integer atomic amount, not a dollar value/);
     expect(isServerSignedAccept(serverAccept())).toBe(true);
     expect(isServerSignedAccept(clientAccept())).toBe(false);
   });
 
-  it("drops untrusted server-signed accepts and keeps the client-signed fallback", () => {
-    const policy = new ServerSignedTrustPolicy([{ origin: ORIGIN }]);
-    const server = serverAccept();
-    const client = clientAccept();
-    const paymentRequired = { accepts: [server, client] };
-    policy.authorize(paymentRequired, `${OTHER_ORIGIN}/v1/infer`);
-    expect(paymentRequired.accepts).toEqual([client]);
-    expect(policy.grantFor(server)).toBeUndefined();
-  });
-
-  it("refuses outright when every accept needs an untrusted operator", () => {
-    const policy = new ServerSignedTrustPolicy([{ origin: ORIGIN }]);
-    expect(() =>
-      policy.authorize({ accepts: [serverAccept()] }, `${OTHER_ORIGIN}/v1/infer`),
-    ).toThrow(new RegExp(`${OTHER_ORIGIN}.*${operator.address}.*Trust it explicitly`));
-    // A 402 with no server-signed accepts is left exactly as it was.
-    const untouched = { accepts: [clientAccept(), evmAccept()] };
-    const before = [...untouched.accepts];
-    policy.authorize(untouched, `${OTHER_ORIGIN}/v1/infer`);
-    expect(untouched.accepts).toEqual(before);
-  });
-
-  it("uses the requested URL, never the 402 body, to decide the origin", () => {
-    const policy = new ServerSignedTrustPolicy([{ origin: ORIGIN }]);
-    const server = serverAccept(operator.address, { resource: ORIGIN });
-    expect(() => policy.authorize({ accepts: [server] }, `${OTHER_ORIGIN}/x`)).toThrow(
-      /Trust it explicitly/,
+  it("grants only listed operators and refuses everything without a policy", () => {
+    expect(() => new ServerSignedTrustPolicy().grantFor(serverAccept())).toThrow(
+      UntrustedOperatorError,
     );
-    expect(() => policy.authorize({ accepts: [server] }, "not a url")).toThrow(/absolute URL/);
+    const policy = new ServerSignedTrustPolicy({ allowedOperators: [operator.address] });
+    expect(() => policy.grantFor(serverAccept(otherOperator.address))).toThrow(
+      new RegExp(`${otherOperator.address}.*allowedOperators`),
+    );
+    expect(() => policy.grantFor(clientAccept())).toThrow(UntrustedOperatorError);
   });
 
-  it("grants a trusted origin and prefers its server-signed accept on that network", () => {
-    const policy = new ServerSignedTrustPolicy([{ origin: `${ORIGIN}/`, maxDeposit: 5_000n }]);
+  it("resolves the escrow cap like the core spend controls", () => {
+    // Default $1 on a 6-decimal default asset.
+    expect(
+      new ServerSignedTrustPolicy({ allowedOperators: [operator.address] }).grantFor(
+        serverAccept(),
+      ),
+    ).toEqual({ operator: operator.address, maxDeposit: 1_000_000n });
+    // Configured USD cap.
+    expect(
+      new ServerSignedTrustPolicy({
+        allowedOperators: [operator.address],
+        maxDeposit: "$0.05",
+      }).grantFor(serverAccept()),
+    ).toEqual({ operator: operator.address, maxDeposit: 50_000n });
+    // `false` lifts the cap for default assets.
+    expect(
+      new ServerSignedTrustPolicy({
+        allowedOperators: [operator.address],
+        maxDeposit: false,
+      }).grantFor(serverAccept()),
+    ).toEqual({ operator: operator.address });
+    // A non-default asset needs an explicit entry ...
+    const exotic = serverAccept(operator.address, {}, { asset: feePayer.address });
+    expect(() =>
+      new ServerSignedTrustPolicy({ allowedOperators: [operator.address] }).grantFor(exotic),
+    ).toThrow(/not a default asset.*allowedAssets/);
+    // ... whose atomic cap wins over the USD cap, and which may be uncapped.
+    expect(
+      new ServerSignedTrustPolicy({
+        allowedAssets: [{ asset: feePayer.address, maxDeposit: "777", network: "solana:*" }],
+        allowedOperators: [operator.address],
+      }).grantFor(exotic),
+    ).toEqual({ operator: operator.address, maxDeposit: 777n });
+    expect(
+      new ServerSignedTrustPolicy({
+        allowedAssets: [{ asset: feePayer.address, network: NETWORK }],
+        allowedOperators: [operator.address],
+      }).grantFor(exotic),
+    ).toEqual({ operator: operator.address });
+    // A default-asset symbol also matches an entry.
+    expect(
+      new ServerSignedTrustPolicy({
+        allowedAssets: [{ asset: "usdc", maxDeposit: "42", network: NETWORK }],
+        allowedOperators: [operator.address],
+      }).grantFor(serverAccept()),
+    ).toEqual({ operator: operator.address, maxDeposit: 42n });
+  });
+
+  it("filters accepts: drops untrusted server-signed ones and prefers trusted ones", () => {
+    const policy = new ServerSignedTrustPolicy({ allowedOperators: [operator.address] });
     const evm = evmAccept();
     const client = clientAccept();
-    const server = serverAccept();
-    const paymentRequired = { accepts: [evm, client, server] };
-    policy.authorize(paymentRequired, `${ORIGIN}/v1/infer?x=1`);
-    // The EVM accept keeps its place; the trusted server-signed accept moves
-    // ahead of the same route's client-signed accept.
-    expect(paymentRequired.accepts).toEqual([evm, server, client]);
-    expect(policy.grantFor(server)).toEqual({ origin: ORIGIN, maxDeposit: 5_000n });
-    // The grant is bound to the accept object the hook saw, not to the shape.
-    expect(policy.grantFor(serverAccept())).toBeUndefined();
-  });
-
-  it("pins the operator an origin may advertise", () => {
-    const policy = new ServerSignedTrustPolicy([{ origin: ORIGIN, operator: operator.address }]);
-    const pinned = serverAccept();
-    const swapped = serverAccept(otherOperator.address);
-    const missing = clientAccept({
-      extra: { ...clientAccept().extra, voucherSigner: "server" },
-    });
-    const paymentRequired = { accepts: [swapped, pinned, missing, clientAccept()] };
-    policy.authorize(paymentRequired, `${ORIGIN}/v1`);
-    expect(paymentRequired.accepts.map(a => a.extra?.operator)).toEqual([
-      operator.address,
-      undefined,
-    ]);
-  });
-
-  it("trusts an operator key anywhere when the grant has no origin", () => {
-    const policy = new ServerSignedTrustPolicy([{ operator: operator.address }]);
-    expect(policy.grantFor(serverAccept())).toEqual({ operator: operator.address });
-    expect(policy.grantFor(serverAccept(otherOperator.address))).toBeUndefined();
-    const paymentRequired = { accepts: [serverAccept(otherOperator.address), serverAccept()] };
-    policy.authorize(paymentRequired, `${OTHER_ORIGIN}/v1`);
-    expect(paymentRequired.accepts.map(a => a.extra?.operator)).toEqual([operator.address]);
+    const trusted = serverAccept();
+    const untrusted = serverAccept(otherOperator.address);
+    // Untrusted dropped, client-signed fallback kept, other schemes untouched.
+    expect(policy.filterAccepts([untrusted, client, evm])).toEqual([client, evm]);
+    // Trusted server-signed accept moves ahead of the same network's
+    // client-signed accept; the EVM accept keeps its place.
+    expect(policy.filterAccepts([evm, client, trusted])).toEqual([evm, trusted, client]);
+    // Nothing to do when no server-signed accept is offered.
+    expect(policy.filterAccepts([client, evm])).toEqual([client, evm]);
+    // Every accept needed an untrusted operator: refuse with an actionable message.
+    expect(() => policy.filterAccepts([untrusted])).toThrow(
+      new RegExp(`${otherOperator.address}.*allowedOperators`),
+    );
   });
 });
 
@@ -191,42 +201,93 @@ describe("server-signed channels on the client scheme", () => {
   it("never opens a server-signed channel without a grant", async () => {
     const client = new BatchSvmScheme(payer, { discoverChannels: false });
     await expect(client.createPaymentPayload(2, serverAccept())).rejects.toThrow(
-      /Trust it explicitly/,
+      UntrustedOperatorError,
     );
-    const origins = new BatchSvmScheme(payer, {
+    const other = new BatchSvmScheme(payer, {
       discoverChannels: false,
-      serverSignedChannels: { trust: [{ origin: ORIGIN }] },
+      serverSignedChannelsPolicy: { allowedOperators: [otherOperator.address] },
     });
-    // An origin grant needs the HTTP hook to have seen this request's URL.
-    await expect(origins.createPaymentPayload(2, serverAccept())).rejects.toThrow(
+    await expect(other.createPaymentPayload(2, serverAccept())).rejects.toThrow(
       /Trust it explicitly/,
     );
   });
 
-  it("opens through the payment-required hook for a trusted origin", async () => {
+  it("opens a server-signed channel for a listed operator on any transport", async () => {
     const client = new BatchSvmScheme(payer, {
       discoverChannels: false,
-      serverSignedChannels: { trust: [{ origin: ORIGIN, operator: operator.address }] },
+      serverSignedChannelsPolicy: { allowedOperators: [operator.address] },
     });
-    const server = serverAccept();
-    const paymentRequired = { accepts: [server, clientAccept()] };
-    await expect(
-      client.paymentRequiredHook({ paymentRequired, requestUrl: `${ORIGIN}/v1/infer` }),
-    ).resolves.toBeUndefined();
-    expect(paymentRequired.accepts[0]).toBe(server);
-    const payment = await client.createPaymentPayload(2, server);
+    const payment = await client.createPaymentPayload(2, serverAccept());
     expect(payment.payload).toMatchObject({
       type: "deposit",
       channelConfig: { payerAuthorizer: operator.address, voucherSigner: "server" },
     });
   });
 
+  it("falls back to the client-signed accept through its own creation-failure hook", async () => {
+    const client = new BatchSvmScheme(payer, { discoverChannels: false });
+    const server = serverAccept();
+    const fallback = clientAccept();
+    const context = { maxAmountPerPayment: "1000" };
+    const paymentRequired = {
+      accepts: [server, fallback],
+      resource: { url: `${ORIGIN}/v1/infer`, description: "", mimeType: "" },
+      x402Version: 2,
+    };
+    const error = await client.createPaymentPayload(2, server, context).catch(e => e as Error);
+    expect(error).toBeInstanceOf(UntrustedOperatorError);
+    const recovered = await client.schemeHooks.onPaymentCreationFailure!({
+      error,
+      paymentRequired,
+      selectedRequirements: server,
+    } as never);
+    expect(recovered).toMatchObject({
+      recovered: true,
+      payload: {
+        accepted: fallback,
+        payload: { type: "deposit", channelConfig: { payerAuthorizer: payer.address } },
+        resource: paymentRequired.resource,
+        x402Version: 2,
+      },
+    });
+    // The client-signed twin is paid with the spend-cap context core resolved
+    // for the refused accept: 5 × 1000 default multiplier is the ceiling.
+    expect(
+      (recovered as { payload: { payload: { deposit: { amount: string } } } }).payload.payload,
+    ).toMatchObject({ deposit: { amount: "5000" } });
+
+    // No fallback when the alternatives are on another asset, cost more, or
+    // are server-signed too; and other errors are left alone.
+    const dearer = clientAccept({ amount: "2000" });
+    for (const accepts of [
+      [server],
+      [server, serverAccept(otherOperator.address)],
+      [server, dearer],
+    ]) {
+      await expect(
+        client.schemeHooks.onPaymentCreationFailure!({
+          error,
+          paymentRequired: { ...paymentRequired, accepts },
+          selectedRequirements: server,
+        } as never),
+      ).resolves.toBeUndefined();
+    }
+    await expect(
+      client.schemeHooks.onPaymentCreationFailure!({
+        error: new Error("rpc down"),
+        paymentRequired,
+        selectedRequirements: server,
+      } as never),
+    ).resolves.toBeUndefined();
+  });
+
   it("caps the escrow at the grant, ignoring larger server hints and fixed deposits", async () => {
-    const trust = { trust: [{ operator: operator.address, maxDeposit: "2500" }] };
+    // $0.0025 in USDC (6 decimals) = 2500 atomic.
+    const trust = { allowedOperators: [operator.address], maxDeposit: "$0.0025" };
     const hinted = serverAccept(operator.address, { minDeposit: "100000" });
     const client = new BatchSvmScheme(payer, {
       discoverChannels: false,
-      serverSignedChannels: trust,
+      serverSignedChannelsPolicy: trust,
     });
     await expect(client.createPaymentPayload(2, hinted)).resolves.toMatchObject({
       payload: { deposit: { amount: "2500" } },
@@ -234,7 +295,7 @@ describe("server-signed channels on the client scheme", () => {
     const fixed = new BatchSvmScheme(payer, {
       depositAmount: 50_000n,
       discoverChannels: false,
-      serverSignedChannels: trust,
+      serverSignedChannelsPolicy: trust,
     });
     await expect(fixed.createPaymentPayload(2, hinted)).resolves.toMatchObject({
       payload: { deposit: { amount: "2500" } },
@@ -244,15 +305,15 @@ describe("server-signed channels on the client scheme", () => {
     await expect(
       new BatchSvmScheme(payer, {
         discoverChannels: false,
-        serverSignedChannels: trust,
+        serverSignedChannelsPolicy: trust,
       }).createPaymentPayload(2, { ...serverAccept(), amount: "3000" }),
-    ).rejects.toThrow(/exceeds the remaining serverSignedChannels.trust maxDeposit/);
+    ).rejects.toThrow(/exceeds the remaining serverSignedChannelsPolicy maxDeposit/);
   });
 
   it("refuses a top-up that would push the escrow past the grant", async () => {
     const client = new BatchSvmScheme(payer, {
       discoverChannels: false,
-      serverSignedChannels: { trust: [{ operator: operator.address, maxDeposit: 2_500n }] },
+      serverSignedChannelsPolicy: { allowedOperators: [operator.address], maxDeposit: "$0.0025" },
     });
     const accept = serverAccept();
     const opened = await client.createPaymentPayload(2, accept);
@@ -289,13 +350,13 @@ describe("server-signed channels on the client scheme", () => {
   });
 
   it("adopts a corrective 402 only up to what this client authorized", async () => {
-    const trust = { trust: [{ operator: operator.address }] };
+    const trust = { allowedOperators: [operator.address] };
     const accept = serverAccept();
     const run = async (correctiveCumulative: bigint) => {
       const client = new BatchSvmScheme(payer, {
         depositAmount: 10_000n,
         discoverChannels: false,
-        serverSignedChannels: trust,
+        serverSignedChannelsPolicy: trust,
       });
       const opened = await client.createPaymentPayload(2, accept);
       const channelId = opened.payload.authorization!.channelId;

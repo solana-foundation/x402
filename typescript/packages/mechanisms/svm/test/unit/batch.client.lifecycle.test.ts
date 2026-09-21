@@ -100,12 +100,12 @@ describe("batch client lifecycle", () => {
     async restart => {
       const operator = await generateKeyPairSigner();
       const { records, storage } = memoryStorage();
-      const trust = { trust: [{ operator: operator.address }] };
+      const trust = { allowedOperators: [operator.address] };
       let client = new BatchSvmScheme(payer, {
         channelStorage: storage,
         depositAmount: 3_000n,
         discoverChannels: false,
-        serverSignedChannels: trust,
+        serverSignedChannelsPolicy: trust,
       });
       const serverRequirements = requirements({
         extra: {
@@ -128,7 +128,7 @@ describe("batch client lifecycle", () => {
         client = new BatchSvmScheme(payer, {
           channelStorage: storage,
           discoverChannels: false,
-          serverSignedChannels: trust,
+          serverSignedChannelsPolicy: trust,
         });
       }
       await client.schemeHooks.onPaymentResponse!({
@@ -644,7 +644,11 @@ describe("batch client lifecycle", () => {
     await expect(
       internals(
         new BatchSvmScheme(payer, {
-          serverSignedChannels: { trust: [{ operator: feePayer.address, maxDeposit: "5000" }] },
+          // $0.005 in USDC (6 decimals) = 5000 atomic.
+          serverSignedChannelsPolicy: {
+            allowedOperators: [feePayer.address],
+            maxDeposit: "$0.005",
+          },
         }),
       ).resolveTerms(serverMode),
     ).resolves.toMatchObject({

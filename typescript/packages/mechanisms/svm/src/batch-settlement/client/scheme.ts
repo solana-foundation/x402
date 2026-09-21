@@ -35,10 +35,10 @@ import {
 } from "./channel";
 import { type BatchRefundOptions, refundBatchChannel } from "./refund";
 import {
-  type BatchServerSignedChannelsConfig,
+  type BatchServerSignedChannelsPolicy,
   type ResolvedServerSignedTrust,
   ServerSignedTrustPolicy,
-  untrustedOperatorMessage,
+  UntrustedOperatorError,
 } from "./trust";
 
 interface OpenChannel {
@@ -115,21 +115,23 @@ export interface BatchSvmClientConfig extends ClientSvmConfig {
    */
   discoverChannels?: boolean | undefined;
   /**
-   * Which resource operators may hold this client's voucher-signing authority.
+   * Which resource operators may hold this client's voucher-signing authority,
+   * and how much escrow to lock under them.
    *
    * A 402 advertising `extra.voucherSigner: "server"` asks the client to open
-   * a channel whose onchain `authorized_signer` is the operator. Without a
-   * matching grant here the client refuses that accept and falls back to any
-   * client-signed accept the server also offers. Omit to never enter server
-   * mode.
+   * a channel whose onchain `authorized_signer` is the operator. Unless that
+   * key is listed in `allowedOperators` the client refuses the accept and,
+   * through its creation-failure hook, pays the same resource's client-signed
+   * accept instead when one is offered. Omit to never enter server mode.
    */
-  serverSignedChannels?: BatchServerSignedChannelsConfig | undefined;
+  serverSignedChannelsPolicy?: BatchServerSignedChannelsPolicy | undefined;
 }
 
 export class BatchSvmScheme implements SchemeNetworkClient {
   readonly scheme = BATCH_SETTLEMENT_SCHEME;
   findDefaultAsset = findDefaultAsset;
   readonly schemeHooks: SchemeClientHooks = {
+    onPaymentCreationFailure: async ctx => this.fallBackToClientSigned(ctx),
     onPaymentResponse: async ctx => {
       const recovered = await this.handlePaymentResponse(ctx);
       return recovered ? { recovered: true } : undefined;
@@ -138,6 +140,8 @@ export class BatchSvmScheme implements SchemeNetworkClient {
   private readonly channels = new Map<string, OpenChannel>();
   private readonly pending = new Map<string, PendingChannel>();
   private readonly trust: ServerSignedTrustPolicy;
+  /** Spend-cap context core passed for an accept, reused when falling back to its client-signed twin. */
+  private readonly creationContexts = new WeakMap<PaymentRequirements, PaymentPayloadContext>();
 
   constructor(
     private readonly signer: BatchClientSigner,
@@ -147,34 +151,35 @@ export class BatchSvmScheme implements SchemeNetworkClient {
     if (multiplier !== undefined && (!Number.isInteger(multiplier) || multiplier < 3)) {
       throw new Error("depositMultiplier must be an integer >= 3");
     }
-    this.trust = new ServerSignedTrustPolicy(config.serverSignedChannels?.trust ?? []);
+    this.trust = new ServerSignedTrustPolicy(config.serverSignedChannelsPolicy);
   }
 
   /**
-   * Register on `x402HTTPClient.onPaymentRequired` so origin-based trust
-   * grants can see the URL that was actually requested. Untrusted server-signed
-   * accepts are dropped from the 402 before payment selection; trusted ones
-   * are preferred over the same route's client-signed accept.
+   * Optional core `PaymentPolicy` (`x402Client.registerPolicy`) that drops
+   * untrusted server-signed accepts before selection and prefers trusted ones
+   * over the same route's client-signed accept, so a client that trusts an
+   * operator gets metered pricing even when the server lists the fixed-price
+   * accept first. Transport-agnostic: it reads only the accepts.
    *
-   * Bound to the scheme so it can be passed as a bare function.
+   * Not required for safety. Without it the scheme still refuses untrusted
+   * accepts and falls back to the client-signed accept through its
+   * creation-failure hook.
    *
-   * @param context - Hook context from the HTTP client
-   * @param context.paymentRequired - Decoded 402 body, filtered in place
-   * @param context.paymentRequired.accepts - Offered payment requirements
-   * @param context.requestUrl - URL the client actually requested
+   * @param _x402Version - Protocol version (unused)
+   * @param accepts - Offered payment requirements
+   * @returns Filtered and reordered accepts
    */
-  readonly paymentRequiredHook = async (context: {
-    paymentRequired: { accepts: PaymentRequirements[] };
-    requestUrl: string;
-  }): Promise<void> => {
-    this.trust.authorize(context.paymentRequired, context.requestUrl);
-  };
+  readonly paymentPolicy = (
+    _x402Version: number,
+    accepts: PaymentRequirements[],
+  ): PaymentRequirements[] => this.trust.filterAccepts(accepts);
 
   async createPaymentPayload(
     x402Version: number,
     requirements: PaymentRequirements,
     context?: PaymentPayloadContext,
   ): Promise<Pick<PaymentPayload, "x402Version" | "payload">> {
+    if (context) this.creationContexts.set(requirements, context);
     const terms = await this.resolveTerms(requirements);
     const charge = parseU64(requirements.amount, "amount");
     const authorizationExpiresAt =
@@ -413,6 +418,52 @@ export class BatchSvmScheme implements SchemeNetworkClient {
     };
   }
 
+  /**
+   * Pay the same resource client-signed when the selected accept needed an
+   * operator this client does not trust.
+   *
+   * The fallback is restricted to a client-signed batch-settlement accept on
+   * the same network and asset for no more than the refused accept's amount,
+   * so it can never widen what the client's spend controls already allowed
+   * for the selected accept; the spend-cap context core resolved for that
+   * accept is reused as-is.
+   *
+   * @param ctx - Core's creation-failure context
+   * @returns A recovered payload for the client-signed accept, or nothing
+   */
+  private async fallBackToClientSigned(
+    ctx: Parameters<NonNullable<SchemeClientHooks["onPaymentCreationFailure"]>>[0],
+  ): Promise<void | { recovered: true; payload: PaymentPayload }> {
+    if (!(ctx.error instanceof UntrustedOperatorError)) return undefined;
+    const refused = ctx.selectedRequirements;
+    if (!/^\d+$/.test(refused.amount)) return undefined;
+    const fallback = ctx.paymentRequired.accepts.find(
+      accept =>
+        accept !== refused &&
+        accept.scheme === BATCH_SETTLEMENT_SCHEME &&
+        accept.network === refused.network &&
+        accept.asset === refused.asset &&
+        (accept.extra?.voucherSigner ?? "client") === "client" &&
+        /^\d+$/.test(accept.amount) &&
+        BigInt(accept.amount) <= BigInt(refused.amount),
+    );
+    if (!fallback) return undefined;
+    const partial = await this.createPaymentPayload(
+      ctx.paymentRequired.x402Version,
+      fallback,
+      this.creationContexts.get(refused),
+    );
+    return {
+      recovered: true,
+      payload: {
+        ...partial,
+        accepted: fallback,
+        resource: ctx.paymentRequired.resource,
+        ...(ctx.paymentRequired.extensions ? { extensions: ctx.paymentRequired.extensions } : {}),
+      },
+    };
+  }
+
   private salt(): bigint {
     return this.config.salt === undefined ? 0n : parseU64(this.config.salt, "salt");
   }
@@ -448,7 +499,7 @@ export class BatchSvmScheme implements SchemeNetworkClient {
       const room = trust.maxDeposit - existingDeposit;
       if (needed > room) {
         throw new Error(
-          `Required deposit ${needed} exceeds the remaining serverSignedChannels.trust maxDeposit ` +
+          `Required deposit ${needed} exceeds the remaining serverSignedChannelsPolicy maxDeposit ` +
             `(${trust.maxDeposit} total, ${existingDeposit} already escrowed). ` +
             "Raise maxDeposit for this operator or use a client-signed accept.",
         );
@@ -946,14 +997,10 @@ export class BatchSvmScheme implements SchemeNetworkClient {
       throw new Error("extra.operator is only valid for operator voucher signing");
     }
     // Server mode hands the operator this client's onchain signing authority.
-    // That is never implied by a 402; it has to be a grant this client
-    // configured, either for the origin it requested or for the operator key.
+    // That is never implied by a 402; it has to be a key this client listed,
+    // and `grantFor` throws `UntrustedOperatorError` otherwise so the
+    // creation-failure hook can fall back to a client-signed accept.
     const trust = voucherSigner === "server" ? this.trust.grantFor(requirements) : undefined;
-    if (voucherSigner === "server" && !trust) {
-      throw new Error(
-        untrustedOperatorMessage(undefined, typeof operator === "string" ? [operator] : []),
-      );
-    }
     return {
       feePayer,
       ...(memo !== undefined ? { memo } : {}),

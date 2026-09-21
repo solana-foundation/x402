@@ -26,15 +26,15 @@ const refundAfterRequests = process.env.REFUND_AFTER_REQUESTS === "true";
 const refundAmount = process.env.REFUND_AMOUNT;
 const depositMultiplier = Number(process.env.DEPOSIT_MULTIPLIER ?? "5");
 const svmRpcUrl = process.env.SVM_RPC_URL;
-const svmDepositAmount = process.env.SVM_DEPOSIT_AMOUNT;
-// Origins whose SVM operator may sign vouchers on this client's behalf. A
+// Operator keys allowed to sign vouchers on this client's behalf. A
 // server-signed channel lets that operator claim up to the whole escrow, so
-// nothing here is trusted because a 402 asked for it.
-const svmTrustedOrigins = (process.env.SVM_SERVER_SIGNED_TRUSTED_ORIGINS ?? "")
+// nothing here is trusted because a 402 asked for it; the cap below is what a
+// dishonest operator could take.
+const svmServerSignedOperators = (process.env.SVM_SERVER_SIGNED_OPERATORS ?? "")
   .split(",")
-  .map(origin => origin.trim())
+  .map(key => key.trim())
   .filter(Boolean);
-const svmServerSignedMaxDeposit = process.env.SVM_SERVER_SIGNED_MAX_DEPOSIT?.trim() || undefined;
+const svmServerSignedMaxDeposit = process.env.SVM_SERVER_SIGNED_MAX_DEPOSIT?.trim() || "$0.05";
 
 if (!evmPrivateKeyRaw && !svmPrivateKeyRaw) {
   console.error("At least one of EVM_PRIVATE_KEY or SVM_PRIVATE_KEY is required");
@@ -85,36 +85,34 @@ async function main(): Promise<void> {
     svmScheme = new BatchSvmScheme(svmSigner, {
       depositPolicy: { depositMultiplier },
       ...(svmRpcUrl ? { rpcUrl: svmRpcUrl } : {}),
-      ...(svmDepositAmount ? { depositAmount: svmDepositAmount } : {}),
-      ...(svmTrustedOrigins.length > 0
+      ...(svmServerSignedOperators.length > 0
         ? {
-            serverSignedChannels: {
-              trust: svmTrustedOrigins.map(origin => ({
-                origin,
-                ...(svmServerSignedMaxDeposit ? { maxDeposit: svmServerSignedMaxDeposit } : {}),
-              })),
+            serverSignedChannelsPolicy: {
+              allowedOperators: svmServerSignedOperators,
+              // USD cap for default assets; list other tokens under
+              // `allowedAssets` with an atomic `maxDeposit`.
+              maxDeposit: svmServerSignedMaxDeposit,
             },
           }
         : {}),
     });
     client.register("solana:*", svmScheme);
+    // Optional: prefer a trusted operator's metered accept over the same
+    // route's fixed-price accept. Safety does not depend on this; an untrusted
+    // server-signed accept is refused and the scheme falls back to the
+    // client-signed accept on its own.
+    client.registerPolicy(svmScheme.paymentPolicy);
 
     console.log("SVM payer:", svmSigner.address);
     console.log(
       "SVM server-signed channels:",
-      svmTrustedOrigins.length > 0
-        ? `trusted for ${svmTrustedOrigins.join(", ")}` +
-            (svmServerSignedMaxDeposit ? ` up to ${svmServerSignedMaxDeposit} base units` : "")
+      svmServerSignedOperators.length > 0
+        ? `trusted operators ${svmServerSignedOperators.join(", ")} up to ${svmServerSignedMaxDeposit} per channel`
         : "refused (client-signed vouchers only)",
     );
   }
 
   const httpClient = new x402HTTPClient(client);
-  if (svmScheme) {
-    // Origin grants need the URL that was actually fetched. Only the HTTP
-    // layer has it, so the hook runs there, before payment selection.
-    httpClient.onPaymentRequired(svmScheme.paymentRequiredHook);
-  }
   const fetchWithPayment = wrapFetchWithPayment(fetch, httpClient);
 
   console.log(`Base URL: ${baseURL}, endpoint: ${endpointPath}\n`);
