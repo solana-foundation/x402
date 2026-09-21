@@ -874,7 +874,6 @@ export class BatchSvmScheme implements SchemeNetworkFacilitator {
     const pending = completed ? undefined : await this.pendingStore.get(key);
     const recordedExpected = await recordedExpectedDeposit(
       this.pendingStore,
-      requirements.network,
       key,
       completed,
       pending,
@@ -902,11 +901,10 @@ export class BatchSvmScheme implements SchemeNetworkFacilitator {
     }
     const expectedDeposit = recordedExpected
       ? parseU64(recordedExpected, "recorded expected deposit")
-      : existing!.deposit + deposit;
-    if (
-      voucherAmount !== undefined &&
-      (voucherAmount < charge || voucherAmount > expectedDeposit)
-    ) {
+      : existing!.deposit + (completed ? 0n : deposit);
+    const voucherCeiling =
+      existing && existing.deposit > expectedDeposit ? existing.deposit : expectedDeposit;
+    if (voucherAmount !== undefined && (voucherAmount < charge || voucherAmount > voucherCeiling)) {
       throw new Error(
         `${BatchError.CUMULATIVE_AMOUNT_MISMATCH}: voucher exceeds topped-up ceiling`,
       );
@@ -934,6 +932,7 @@ export class BatchSvmScheme implements SchemeNetworkFacilitator {
   ): Promise<SettleResponse> {
     const validated = await this.validateDeposit(payload, requirements);
     const { channelId, terms } = validated;
+    const { channelConfig } = payload;
     // Serialize opens by channel so two distinct signed setup transactions
     // cannot race for the same PDA. Top-ups remain transaction-scoped because
     // a channel can legitimately receive several of them within the cache TTL.
@@ -1041,23 +1040,27 @@ export class BatchSvmScheme implements SchemeNetworkFacilitator {
     );
     if (!broadcast.ok) return broadcast.response;
     const signature = broadcast.signature;
-    if (broadcast.expectedDeposit !== undefined) {
+    if (broadcast.expectedDeposit !== undefined)
       validated.expectedDeposit = broadcast.expectedDeposit;
-      if (validated.voucherAmount > validated.expectedDeposit) {
-        throw new Error(
-          `${BatchError.CUMULATIVE_AMOUNT_MISMATCH}: voucher exceeds topped-up ceiling`,
+    let channel: Channel | undefined | false;
+    try {
+      channel = await this.fetchChannelUntil(requirements.network, channelId, observed => {
+        if (!observed) return false;
+        this.assertClaimChannel(observed, channelConfig, terms, requirements, [ChannelStatus.Open]);
+        return (
+          observed.deposit >= validated.expectedDeposit &&
+          observed.deposit >= validated.voucherAmount
         );
-      }
+      });
+    } catch (error) {
+      return settleFailure(
+        payment.accepted.network,
+        classifyError(error),
+        payload.channelConfig.payer,
+        error instanceof Error ? error.message : String(error),
+        signature,
+      );
     }
-    const channel = await this.fetchChannelUntil(requirements.network, channelId, observed => {
-      if (!observed) return false;
-      try {
-        this.assertDepositChannel(observed, validated, requirements);
-        return true;
-      } catch {
-        return false;
-      }
-    });
     if (!channel) {
       return this.settlementPending(
         requirements.network,
@@ -1673,6 +1676,7 @@ export class BatchSvmScheme implements SchemeNetworkFacilitator {
           ErrSettlementPending,
           "transaction_failed",
           error,
+          reservation,
         ),
       };
     }
@@ -1849,12 +1853,15 @@ export class BatchSvmScheme implements SchemeNetworkFacilitator {
     predicate: (channel: Channel | undefined) => boolean,
   ): Promise<Channel | undefined | false> {
     for (let attempt = 0; attempt < CHANNEL_READ_ATTEMPTS; attempt += 1) {
+      let channel: Channel | undefined;
       try {
-        const channel = await this.readChannel(network, channelId);
-        if (predicate(channel)) return channel;
+        channel = await this.readChannel(network, channelId);
       } catch {
         /* A lagging backend may reject minContextSlot; retry. */
+        if (attempt + 1 < CHANNEL_READ_ATTEMPTS) await this.waitForChannelRead(attempt);
+        continue;
       }
+      if (predicate(channel)) return channel;
       if (attempt + 1 < CHANNEL_READ_ATTEMPTS) await this.waitForChannelRead(attempt);
     }
     return false;

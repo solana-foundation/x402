@@ -106,8 +106,11 @@ export function decodeBroadcastReservation(value: string): {
   const separator = value.indexOf(":", DEPOSIT_RESERVATION_PREFIX.length);
   if (separator < 0) return { signature: value };
   try {
+    const expectedDeposit = BigInt(value.slice(DEPOSIT_RESERVATION_PREFIX.length, separator));
+    if (expectedDeposit < 0n || expectedDeposit > 18_446_744_073_709_551_615n)
+      return { signature: value };
     return {
-      expectedDeposit: BigInt(value.slice(DEPOSIT_RESERVATION_PREFIX.length, separator)),
+      expectedDeposit,
       signature: value.slice(separator + 1),
     };
   } catch {
@@ -115,13 +118,8 @@ export function decodeBroadcastReservation(value: string): {
   }
 }
 
-export function expectedDepositForSignature(network: string, signature: string): string {
-  return `batch:transaction:${network}:${signature}:expected-deposit`;
-}
-
 export async function recordedExpectedDeposit(
   store: PendingSettlementStore,
-  network: string,
   key: string,
   completed: string | undefined,
   pending: string | undefined,
@@ -130,10 +128,7 @@ export async function recordedExpectedDeposit(
   if (!pending) return undefined;
   const decoded = decodeBroadcastReservation(pending);
   if (decoded.expectedDeposit !== undefined) return decoded.expectedDeposit.toString();
-  return (
-    (await store.get(expectedDepositForSignature(network, decoded.signature))) ??
-    (await store.get(`${key}:expected-deposit`))
-  );
+  return store.get(`${key}:expected-deposit`);
 }
 
 async function recordBroadcastRecovery(
@@ -241,11 +236,6 @@ export async function discardWire(
 ): Promise<void> {
   try {
     await store.delete(`batch:transaction:${network}:${signature}:wire`);
-  } catch {
-    /* keep recorded outcome */
-  }
-  try {
-    await store.delete(expectedDepositForSignature(network, signature));
   } catch {
     /* keep recorded outcome */
   }

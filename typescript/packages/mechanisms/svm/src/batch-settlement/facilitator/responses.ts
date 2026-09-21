@@ -292,6 +292,7 @@ export function verifyFailure(reason: string, payer: string, message?: string): 
  * @param reason - Machine-readable reason
  * @param payer - Channel payer when recoverable
  * @param message - Optional human-readable detail
+ * @param transaction - Broadcast signature, if available
  * @returns The settle response
  */
 export function settleFailure(
@@ -299,11 +300,12 @@ export function settleFailure(
   reason: string,
   payer: string,
   message?: string,
+  transaction = "",
 ): SettleResponse {
   return {
     success: false,
     network,
-    transaction: "",
+    transaction,
     errorReason: reason,
     ...(message ? { errorMessage: message } : {}),
     payer,
