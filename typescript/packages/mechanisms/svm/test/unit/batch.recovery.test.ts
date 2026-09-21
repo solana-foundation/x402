@@ -6,7 +6,10 @@ import { beforeAll, describe, expect, it, vi } from "vitest";
 
 import { signBatchVoucher } from "../../src/batch-settlement/client/channel";
 import { BatchError } from "../../src/batch-settlement/errors";
-import { InMemoryBatchPendingSettlementStore } from "../../src/batch-settlement/facilitator/recovery";
+import {
+  forgetBroadcastReservation,
+  InMemoryBatchPendingSettlementStore,
+} from "../../src/batch-settlement/facilitator/recovery";
 import { BatchSvmScheme } from "../../src/batch-settlement/facilitator/scheme";
 import type {
   BatchChannelConfig,
@@ -110,7 +113,6 @@ type RecoveryInternals = {
   fetchChannel: ReturnType<typeof vi.fn>;
   fetchChannelsUntil: ReturnType<typeof vi.fn>;
   fetchChannelUntil: ReturnType<typeof vi.fn>;
-  forgetPending(key: string): Promise<void>;
   prepareRefund: ReturnType<typeof vi.fn>;
   readChannel: ReturnType<typeof vi.fn>;
   reconcileBroadcast: ReturnType<typeof vi.fn>;
@@ -767,7 +769,7 @@ describe("batch-settlement outcome recovery", () => {
       errorReason: "settlement_pending",
       transaction: TX,
     });
-    await expect(api.forgetPending("key")).resolves.toBeUndefined();
+    await expect(forgetBroadcastReservation(store, "key", TX)).resolves.toBeUndefined();
 
     api.readChannel = vi.fn().mockResolvedValue(channel());
     api.waitForChannelRead = vi.fn().mockResolvedValue(undefined);

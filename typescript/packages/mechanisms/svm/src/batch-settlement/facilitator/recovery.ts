@@ -64,15 +64,15 @@ const reservations = new WeakMap<PendingSettlementStore, Map<string, Promise<boo
  *
  * @param store - Replaceable recovery storage
  * @param key - Operation being reserved
- * @param signature - Locally derived transaction identity
+ * @param value - Transaction identity and optional operation recovery data
  * @returns Whether this caller owns the first broadcast
  */
 export async function reserveBroadcast(
   store: BatchPendingSettlementStore,
   key: string,
-  signature: string,
+  value: string,
 ): Promise<boolean> {
-  if (store.setIfAbsent) return store.setIfAbsent(key, signature);
+  if (store.setIfAbsent) return store.setIfAbsent(key, value);
   let pending = reservations.get(store);
   if (!pending) reservations.set(store, (pending = new Map()));
   const previous = pending.get(key) ?? Promise.resolve(false);
@@ -80,7 +80,7 @@ export async function reserveBroadcast(
     .catch(() => false)
     .then(async () => {
       if (await store.get(key)) return false;
-      await store.set(key, signature);
+      await store.set(key, value);
       return true;
     });
   pending.set(key, next);
@@ -88,6 +88,94 @@ export async function reserveBroadcast(
     return await next;
   } finally {
     if (pending.get(key) === next) pending.delete(key);
+  }
+}
+
+const DEPOSIT_RESERVATION_PREFIX = "batch:deposit:v1:";
+
+export function encodeBroadcastReservation(signature: string, expectedDeposit?: bigint): string {
+  if (expectedDeposit === undefined) return signature;
+  return `${DEPOSIT_RESERVATION_PREFIX}${expectedDeposit}:${signature}`;
+}
+
+export function decodeBroadcastReservation(value: string): {
+  signature: string;
+  expectedDeposit?: bigint;
+} {
+  if (!value.startsWith(DEPOSIT_RESERVATION_PREFIX)) return { signature: value };
+  const separator = value.indexOf(":", DEPOSIT_RESERVATION_PREFIX.length);
+  if (separator < 0) return { signature: value };
+  try {
+    return {
+      expectedDeposit: BigInt(value.slice(DEPOSIT_RESERVATION_PREFIX.length, separator)),
+      signature: value.slice(separator + 1),
+    };
+  } catch {
+    return { signature: value };
+  }
+}
+
+export function expectedDepositForSignature(network: string, signature: string): string {
+  return `batch:transaction:${network}:${signature}:expected-deposit`;
+}
+
+export async function recordedExpectedDeposit(
+  store: PendingSettlementStore,
+  network: string,
+  key: string,
+  completed: string | undefined,
+  pending: string | undefined,
+): Promise<string | undefined> {
+  if (completed) return store.get(`${key}:expected-deposit`);
+  if (!pending) return undefined;
+  const decoded = decodeBroadcastReservation(pending);
+  if (decoded.expectedDeposit !== undefined) return decoded.expectedDeposit.toString();
+  return (
+    (await store.get(expectedDepositForSignature(network, decoded.signature))) ??
+    (await store.get(`${key}:expected-deposit`))
+  );
+}
+
+async function recordBroadcastRecovery(
+  store: PendingSettlementStore,
+  network: string,
+  signature: string,
+  wire: string,
+): Promise<void> {
+  await store.set(`batch:transaction:${network}:${signature}:wire`, wire);
+}
+
+export async function prepareBroadcastReservation(
+  store: BatchPendingSettlementStore,
+  key: string,
+  network: string,
+  signature: string,
+  wire: string,
+  expectedDeposit?: bigint,
+): Promise<{ existing?: string; owned: boolean }> {
+  await recordBroadcastRecovery(store, network, signature, wire);
+  const reservation = encodeBroadcastReservation(signature, expectedDeposit);
+  if (await reserveBroadcast(store, key, reservation)) return { owned: true };
+  const existing = await store.get(key);
+  const existingSignature = existing ? decodeBroadcastReservation(existing).signature : undefined;
+  if (expectedDeposit === undefined && existingSignature !== signature) {
+    await discardWire(store, network, signature);
+  }
+  return existing ? { existing, owned: false } : { owned: false };
+}
+
+export async function forgetBroadcastReservation(
+  store: BatchPendingSettlementStore,
+  key: string,
+  signature: string,
+): Promise<void> {
+  try {
+    const recorded = await store.get(key);
+    if (!recorded || decodeBroadcastReservation(recorded).signature !== signature) return;
+    if (store.deleteIfEquals) await store.deleteIfEquals(key, recorded);
+    else if ((await store.get(key)) === recorded) await store.delete(key);
+  } catch {
+    /* confirmed work no longer depends on cleanup */
   }
 }
 
@@ -153,6 +241,11 @@ export async function discardWire(
 ): Promise<void> {
   try {
     await store.delete(`batch:transaction:${network}:${signature}:wire`);
+  } catch {
+    /* keep recorded outcome */
+  }
+  try {
+    await store.delete(expectedDepositForSignature(network, signature));
   } catch {
     /* keep recorded outcome */
   }

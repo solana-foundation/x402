@@ -11,3 +11,4 @@ Server-signed channels are opt-in on the client. `BatchSvmScheme` (client) takes
 The facilitator advertises `extra.maxIdleSecs` (default seven days, configurable via `maxIdleSecs`, `0` disables) and its rent cleanup abandon-closes an `Open` channel at the onchain settled watermark once it has seen no facilitator-visible lifecycle activity for that long; channel records now carry `lastActivityAt`. Servers copy the window into the 402 so they know how long they have to claim. The server scheme gains `createChannelManager(facilitator, requirements, options)` for the redemption worker, the worker accepts an injected `rpc`, and the facilitator's open-deposit simulation runs through the signer's RPC like every other read.
 
 Channel storage adapters may batch claim lifecycle updates through `upsertMany`.
+Deposit settlement now polls the complete expected channel state after confirmation and preserves the original signature while RPC reads lag.
