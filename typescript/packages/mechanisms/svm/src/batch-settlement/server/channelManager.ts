@@ -196,12 +196,13 @@ export class BatchChannelManager {
         accepted: this.config.requirements,
         payload: {
           claims: batch.map(channel => ({
-            signature: channel.highestVoucherSignature!,
+            channelConfig: channel.channelConfig,
+            channelId: channel.channelId,
             voucher: {
-              channelConfig: channel.channelConfig,
               channelId: channel.channelId,
               expiresAt: channel.highestVoucherExpiresAt ?? 0,
               maxClaimableAmount: channel.signedMaxClaimable.toString(),
+              signature: channel.highestVoucherSignature!,
             },
           })),
           type: "claim",

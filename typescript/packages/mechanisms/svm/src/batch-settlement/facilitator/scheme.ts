@@ -380,16 +380,18 @@ export class BatchSvmScheme implements SchemeNetworkFacilitator {
   ): Promise<SettleResponse> {
     const prepared: PreparedClaim[] = [];
     for (const claim of payload.claims) {
-      const terms = await this.resolveTerms(claim.voucher.channelConfig, requirements);
-      const channelId = await this.deriveChannelId(claim.voucher.channelConfig, terms.feePayer);
-      if (channelId !== claim.voucher.channelId) throw new Error(BatchError.CHANNEL_ID_MISMATCH);
+      const terms = await this.resolveTerms(claim.channelConfig, requirements);
+      const channelId = await this.deriveChannelId(claim.channelConfig, terms.feePayer);
+      if (channelId !== claim.channelId || channelId !== claim.voucher.channelId) {
+        throw new Error(BatchError.CHANNEL_ID_MISMATCH);
+      }
       const cumulative = parseU64(claim.voucher.maxClaimableAmount, "maxClaimableAmount");
       this.assertExpiry(claim.voucher.expiresAt);
       const voucher = {
-        authorizedSigner: claim.voucher.channelConfig.payerAuthorizer,
+        authorizedSigner: claim.channelConfig.payerAuthorizer,
         cumulativeAmount: cumulative,
         expiresAt: BigInt(claim.voucher.expiresAt),
-        signatureBase58: claim.signature,
+        signatureBase58: claim.voucher.signature,
       };
       const valid = await verifyVoucherSignature({
         message: encodeVoucherMessageBytes({
@@ -397,7 +399,7 @@ export class BatchSvmScheme implements SchemeNetworkFacilitator {
           cumulativeAmount: cumulative,
           expiresAt: voucher.expiresAt,
         }),
-        signatureBase58: claim.signature,
+        signatureBase58: claim.voucher.signature,
         signerBase58: voucher.authorizedSigner,
       });
       if (!valid) throw new Error(BatchError.VOUCHER_SIGNATURE);
@@ -444,7 +446,7 @@ export class BatchSvmScheme implements SchemeNetworkFacilitator {
         claimKey,
         pending,
         requirements.network,
-        prepared[0]?.claim.voucher.channelConfig.payer ?? "",
+        prepared[0]?.claim.channelConfig.payer ?? "",
       );
       if (!recovered.ok) return recovered.response;
       const confirmed = await this.fetchChannelsUntil(
@@ -459,7 +461,7 @@ export class BatchSvmScheme implements SchemeNetworkFacilitator {
       if (!confirmed) {
         return settlementPending(
           requirements.network,
-          prepared[0]?.claim.voucher.channelConfig.payer ?? "",
+          prepared[0]?.claim.channelConfig.payer ?? "",
           recovered.signature,
           "claim confirmed but its channel watermark is not visible yet",
         );
@@ -469,7 +471,7 @@ export class BatchSvmScheme implements SchemeNetworkFacilitator {
         claimKey,
         recovered.signature,
         requirements.network,
-        prepared[0]?.claim.voucher.channelConfig.payer ?? "",
+        prepared[0]?.claim.channelConfig.payer ?? "",
       );
       return incomplete ?? claimResponse(prepared, requirements.network, recovered.signature);
     }
@@ -482,7 +484,7 @@ export class BatchSvmScheme implements SchemeNetworkFacilitator {
       const item = prepared[index]!;
       const channel = channels[index]!;
       assertNotClosing(channel, item.channelId);
-      this.assertClaimChannel(channel, item.claim.voucher.channelConfig, item.terms, requirements, [
+      this.assertClaimChannel(channel, item.claim.channelConfig, item.terms, requirements, [
         ChannelStatus.Open,
       ]);
       if (item.cumulative <= channel.settlement.settled || item.cumulative > channel.deposit) {
@@ -492,10 +494,10 @@ export class BatchSvmScheme implements SchemeNetworkFacilitator {
         ...buildSettleInstructions({
           channelId: item.channelId,
           voucher: {
-            authorizedSigner: item.claim.voucher.channelConfig.payerAuthorizer,
+            authorizedSigner: item.claim.channelConfig.payerAuthorizer,
             cumulativeAmount: item.cumulative,
             expiresAt: BigInt(item.expiresAt),
-            signatureBase58: item.claim.signature,
+            signatureBase58: item.claim.voucher.signature,
           },
         }),
       );
@@ -504,7 +506,7 @@ export class BatchSvmScheme implements SchemeNetworkFacilitator {
       return settleFailure(
         payment.accepted.network,
         CHANNEL_BUSY,
-        prepared[0]?.claim.voucher.channelConfig.payer ?? "",
+        prepared[0]?.claim.channelConfig.payer ?? "",
       );
     }
     const submitted = await this.submitRedemption(
@@ -512,7 +514,7 @@ export class BatchSvmScheme implements SchemeNetworkFacilitator {
       requirements.network,
       instructions,
       claimKey,
-      prepared[0]?.claim.voucher.channelConfig.payer ?? "",
+      prepared[0]?.claim.channelConfig.payer ?? "",
     );
     if (!submitted.ok) return submitted.response;
     if (submitted.replayed) {
@@ -530,7 +532,7 @@ export class BatchSvmScheme implements SchemeNetworkFacilitator {
     if (!confirmed) {
       return settlementPending(
         requirements.network,
-        prepared[0]?.claim.voucher.channelConfig.payer ?? "",
+        prepared[0]?.claim.channelConfig.payer ?? "",
         submitted.signature,
         "claim confirmed but its channel watermark is not visible yet",
       );
@@ -540,7 +542,7 @@ export class BatchSvmScheme implements SchemeNetworkFacilitator {
       claimKey,
       submitted.signature,
       requirements.network,
-      prepared[0]?.claim.voucher.channelConfig.payer ?? "",
+      prepared[0]?.claim.channelConfig.payer ?? "",
     );
     return incomplete ?? claimResponse(prepared, requirements.network, submitted.signature);
   }
@@ -1840,7 +1842,7 @@ export class BatchSvmScheme implements SchemeNetworkFacilitator {
       const item = prepared[index]!;
       this.assertClaimChannel(
         channels[index]!,
-        item.claim.voucher.channelConfig,
+        item.claim.channelConfig,
         item.terms,
         requirements,
         [

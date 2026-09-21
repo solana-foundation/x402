@@ -671,12 +671,13 @@ describe("batch facilitator lifecycle", () => {
           ? {
               claims: [
                 {
-                  signature: "x",
+                  channelConfig,
+                  channelId,
                   voucher: {
-                    channelConfig,
                     channelId,
                     expiresAt: 0,
                     maxClaimableAmount: "1",
+                    signature: "x",
                   },
                 },
               ],
@@ -1015,12 +1016,13 @@ describe("batch facilitator lifecycle", () => {
       type: "claim",
       claims: [
         {
-          signature: signed.signature,
+          channelConfig,
+          channelId,
           voucher: {
-            channelConfig,
             channelId,
             expiresAt: 0,
             maxClaimableAmount: "1000",
+            signature: signed.signature,
           },
         },
       ],
@@ -1050,13 +1052,14 @@ describe("batch facilitator lifecycle", () => {
       type: "claim",
       claims: [
         {
-          signature: signed.signature,
+          channelConfig,
+          channelId,
           voucher: {
-            channelConfig,
             channelId,
             expiresAt: 0,
             maxClaimableAmount: "1000",
             ...overrides,
+            signature: signed.signature,
           },
         },
       ],
@@ -1093,7 +1096,7 @@ describe("batch facilitator lifecycle", () => {
     for (const value of [0n, 10_001n]) {
       const bounds = configured();
       const boundedClaim = claim({ maxClaimableAmount: value.toString() });
-      boundedClaim.claims[0]!.signature = (
+      boundedClaim.claims[0]!.voucher.signature = (
         await signBatchVoucher(payer, {
           channelId,
           expiresAt: 0,

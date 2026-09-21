@@ -116,14 +116,15 @@ export type BatchPayload =
   | BatchAuthorizationPayload
   | BatchRefundPayload;
 
+/**
+ * One channel in a server-authored `claim`: the same `channelId` +
+ * `channelConfig` entry shape as `settle` and `seal`, carrying the latest
+ * accepted voucher as a standard {@link BatchVoucher}.
+ */
 export type BatchVoucherClaim = {
-  voucher: {
-    channelConfig: BatchChannelConfig;
-    channelId: string;
-    maxClaimableAmount: string;
-    expiresAt: number;
-  };
-  signature: string;
+  channelId: string;
+  channelConfig: BatchChannelConfig;
+  voucher: BatchVoucher;
 };
 
 export type BatchClaimPayload = {
@@ -285,14 +286,11 @@ export function isBatchFacilitatorPayload(value: unknown): value is BatchFacilit
 }
 
 function isBatchVoucherClaim(value: unknown): value is BatchVoucherClaim {
-  if (!isRecord(value) || typeof value.signature !== "string" || !isRecord(value.voucher)) {
-    return false;
-  }
   return (
-    isBatchChannelConfig(value.voucher.channelConfig) &&
-    typeof value.voucher.channelId === "string" &&
-    typeof value.voucher.maxClaimableAmount === "string" &&
-    typeof value.voucher.expiresAt === "number"
+    isRecord(value) &&
+    typeof value.channelId === "string" &&
+    isBatchChannelConfig(value.channelConfig) &&
+    isBatchVoucher(value.voucher)
   );
 }
 

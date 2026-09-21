@@ -708,12 +708,13 @@ describe("batch-settlement SVM", () => {
         isBatchFacilitatorPayload({
           claims: [
             {
-              signature: voucher.signature,
+              channelConfig,
+              channelId,
               voucher: {
-                channelConfig,
                 channelId,
                 expiresAt: voucher.expiresAt,
                 maxClaimableAmount: voucher.maxClaimableAmount,
+                signature: voucher.signature,
               },
             },
           ],

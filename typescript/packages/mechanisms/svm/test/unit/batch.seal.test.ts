@@ -340,8 +340,9 @@ describe("batch-settlement seal", () => {
         payload: {
           claims: [
             {
-              signature,
-              voucher: { channelConfig, channelId, expiresAt: 0, maxClaimableAmount: "3000" },
+              channelConfig,
+              channelId,
+              voucher: { channelId, expiresAt: 0, maxClaimableAmount: "3000", signature },
             },
           ],
           type: "claim",

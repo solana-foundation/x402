@@ -738,18 +738,20 @@ The examples in this subsection show the inner `paymentPayload.payload`; the
 caller MUST wrap each one in the standard request envelope defined above.
 
 The `deposit` settle payload is the client variant from section 4.3. A `voucher`
-is stored and answered by the server without a facilitator settlement. The
-server-authored or server-enriched variants are:
+is stored and answered by the server without a facilitator settlement. Every
+server-authored payload identifies a channel by the same entry shape,
+`channelId` plus `channelConfig`, and carries vouchers as `BatchVoucher`
+objects; `claim` and `settle` wrap one to four such entries in an array, while
+`seal` acts on one channel. The server-authored or server-enriched variants
+are:
 
 | Payload | Field | Type | Notes |
 |---|---|---|---|
 | Claim | `type` | string | `"claim"` |
-| Claim | `claims` | array | One to four voucher claims. |
-| Claim | `claims[].voucher.channelConfig` | `ChannelConfig` | Full channel configuration. |
-| Claim | `claims[].voucher.channelId` | string | Channel PDA. |
-| Claim | `claims[].voucher.maxClaimableAmount` | string | Cumulative amount for program `settle`. |
-| Claim | `claims[].voucher.expiresAt` | number | MUST be `0`. |
-| Claim | `claims[].signature` | string | Base58 Ed25519 voucher signature. |
+| Claim | `claims` | array | One to four channels to claim in one transaction. |
+| Claim | `claims[].channelId` | string | Channel PDA. |
+| Claim | `claims[].channelConfig` | `ChannelConfig` | Full channel configuration. |
+| Claim | `claims[].voucher` | `BatchVoucher` | Latest accepted voucher; its `maxClaimableAmount` becomes the new onchain `settled` watermark. `expiresAt` MUST be `0`. |
 | Settle | `type` | string | `"settle"` |
 | Settle | `channels` | array | One to four channels to distribute in one transaction. |
 | Settle | `channels[].channelId` | string | Channel PDA. |
@@ -835,49 +837,51 @@ by the same worker through `reclaim`; none of these asynchronous transactions
 is part of the initial HTTP refund response.
 
 The server initiates asynchronous accounting with a `claim` payload. Each
-claim carries the full channel configuration needed to derive and validate the
-channel plus the voucher signature needed to construct the Ed25519 precompile
-instruction:
+entry carries the full channel configuration needed to derive and validate the
+channel plus the latest accepted voucher, whose signature builds the Ed25519
+precompile instruction:
 
 ```json
 {
   "type": "claim",
   "claims": [
     {
+      "channelId": "<channel-pda-1>",
+      "channelConfig": {
+        "payer": "<client-wallet-1>",
+        "payerAuthorizer": "<client-voucher-signer-1>",
+        "receiver": "<server-receiver>",
+        "receiverAuthorizer": "<server-close-authorizer>",
+        "token": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+        "withdrawDelay": 3600,
+        "salt": "42",
+        "openSlot": 341000000
+      },
       "voucher": {
-        "channelConfig": {
-          "payer": "<client-wallet-1>",
-          "payerAuthorizer": "<client-voucher-signer-1>",
-          "receiver": "<server-receiver>",
-          "receiverAuthorizer": "<server-close-authorizer>",
-          "token": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
-          "withdrawDelay": 3600,
-          "salt": "42",
-          "openSlot": 341000000
-        },
         "channelId": "<channel-pda-1>",
         "maxClaimableAmount": "5000",
-        "expiresAt": 0
-      },
-      "signature": "<base58-ed25519-voucher-signature-1>"
+        "expiresAt": 0,
+        "signature": "<base58-ed25519-voucher-signature-1>"
+      }
     },
     {
+      "channelId": "<channel-pda-2>",
+      "channelConfig": {
+        "payer": "<client-wallet-2>",
+        "payerAuthorizer": "<client-voucher-signer-2>",
+        "receiver": "<server-receiver>",
+        "receiverAuthorizer": "<server-close-authorizer>",
+        "token": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+        "withdrawDelay": 3600,
+        "salt": "43",
+        "openSlot": 341000050
+      },
       "voucher": {
-        "channelConfig": {
-          "payer": "<client-wallet-2>",
-          "payerAuthorizer": "<client-voucher-signer-2>",
-          "receiver": "<server-receiver>",
-          "receiverAuthorizer": "<server-close-authorizer>",
-          "token": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
-          "withdrawDelay": 3600,
-          "salt": "43",
-          "openSlot": 341000050
-        },
         "channelId": "<channel-pda-2>",
         "maxClaimableAmount": "7000",
-        "expiresAt": 0
-      },
-      "signature": "<base58-ed25519-voucher-signature-2>"
+        "expiresAt": 0,
+        "signature": "<base58-ed25519-voucher-signature-2>"
+      }
     }
   ]
 }

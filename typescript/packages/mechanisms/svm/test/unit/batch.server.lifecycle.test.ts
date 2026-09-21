@@ -130,7 +130,7 @@ describe("batch server lifecycle boundaries", () => {
     expect(isBatchPayload({ channelConfig, type: "unknown" })).toBe(false);
     expect(isBatchFacilitatorPayload({ claims: [null], type: "claim" })).toBe(false);
     expect(
-      isBatchFacilitatorPayload({ claims: [{ signature: 1, voucher: {} }], type: "claim" }),
+      isBatchFacilitatorPayload({ claims: [{ channelId: 1, voucher: {} }], type: "claim" }),
     ).toBe(false);
   });
 
