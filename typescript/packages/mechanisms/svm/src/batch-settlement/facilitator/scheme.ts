@@ -1,4 +1,5 @@
 /* eslint-disable jsdoc/require-jsdoc */
+/* eslint-disable max-lines -- Rebased recovery extends this preexisting lifecycle class. */
 import { address, type Signature } from "@solana/kit";
 import { findAssociatedTokenPda } from "@solana-program/token-2022";
 import type {
@@ -1062,7 +1063,7 @@ export class BatchSvmScheme implements SchemeNetworkFacilitator {
       );
     }
     if (!channel) {
-      return this.settlementPending(
+      return settlementPending(
         requirements.network,
         payload.channelConfig.payer,
         signature,
@@ -1077,7 +1078,7 @@ export class BatchSvmScheme implements SchemeNetworkFacilitator {
             validated.expectedDeposit.toString(),
           );
         } catch (error) {
-          return this.settlementPending(
+          return settlementPending(
             requirements.network,
             payload.channelConfig.payer,
             signature,

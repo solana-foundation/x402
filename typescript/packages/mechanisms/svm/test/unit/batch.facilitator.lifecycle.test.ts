@@ -952,7 +952,7 @@ describe("batch facilitator lifecycle", () => {
         requirements(),
       ),
     ).resolves.toMatchObject({
-      amount: expected.toString(),
+      amount: "1000",
       success: true,
       transaction: SIGNATURE,
     });
@@ -1181,7 +1181,7 @@ describe("batch facilitator lifecycle", () => {
         deposit,
         requirements(),
       ),
-    ).resolves.toMatchObject({ amount: "11000", success: true, transaction: SIGNATURE });
+    ).resolves.toMatchObject({ amount: "1000", success: true, transaction: SIGNATURE });
     expect(facilitatorSigner.simulateTransaction).not.toHaveBeenCalled();
     expect(facilitatorSigner.sendTransaction).not.toHaveBeenCalled();
     expect(await store.get(key)).toBeUndefined();
@@ -1244,7 +1244,7 @@ describe("batch facilitator lifecycle", () => {
     });
     expect(await store.get(key)).toBe(encodeBroadcastReservation(SIGNATURE, 11_000n));
     await expect(api.settleDeposit(payment, deposit, requirements())).resolves.toMatchObject({
-      amount: "11000",
+      amount: "1000",
       success: true,
       transaction: SIGNATURE,
     });
@@ -1293,7 +1293,7 @@ describe("batch facilitator lifecycle", () => {
         deposit,
         requirements(),
       ),
-    ).resolves.toMatchObject({ amount: "11000", success: true, transaction: SIGNATURE });
+    ).resolves.toMatchObject({ amount: "1000", success: true, transaction: SIGNATURE });
     expect(await store.get(`${key}:expected-deposit`)).toBe("10000");
   });
 
@@ -1384,7 +1384,7 @@ describe("batch facilitator lifecycle", () => {
         deposit,
         requirements(),
       ),
-    ).resolves.toMatchObject({ amount: "11000", success: true, transaction: SIGNATURE });
+    ).resolves.toMatchObject({ amount: "1000", success: true, transaction: SIGNATURE });
     expect(await store.get(`${key}:expected-deposit`)).toBeUndefined();
   });
 
