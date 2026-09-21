@@ -268,6 +268,39 @@ describe("batch client lifecycle", () => {
     ).rejects.toThrow(/unexpected amount/);
   });
 
+  it("treats the commitment identifier as opaque and requires only that it is non-empty", async () => {
+    // Spec 4.4: `extra.commitmentId` MUST be non-empty; `channelId:cumulative`
+    // is an example, not a format the client may insist on.
+    const { records, storage } = memoryStorage();
+    const client = new BatchSvmScheme(payer, {
+      channelStorage: storage,
+      depositAmount: 3_000n,
+      discoverChannels: false,
+    });
+    const opened = await client.createPaymentPayload(2, requirements());
+    await client.schemeHooks.onPaymentResponse!({
+      paymentPayload: { accepted: requirements(), ...opened },
+      requirements: requirements(),
+      settleResponse: {
+        extra: { chargedAmount: "1000", commitmentId: "receipt-7f3a" },
+        success: true,
+      },
+    } as never);
+    expect([...records.values()][0]).toMatchObject({
+      chargedCumulativeAmount: "1000",
+      deposit: "3000",
+    });
+
+    const next = await client.createPaymentPayload(2, requirements());
+    await client.schemeHooks.onPaymentResponse!({
+      paymentPayload: { accepted: requirements(), ...next },
+      requirements: requirements(),
+      settleResponse: { extra: { chargedAmount: "1000", commitmentId: "" }, success: true },
+    } as never);
+    // An empty identifier is not a confirmation: the watermark stays put.
+    expect([...records.values()][0]).toMatchObject({ chargedCumulativeAmount: "1000" });
+  });
+
   it("tops up an exhausted channel and commits only the signed deposit", async () => {
     const { records, storage } = memoryStorage();
     const client = new BatchSvmScheme(payer, {

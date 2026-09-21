@@ -79,7 +79,7 @@ import {
   pendingSignatureOf,
   recoveredRefundResponse,
   refundResponse,
-  snapshotChannel,
+  verifiedChannelExtra,
 } from "./responses";
 
 import { recordPendingOrTerminal, TransactionOnchainFailureError } from "../../utils";
@@ -286,7 +286,7 @@ export class BatchSvmScheme implements SchemeNetworkFacilitator {
           return {
             isValid: true,
             payer: payload.channelConfig.payer,
-            extra: { channelState: snapshotChannel(channelId, channel) },
+            extra: verifiedChannelExtra(channelId, channel),
           };
         }
         case "authorization": {
@@ -304,7 +304,7 @@ export class BatchSvmScheme implements SchemeNetworkFacilitator {
           return {
             isValid: true,
             payer: payload.channelConfig.payer,
-            extra: { channelState: snapshotChannel(channelId, channel) },
+            extra: verifiedChannelExtra(channelId, channel),
           };
         }
         case "refund": {
@@ -312,7 +312,7 @@ export class BatchSvmScheme implements SchemeNetworkFacilitator {
           return {
             isValid: true,
             payer: validated.channel.payer,
-            extra: { channelState: snapshotChannel(validated.channelId, validated.channel) },
+            extra: verifiedChannelExtra(validated.channelId, validated.channel),
           };
         }
       }
@@ -881,7 +881,7 @@ export class BatchSvmScheme implements SchemeNetworkFacilitator {
     if ((await this.readChannel(requirements.network, channelId)) && !validated.isTopUp) {
       const existing = await this.fetchChannel(requirements.network, channelId);
       this.assertDepositChannel(existing, validated, requirements);
-      return depositResponse(channelId, existing, requirements.network, "");
+      return depositResponse(channelId, existing, requirements.network, "", validated.deposit);
     }
     if (this.settlementCache.isDuplicate(key)) {
       return this.settleFailure(payment, "duplicate_settlement", payload.channelConfig.payer);
@@ -973,7 +973,7 @@ export class BatchSvmScheme implements SchemeNetworkFacilitator {
       );
       if (incomplete) return incomplete;
     }
-    return depositResponse(channelId, channel, requirements.network, signature);
+    return depositResponse(channelId, channel, requirements.network, signature, validated.deposit);
   }
 
   private async assertSettlementAccounts(
@@ -1070,6 +1070,13 @@ export class BatchSvmScheme implements SchemeNetworkFacilitator {
     payload: BatchRefundPayload,
     requirements: PaymentRequirements,
   ): Promise<{ channelId: string; terms: BatchTerms }> {
+    if ("amount" in payload) {
+      // The program returns all unused escrow; a partial close is not a thing
+      // this scheme can honor (spec 4.3).
+      throw new Error(
+        `${BatchError.CLOSE_AMOUNT_UNSUPPORTED}: refund returns the full unused escrow`,
+      );
+    }
     if (payload.voucher !== undefined || payload.closeAuthorization !== undefined) {
       throw new Error(
         `${BatchError.CLOSE_AUTHORIZATION}: cooperative close requires a trusted server binding`,
@@ -1077,14 +1084,19 @@ export class BatchSvmScheme implements SchemeNetworkFacilitator {
     }
     const terms = await this.resolveTerms(payload.channelConfig, requirements);
     const channelId = await this.deriveChannelId(payload.channelConfig, terms.feePayer);
-    await verifyRequestCloseTransaction(payload.transaction, {
-      channelId,
-      feePayer: terms.feePayer,
-      maxComputeUnits: this.config.maxComputeUnits,
-      maxPriorityFeeMicroLamports: this.config.maxPriorityFeeMicroLamports,
-      memo: terms.memo,
-      payer: payload.channelConfig.payer,
-    });
+    try {
+      await verifyRequestCloseTransaction(payload.transaction, {
+        channelId,
+        feePayer: terms.feePayer,
+        maxComputeUnits: this.config.maxComputeUnits,
+        maxPriorityFeeMicroLamports: this.config.maxPriorityFeeMicroLamports,
+        memo: terms.memo,
+        payer: payload.channelConfig.payer,
+      });
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      throw new Error(`${BatchError.REFUND_TRANSACTION}: ${detail}`);
+    }
     return { channelId, terms };
   }
 

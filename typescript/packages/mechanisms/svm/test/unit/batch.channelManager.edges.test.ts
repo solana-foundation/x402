@@ -141,14 +141,17 @@ describe("batch-settlement redemption worker edge cases", () => {
   });
 
   it("does not record a distribution whose response is unbound or malformed", async () => {
-    const answers: SettleResponse[] = [
-      { ...ok(), extra: { channels: ["chan-a"] }, network: "solana:other" },
-      { ...ok(), extra: { channels: "chan-a" } },
-      { ...ok(), extra: { channels: ["chan-a", "chan-a"] } },
-      { ...ok(), extra: { channels: ["chan-b"] } },
-      { ...ok() },
+    const mismatch = "batch-settlement distribute response channel mismatch";
+    const answers: [SettleResponse, string][] = [
+      [
+        { ...ok(), extra: { channels: ["chan-a"] }, network: "solana:other" },
+        "batch-settlement distribute response bound to another network",
+      ],
+      [{ ...ok(), extra: { channels: "chan-a" } }, mismatch],
+      [{ ...ok(), extra: { channels: ["chan-a", "chan-a"] } }, mismatch],
+      [{ ...ok(), extra: { channels: ["chan-b"] } }, mismatch],
     ];
-    for (const answer of answers) {
+    for (const [answer, expected] of answers) {
       const store = new MemoryChannelStore();
       await store.put(channel("chan-a", { settled: 3_000n, highestVoucherSignature: undefined }));
       const errors: string[] = [];
@@ -160,9 +163,63 @@ describe("batch-settlement redemption worker edge cases", () => {
         store,
       }).redeem();
       expect(result.distributed).toEqual([]);
-      expect(errors).toEqual(["batch-settlement distribute response channel mismatch"]);
+      expect(errors).toEqual([expected]);
       expect((await store.get("chan-a"))?.payoutWatermark).toBe(0n);
     }
+  });
+
+  it("reconciles from the chain when a facilitator answers with the spec's bare responses", async () => {
+    // Spec 4.5 defines only success/transaction/network/amount for claim and
+    // settle. The reference facilitator's `extra.accepts` / `extra.channels`
+    // are optional enrichment, never a requirement on the server.
+    const store = new MemoryChannelStore();
+    await store.put(channel("chan-a"));
+    const errors: unknown[] = [];
+    const result = await new BatchChannelManager({
+      onError: error => errors.push(error),
+      readPayoutWatermark: async () => 3_000n,
+      readSettledWatermark: async () => 3_000n,
+      requirements: requirements(),
+      settle: async () => ok(),
+      store,
+    }).redeem();
+    expect(errors).toEqual([]);
+    expect(result).toEqual({ claimed: ["chan-a"], distributed: ["chan-a"] });
+    const state = await store.get("chan-a");
+    expect(state?.settled).toBe(3_000n);
+    expect(state?.payoutWatermark).toBe(3_000n);
+  });
+
+  it("leaves a bare-response claim unrecorded until the chain shows the watermark", async () => {
+    const store = new MemoryChannelStore();
+    await store.put(channel("chan-a"));
+    const errors: string[] = [];
+    const result = await new BatchChannelManager({
+      onError: error => errors.push((error as Error).message),
+      readPayoutWatermark: async () => 0n,
+      readSettledWatermark: async () => 2_999n,
+      requirements: requirements(),
+      settle: async () => ok(),
+      store,
+    }).redeem();
+    expect(result.claimed).toEqual([]);
+    expect(errors).toEqual(["confirmed settled watermark unavailable or behind the claim"]);
+    expect((await store.get("chan-a"))?.settled).toBe(0n);
+  });
+
+  it("caps a configured batch size at the spec's four channels", async () => {
+    const store = new MemoryChannelStore();
+    for (const id of ["a", "b", "c", "d", "e"]) await store.put(channel(`chan-${id}`));
+    const { payloads, settle } = settler(boundDistribute);
+    await new BatchChannelManager({
+      maxChannelsPerBatch: 8,
+      readPayoutWatermark: async () => 3_000n,
+      requirements: requirements(),
+      settle,
+      store,
+    }).redeem();
+    const claims = payloads.filter(payload => payload.type === "claim");
+    expect(claims.map(payload => payload.claims?.length)).toEqual([4, 1]);
   });
 
   it("never lowers watermarks the store already advanced past", async () => {

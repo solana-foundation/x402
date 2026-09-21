@@ -749,7 +749,7 @@ server-authored or server-enriched variants are:
 | Claim | `claims[].voucher.expiresAt` | number | MUST be `0`. |
 | Claim | `claims[].signature` | string | Base58 Ed25519 voucher signature. |
 | Settle | `type` | string | `"settle"` |
-| Settle | `channels` | array | One or more channels to distribute. |
+| Settle | `channels` | array | One to four channels to distribute in one transaction. |
 | Settle | `channels[].channelId` | string | Channel PDA. |
 | Settle | `channels[].channelConfig` | `ChannelConfig` | Full configuration used to derive accounts, validate the channel, and reconstruct the distribution. |
 | Refund | `type` | string | `"refund"` |
@@ -920,9 +920,11 @@ a `settle` payload:
 }
 ```
 
-The facilitator invokes `distribute` for every `channels[]` entry and MUST
-process every entry or fail the request. It MUST confirm each transaction
-onchain before returning success.
+`channels[]` MUST contain between one and four entries, the same
+transaction-size bound as `claims[]`. The facilitator invokes `distribute` for
+every `channels[]` entry in one transaction and MUST process every entry or
+fail the request; it MUST NOT silently truncate a batch. It MUST confirm the
+transaction onchain before returning success.
 
 Successful responses have operation-specific `amount` semantics:
 
@@ -947,6 +949,15 @@ Settle (`amount` is the total transferred to the receiver across the batch):
   "amount": "5000"
 }
 ```
+
+A facilitator MAY add per-channel confirmation under `extra`: for a claim,
+`extra.accepts[]` entries of `{ "channelId", "totalClaimed" }` giving the
+confirmed onchain `settled` value the claim advanced each channel to; for a
+settle, `extra.channels[]` listing the channel PDAs the transaction paid. A
+server MUST NOT require either field. When they are absent, it reconciles the
+`settled` and `payout_watermark` values by reading the channel account after
+the transaction confirms; when they are present, it MAY use them only if they
+name exactly the channels it submitted.
 
 Deposit (`amount` is the amount deposited or topped up):
 
@@ -1679,6 +1690,12 @@ Standard x402 codes apply. The facilitator reports verification failures in
 - `invalid_batch_settlement_svm_refund_transaction` - refund transaction is not
   a valid payer-signed `request_close` for the derived channel or contains an
   unauthorized instruction.
+- `invalid_batch_settlement_svm_payout_attribution_ambiguous` - a `settle`
+  transaction confirmed, but the receiver's token-balance delta cannot be
+  attributed to the batch because a sealed payout in the same transaction
+  returned escrow to a payer or treasury that aliases `payTo`. The facilitator
+  returns the confirmed signature with this reason instead of an `amount`;
+  the server reconciles from onchain state.
 - `duplicate_settlement` - a server-mode `requestId` was already reserved or
   completed, or the same client-supplied setup or refund transaction is already
   being settled.

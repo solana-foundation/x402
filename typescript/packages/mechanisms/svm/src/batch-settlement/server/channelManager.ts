@@ -40,7 +40,7 @@ export interface BatchChannelManagerConfig {
    * the ones the server advertises.
    */
   requirements: PaymentRequirements;
-  /** Channels per claim transaction. Defaults to the spec's four. */
+  /** Channels per claim or distribute transaction. Defaults to, and is capped at, the spec's four. */
   maxChannelsPerBatch?: number | undefined;
   /** RPC URL used to reconcile paid state after a sweep response, when no `rpc` is injected. */
   rpcUrl?: string | undefined;
@@ -48,6 +48,12 @@ export interface BatchChannelManagerConfig {
   rpc?: ChannelRpc | undefined;
   /** Optional confirmed channel reader for custom transports; never estimate from the response amount. */
   readPayoutWatermark?: ((channelId: string) => Promise<bigint | undefined>) | undefined;
+  /**
+   * Optional confirmed reader of the onchain `settled` watermark, used when a
+   * claim response carries no per-channel confirmation (spec 4.5 defines only
+   * `success`, `transaction`, `network` and `amount` for a claim).
+   */
+  readSettledWatermark?: ((channelId: string) => Promise<bigint | undefined>) | undefined;
   /** Reports a pass that failed, so an operator can see it. */
   onError?: ((error: unknown) => void) | undefined;
 }
@@ -185,37 +191,62 @@ export class BatchChannelManager {
         );
         continue;
       }
-      const accepts = response.extra?.accepts;
-      if (
-        response.network !== this.config.requirements.network ||
-        !Array.isArray(accepts) ||
-        accepts.length !== batch.length ||
-        batch.some(channel => {
-          const matches = accepts.filter(
-            item =>
-              typeof item === "object" &&
-              item !== null &&
-              "channelId" in item &&
-              item.channelId === channel.channelId,
-          );
-          return (
-            matches.length !== 1 ||
-            !("totalClaimed" in matches[0]!) ||
-            matches[0]!.totalClaimed !== channel.signedMaxClaimable.toString()
-          );
-        })
-      ) {
+      if (response.network !== this.config.requirements.network) {
         this.config.onError?.(
-          new Error(`${BATCH_SETTLEMENT_SCHEME} claim missing confirmed settled watermark`),
+          new Error(`${BATCH_SETTLEMENT_SCHEME} claim response bound to another network`),
         );
         continue;
       }
+      // The spec's claim response is just `success`/`transaction`/`network`/
+      // `amount`; the reference facilitator adds `extra.accepts[]` with each
+      // channel's confirmed watermark. Use it when present, otherwise read the
+      // watermark from the chain so any conforming facilitator works.
+      const accepts = response.extra?.accepts;
+      if (accepts !== undefined) {
+        if (
+          !Array.isArray(accepts) ||
+          accepts.length !== batch.length ||
+          batch.some(channel => {
+            const matches = accepts.filter(
+              item =>
+                typeof item === "object" &&
+                item !== null &&
+                "channelId" in item &&
+                item.channelId === channel.channelId,
+            );
+            return (
+              matches.length !== 1 ||
+              !("totalClaimed" in matches[0]!) ||
+              matches[0]!.totalClaimed !== channel.signedMaxClaimable.toString()
+            );
+          })
+        ) {
+          this.config.onError?.(
+            new Error(`${BATCH_SETTLEMENT_SCHEME} claim missing confirmed settled watermark`),
+          );
+          continue;
+        }
+      }
       for (const channel of batch) {
+        let settled = channel.signedMaxClaimable;
+        if (accepts === undefined) {
+          try {
+            const observed = await this.readSettledWatermark(channel.channelId);
+            if (observed === undefined || observed < channel.signedMaxClaimable) {
+              throw new Error("confirmed settled watermark unavailable or behind the claim");
+            }
+            settled = observed;
+          } catch (error) {
+            // Leave the voucher claimable for the next pass; `settle` is
+            // monotonic, so a repeat cannot advance the watermark twice.
+            this.config.onError?.(error);
+            continue;
+          }
+        }
         await this.record(channel.channelId, state => ({
           ...state,
           onchainSyncedAt: Date.now(),
-          settled:
-            state.settled > channel.signedMaxClaimable ? state.settled : channel.signedMaxClaimable,
+          settled: state.settled > settled ? state.settled : settled,
         }));
         claimed.push(channel.channelId);
       }
@@ -257,13 +288,22 @@ export class BatchChannelManager {
         );
         continue;
       }
+      if (response.network !== this.config.requirements.network) {
+        this.config.onError?.(
+          new Error(`${BATCH_SETTLEMENT_SCHEME} distribute response bound to another network`),
+        );
+        continue;
+      }
+      // `extra.channels[]` is the reference facilitator's addition, not a
+      // spec field; when present it must name exactly this batch. The paid
+      // watermark is always reconciled from the chain below either way.
       const channels = response.extra?.channels;
       if (
-        response.network !== this.config.requirements.network ||
-        !Array.isArray(channels) ||
-        channels.length !== batch.length ||
-        new Set(channels).size !== channels.length ||
-        batch.some(channel => !channels.includes(channel.channelId))
+        channels !== undefined &&
+        (!Array.isArray(channels) ||
+          channels.length !== batch.length ||
+          new Set(channels).size !== channels.length ||
+          batch.some(channel => !channels.includes(channel.channelId)))
       ) {
         this.config.onError?.(
           new Error(`${BATCH_SETTLEMENT_SCHEME} distribute response channel mismatch`),
@@ -300,6 +340,29 @@ export class BatchChannelManager {
    */
   private async readPayoutWatermark(channelId: string): Promise<bigint | undefined> {
     if (this.config.readPayoutWatermark) return this.config.readPayoutWatermark(channelId);
+    return (await this.readSettlement(channelId))?.payoutWatermark;
+  }
+
+  /**
+   * Read the confirmed onchain `settled` watermark for a channel.
+   *
+   * @param channelId - Channel whose claimed state is being reconciled
+   * @returns Observed settled watermark, or undefined if the account is absent
+   */
+  private async readSettledWatermark(channelId: string): Promise<bigint | undefined> {
+    if (this.config.readSettledWatermark) return this.config.readSettledWatermark(channelId);
+    return (await this.readSettlement(channelId))?.settled;
+  }
+
+  /**
+   * Decode the confirmed settlement fields of a channel account.
+   *
+   * @param channelId - Channel account to read
+   * @returns The channel's settlement fields, or undefined if the account is absent
+   */
+  private async readSettlement(
+    channelId: string,
+  ): Promise<{ settled: bigint; payoutWatermark: bigint } | undefined> {
     const rpc =
       this.config.rpc ?? createRpcClient(this.config.requirements.network, this.config.rpcUrl);
     const account = await rpc
@@ -308,8 +371,10 @@ export class BatchChannelManager {
     if (!account.value) return undefined;
     if (account.value.owner !== PAYMENT_CHANNELS_PROGRAM_ID)
       throw new Error("unexpected channel account owner");
-    return getChannelDecoder().decode(Buffer.from(account.value.data[0], "base64")).settlement
-      .payoutWatermark;
+    const { settled, payoutWatermark } = getChannelDecoder().decode(
+      Buffer.from(account.value.data[0], "base64"),
+    ).settlement;
+    return { settled, payoutWatermark };
   }
 
   /**
@@ -334,7 +399,12 @@ export class BatchChannelManager {
    * @returns Channels to pack into one redemption transaction
    */
   private batchSize(): number {
-    return Math.max(1, this.config.maxChannelsPerBatch ?? MAX_CHANNELS_PER_BATCH);
+    // Clamp to the spec's ceiling: a `claims[]` or `channels[]` array longer
+    // than four is not a valid request (spec 4.5).
+    return Math.min(
+      MAX_CHANNELS_PER_BATCH,
+      Math.max(1, this.config.maxChannelsPerBatch ?? MAX_CHANNELS_PER_BATCH),
+    );
   }
 }
 

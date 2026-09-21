@@ -65,6 +65,29 @@ export function snapshotChannel(
 }
 
 /**
+ * Project a decoded channel account onto the flat `/verify` response `extra`
+ * of the scheme spec (section 4.5): `channelId`, `balance`, `totalClaimed`
+ * and `withdrawRequestedAt` as siblings, not a nested snapshot.
+ *
+ * @param channelId - Channel PDA
+ * @param channel - Decoded channel account
+ * @returns The verify response `extra`
+ */
+export function verifiedChannelExtra(
+  channelId: string,
+  channel: Channel,
+): {
+  channelId: string;
+  balance: string;
+  totalClaimed: string;
+  withdrawRequestedAt: number;
+} {
+  const { chargedCumulativeAmount: _omitted, ...flat } = snapshotChannel(channelId, channel);
+  void _omitted;
+  return flat;
+}
+
+/**
  *
  * @param channelId
  * @param channel
@@ -78,6 +101,8 @@ export function snapshotChannel(
  * @param channel - Decoded channel account after the deposit landed
  * @param network - CAIP-2 network
  * @param transaction - Confirmed transaction signature
+ * @param amount - Amount this deposit or top-up moved into escrow, not the
+ * channel's running total (spec section 4.5)
  * @returns The settle response
  */
 export function depositResponse(
@@ -85,13 +110,14 @@ export function depositResponse(
   channel: Channel,
   network: Network,
   transaction: string,
+  amount: bigint,
 ): SettleResponse {
   return {
     success: true,
     payer: channel.payer,
     transaction,
     network,
-    amount: channel.deposit.toString(),
+    amount: amount.toString(),
     extra: {
       channelState: snapshotChannel(channelId, channel),
     },
@@ -161,6 +187,8 @@ export function refundResponse(
     payer: channel.payer,
     transaction,
     network,
+    // Initiation only: the grace period may still be running (spec 4.5).
+    amount: "",
     extra: { channelState: snapshotChannel(channelId, channel) },
   };
 }

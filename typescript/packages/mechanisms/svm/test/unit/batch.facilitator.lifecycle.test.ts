@@ -458,7 +458,7 @@ describe("batch facilitator lifecycle", () => {
         },
         requirements(),
       ),
-    ).resolves.toMatchObject({ isValid: true, extra: { channelState: { channelId } } });
+    ).resolves.toMatchObject({ isValid: true, extra: { channelId } });
 
     api.deriveChannelId = vi.fn().mockResolvedValue(payer.address);
     await expect(
@@ -542,7 +542,7 @@ describe("batch facilitator lifecycle", () => {
       );
     await expect(verify(proof)).resolves.toMatchObject({
       isValid: true,
-      extra: { channelState: { channelId } },
+      extra: { channelId },
     });
     // Every binding the resource server relies on is re-checked here, so a
     // facilitator used as a standalone verifier cannot be fed a forged,
@@ -806,7 +806,7 @@ describe("batch facilitator lifecycle", () => {
         deposit,
         requirements(),
       ),
-    ).resolves.toMatchObject({ success: true, amount: "11000", transaction: SIGNATURE });
+    ).resolves.toMatchObject({ success: true, amount: "1000", transaction: SIGNATURE });
     expect(facilitatorSigner.simulateTransaction).toHaveBeenCalledWith("setup", NETWORK);
 
     api.validateDeposit = vi.fn().mockResolvedValue({

@@ -477,12 +477,10 @@ describe("batch-settlement SVM", () => {
           isValid: true,
           payer: payer.address,
           extra: {
-            channelState: {
-              channelId,
-              balance: "10000",
-              totalClaimed: "2000",
-              withdrawRequestedAt: 0,
-            },
+            channelId,
+            balance: "10000",
+            totalClaimed: "2000",
+            withdrawRequestedAt: 0,
           },
         },
       });
@@ -524,14 +522,12 @@ describe("batch-settlement SVM", () => {
           isValid: true,
           payer: payer.address,
           extra: {
-            channelState: {
-              channelId,
-              balance: "10000",
-              // Settled at 2000, so 2000 + 1000 is exactly what this voucher
-              // authorizes.
-              totalClaimed: "2000",
-              withdrawRequestedAt: 0,
-            },
+            channelId,
+            balance: "10000",
+            // Settled at 2000, so 2000 + 1000 is exactly what this voucher
+            // authorizes.
+            totalClaimed: "2000",
+            withdrawRequestedAt: 0,
           },
         },
       });
@@ -563,14 +559,12 @@ describe("batch-settlement SVM", () => {
           isValid: true,
           payer: payer.address,
           extra: {
-            channelState: {
-              channelId,
-              balance: "10000",
-              totalClaimed: "2000",
-              // A forced close is running: its grace period bounds redemption,
-              // so no further charge may be accepted.
-              withdrawRequestedAt: 1_760_000_000,
-            },
+            channelId,
+            balance: "10000",
+            totalClaimed: "2000",
+            // A forced close is running: its grace period bounds redemption,
+            // so no further charge may be accepted.
+            withdrawRequestedAt: 1_760_000_000,
           },
         },
       });
@@ -1310,6 +1304,43 @@ describe("batch-settlement SVM", () => {
       );
       expect(result).toMatchObject({
         invalidReason: BatchError.CLOSE_AUTHORIZATION,
+        isValid: false,
+      });
+    });
+
+    it("rejects a refund that names an amount: only the full unused escrow returns", async () => {
+      const facilitator = new BatchFacilitatorScheme(toFacilitatorSvmSigner(feePayer));
+      const result = await facilitator.verify(
+        {
+          accepted: requirements(),
+          payload: {
+            amount: "500",
+            channelConfig,
+            transaction: "request-close",
+            type: "refund",
+          } as never,
+          x402Version: 2,
+        },
+        requirements(),
+      );
+      expect(result).toMatchObject({
+        invalidReason: BatchError.CLOSE_AMOUNT_UNSUPPORTED,
+        isValid: false,
+      });
+    });
+
+    it("reports a malformed request_close under the refund_transaction code", async () => {
+      const facilitator = new BatchFacilitatorScheme(toFacilitatorSvmSigner(feePayer));
+      const result = await facilitator.verify(
+        {
+          accepted: requirements(),
+          payload: { channelConfig, transaction: "not-a-transaction", type: "refund" },
+          x402Version: 2,
+        },
+        requirements(),
+      );
+      expect(result).toMatchObject({
+        invalidReason: BatchError.REFUND_TRANSACTION,
         isValid: false,
       });
     });

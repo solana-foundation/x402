@@ -717,7 +717,11 @@ export class BatchSvmScheme implements SchemeNetworkClient {
     }
     const reported = extra?.channelState?.chargedCumulativeAmount;
     if (
-      extra?.commitmentId !== `${pending.tracker.channelId}:${confirmedCumulative}` ||
+      // The commitment identifier is opaque to the client: the spec only
+      // requires it to be non-empty (section 4.4). The server's own cumulative,
+      // when reported, must still agree with the one derived here.
+      typeof extra?.commitmentId !== "string" ||
+      extra.commitmentId === "" ||
       (typeof reported === "string" && reported !== confirmedCumulative.toString())
     ) {
       // The server confirmed something this client did not submit. Leave local

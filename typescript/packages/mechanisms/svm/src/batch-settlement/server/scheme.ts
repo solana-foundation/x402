@@ -1153,15 +1153,18 @@ type VerifiedChannelState = {
 /**
  * Read the channel snapshot from a facilitator verify response.
  *
- * Returns nothing when the response carries none — a `deposit` verify has no
- * channel to snapshot yet — or when a field is not the shape it claims: a
- * malformed snapshot must not become a serving record.
+ * Returns nothing when the response carries no `totalClaimed` — a `deposit`
+ * verify has no channel to snapshot yet — or when a field is not the shape it
+ * claims: a malformed snapshot must not become a serving record.
  *
  * @param result - The facilitator's verify response
  * @returns The snapshot, or nothing when the response carries none
  */
 function readVerifiedChannelState(result: VerifyResponse): VerifiedChannelState | undefined {
-  const raw = (result.extra as { channelState?: unknown } | undefined)?.channelState;
+  // Spec 4.5: the verify `extra` carries `channelId`, `balance`, `totalClaimed`
+  // and `withdrawRequestedAt` as flat siblings. A deposit verify has no
+  // channel yet and reports only `channelId`, which is not a snapshot.
+  const raw = result.extra;
   if (typeof raw !== "object" || raw === null) return undefined;
   const state = raw as Record<string, unknown>;
   const digits = (value: unknown): bigint | undefined =>
