@@ -680,6 +680,7 @@ export class BatchSvmScheme implements SchemeNetworkFacilitator {
           throw new Error("recipient is absent from distribution transaction");
         // A sealed payout can also refund the payer or sweep treasury funds.
         // Balance evidence cannot separate those legs when beneficiaries alias.
+        const swept: PreparedDistribution[] = [];
         for (const item of prepared) {
           const [escrow] = await findAssociatedTokenPda({
             mint: address(requirements.asset),
@@ -688,6 +689,7 @@ export class BatchSvmScheme implements SchemeNetworkFacilitator {
           });
           const escrowIndex = keys.indexOf(escrow);
           if (escrowIndex < 0) continue; // Already paid channel omitted from this sweep.
+          swept.push(item);
           const closed = !evidence.meta.postTokenBalances.some(
             balance => balance.accountIndex === escrowIndex,
           );
@@ -720,6 +722,21 @@ export class BatchSvmScheme implements SchemeNetworkFacilitator {
         await this.pendingStore.set(
           `batch:transaction:${requirements.network}:${signature}:result`,
           JSON.stringify(response),
+        );
+        // A confirmed `settle` is facilitator-visible lifecycle activity for
+        // every channel it paid (spec Phase 4), so it resets the idle clock
+        // the abandon-close runs on. A replayed cached result is not new
+        // activity and is left alone.
+        await Promise.all(
+          swept.map(item =>
+            this.trackChannel({
+              channelId: item.channelId,
+              expiresAt: 0,
+              network: requirements.network,
+              payTo: requirements.payTo,
+              tokenProgram: item.terms.tokenProgram,
+            }),
+          ),
         );
       }
       await this.config.onDistributionConfirmed?.(response, requirements);

@@ -1170,6 +1170,7 @@ describe("batch facilitator lifecycle", () => {
       programAddress: address(USDC_MAINNET_ADDRESS),
     });
     privateApi.submitRedemption = vi.fn().mockResolvedValue({ ok: true, signature: SIGNATURE });
+    privateApi.trackChannel = vi.fn().mockResolvedValue(undefined);
     const payload: BatchSettlePayload = {
       type: "settle",
       channels: [{ channelConfig, channelId }],
@@ -1181,6 +1182,30 @@ describe("batch facilitator lifecycle", () => {
         requirements(),
       ),
     ).resolves.toMatchObject({ amount: "800", success: true, transaction: SIGNATURE });
+    // A confirmed distribution is facilitator-visible activity (spec Phase 4):
+    // it resets the idle clock for the channel it paid.
+    expect(privateApi.trackChannel).toHaveBeenCalledOnce();
+    expect(privateApi.trackChannel).toHaveBeenCalledWith({
+      channelId,
+      expiresAt: 0,
+      network: NETWORK,
+      payTo: RECEIVER,
+      tokenProgram: TOKEN_PROGRAM_ADDRESS,
+    });
+
+    // Replaying the same confirmed result is not new activity.
+    privateApi.trackChannel.mockClear();
+    privateApi.readChannel = vi
+      .fn()
+      .mockResolvedValue(channel({ settlement: { payoutWatermark: 200n, settled: 1_000n } }));
+    await expect(
+      scheme.settleDistributions(
+        { accepted: requirements(), payload, x402Version: 2 } as never,
+        payload,
+        requirements(),
+      ),
+    ).resolves.toMatchObject({ amount: "800", success: true, transaction: SIGNATURE });
+    expect(privateApi.trackChannel).not.toHaveBeenCalled();
   });
 
   it("rejects invalid distribution batches at each lifecycle boundary", async () => {
