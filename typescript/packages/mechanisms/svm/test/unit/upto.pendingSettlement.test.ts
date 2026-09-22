@@ -240,6 +240,48 @@ describe("UptoSvmScheme deposit pending-settlement store integration", () => {
     expect(await store.get(depositKey)).toBeUndefined();
   });
 
+  it("cache-hit with a changed ceiling is refused by validation, not reconciled", async () => {
+    // The same open transaction (so the same store key) retried against a
+    // larger requirement, with the payload's ceiling and deposit raised to
+    // match. The transaction only escrows 1,000,000, so success here would
+    // report a 2,000,000 deposit that never happened.
+    const { facilitator, payload, requirements, uptoPayload, rawSigner } = await buildFixture({
+      pendingSettlementStore: store,
+    });
+    const depositKey = depositKeyFor(requirements, uptoPayload);
+    await store.set(depositKey, "CachedOpenSig333333333333333333333333333333");
+    const confirmTransaction = vi.fn().mockResolvedValue(undefined);
+    rawSigner.confirmTransaction = confirmTransaction;
+
+    const inflatedRequirements: PaymentRequirements = { ...requirements, amount: "2000000" };
+    const inflatedPayload: PaymentPayload = {
+      ...payload,
+      accepted: inflatedRequirements,
+      payload: {
+        ...uptoPayload,
+        deposit: "2000000",
+        maxAmount: "2000000",
+      } as unknown as Record<string, unknown>,
+    };
+
+    const result = await facilitator.settle(inflatedPayload, inflatedRequirements);
+
+    expect(result.success).toBe(false);
+    expect(result.errorReason).toMatch(/^invalid_upto_svm_/);
+    // Refused before any reconciliation: the cached signature is neither
+    // confirmed against nor consumed, so a retry with the real terms still
+    // recovers, and nothing is broadcast.
+    expect(confirmTransaction).not.toHaveBeenCalled();
+    expect(channelMocks.broadcastOpen).not.toHaveBeenCalled();
+    expect(await store.get(depositKey)).toBe("CachedOpenSig333333333333333333333333333333");
+
+    // The genuine retry then reconciles and reports the validated deposit.
+    const recovered = await facilitator.settle(payload, requirements);
+    expect(recovered.success).toBe(true);
+    expect(recovered.amount).toBe("1000000");
+    expect(recovered.transaction).toBe("CachedOpenSig333333333333333333333333333333");
+  });
+
   it("cache-hit still pending: returns settlement_pending again and preserves the store entry", async () => {
     const { facilitator, payload, requirements, uptoPayload, rawSigner } = await buildFixture({
       pendingSettlementStore: store,

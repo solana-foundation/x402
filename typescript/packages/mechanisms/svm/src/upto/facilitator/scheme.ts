@@ -613,6 +613,31 @@ export class UptoSvmScheme implements SchemeNetworkFacilitator {
     // opens are still caught (see the race comment below).
     const depositChannelKey = `upto:deposit:${requirements.network}:${p.channelId}`;
 
+    // Validate before consulting the pending-settlement store. The store key
+    // binds the open transaction's bytes, but a retry can pair those same
+    // bytes with different terms (a larger `maxAmount`/`deposit` against a
+    // larger requirement). Success must only ever be reported for terms the
+    // decoded transaction actually backs, so the ceiling, deposit and
+    // requirement are re-bound to the transaction here and the recovered
+    // response below uses the validated ceiling, never the retry's claim.
+    const auth = await this.validateOpenAuthorization(payload, requirements, {
+      rejectVoucher: true,
+    });
+    if (!auth.ok) {
+      return {
+        success: false,
+        network: payload.accepted.network,
+        transaction: "",
+        errorReason: auth.failure.reason,
+        errorMessage: auth.failure.message,
+        payer: auth.failure.payer,
+      };
+    }
+
+    const { channelConfig, feePayerSigner, maxAmount, tokenProgram } = auth.ctx;
+    const feePayer = channelConfig.feePayer;
+    const network = requirements.network;
+
     // Pending-settlement fast path: a prior deposit settle for this exact open
     // transaction broadcast successfully but couldn't confirm in time. Reconcile
     // against that signature instead of re-broadcasting (a second open would hit
@@ -651,29 +676,13 @@ export class UptoSvmScheme implements SchemeNetworkFacilitator {
           success: true,
           transaction: cachedDepositSignature,
           network: requirements.network,
-          amount: p.maxAmount,
+          // The ceiling validation bound to the decoded transaction, not the
+          // retry payload's own claim.
+          amount: maxAmount.toString(),
           payer: p.from,
         };
       }
     }
-
-    const auth = await this.validateOpenAuthorization(payload, requirements, {
-      rejectVoucher: true,
-    });
-    if (!auth.ok) {
-      return {
-        success: false,
-        network: payload.accepted.network,
-        transaction: "",
-        errorReason: auth.failure.reason,
-        errorMessage: auth.failure.message,
-        payer: auth.failure.payer,
-      };
-    }
-
-    const { channelConfig, feePayerSigner, maxAmount, tokenProgram } = auth.ctx;
-    const feePayer = channelConfig.feePayer;
-    const network = requirements.network;
 
     // One authorization → one deposit open. A confirmed channel is replay or a
     // stranded prior open, not a supported re-bind path; handler failure after
