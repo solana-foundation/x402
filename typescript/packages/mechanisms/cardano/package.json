@@ -1,11 +1,11 @@
 {
   "name": "@x402/cardano",
-  "version": "2.26.0",
+  "version": "2.27.0",
   "main": "./dist/cjs/index.js",
   "module": "./dist/esm/index.js",
   "types": "./dist/cjs/index.d.ts",
   "scripts": {
-    "build": "tsup",
+    "build": "tsup && node ../../../scripts/mirror-cjs-dts.mjs",
     "start": "tsx --env-file=.env index.ts",
     "test": "vitest run --coverage",
     "test:integration": "vitest run --config vitest.integration.config.ts",

@@ -31,3 +31,4 @@ jobs:
         run: |
           pnpm install --frozen-lockfile --ignore-scripts
           pnpm exec turbo run test --concurrency=50%
+          pnpm verify:exports

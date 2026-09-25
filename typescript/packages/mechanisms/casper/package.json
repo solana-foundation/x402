@@ -1,12 +1,12 @@
 {
   "name": "@x402/casper",
-  "version": "2.26.0",
+  "version": "2.27.0",
   "main": "./dist/cjs/index.js",
   "module": "./dist/esm/index.js",
   "types": "./dist/cjs/index.d.ts",
   "scripts": {
     "start": "tsx --env-file=.env index.ts",
-    "build": "tsup",
+    "build": "tsup && node ../../../scripts/mirror-cjs-dts.mjs",
     "test": "vitest run --coverage",
     "test:integration": "vitest run --config vitest.integration.config.ts",
     "test:watch": "vitest",

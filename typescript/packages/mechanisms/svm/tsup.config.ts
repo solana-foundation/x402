@@ -35,5 +35,6 @@ export default defineConfig([
     format: "cjs",
     outDir: "dist/cjs",
     clean: false,
+    dts: false,
   },
 ]);

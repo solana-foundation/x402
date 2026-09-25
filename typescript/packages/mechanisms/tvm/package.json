@@ -1,6 +1,6 @@
 {
   "name": "@x402/tvm",
-  "version": "2.26.0",
+  "version": "2.27.0",
   "description": "TVM (TON) mechanism for x402 payment protocol",
   "main": "./dist/cjs/index.js",
   "module": "./dist/esm/index.js",
@@ -9,7 +9,7 @@
   "author": "x402 Foundation",
   "repository": "https://github.com/x402-foundation/x402",
   "scripts": {
-    "build": "tsup",
+    "build": "tsup && node ../../../scripts/mirror-cjs-dts.mjs",
     "test": "vitest run --coverage",
     "test:watch": "vitest",
     "format": "prettier -c .prettierrc --write \"**/*.{ts,js,cjs,json,md}\"",

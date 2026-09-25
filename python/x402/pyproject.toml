@@ -1,6 +1,6 @@
 [project]
 name = "x402"
-version = "2.23.0"
+version = "2.24.0"
 description = "x402 Payment Protocol SDK for Python"
 readme = "README.md"
 license = { text = "MIT" }
@@ -44,7 +44,7 @@ evm = [
 ]
 svm = [
     "solders>=0.27.0",
-    "solana>=0.36.0",
+    "solana>=0.36.0,<0.40",
 ]
 tvm = [
     "httpx>=0.28.1",
@@ -92,7 +92,7 @@ dev = [
     "web3>=7.0.0",
     # SVM dependencies
     "solders>=0.27.0",
-    "solana>=0.36.0",
+    "solana>=0.36.0,<0.40",
     # TVM dependencies
     "pytoniq>=0.1.39",
     "pytoniq-core>=0.1.36",
