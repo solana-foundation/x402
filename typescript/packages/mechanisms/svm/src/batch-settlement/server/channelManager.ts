@@ -8,16 +8,15 @@
  */
 
 import { address, type MessagePartialSigner } from "@solana/kit";
-import { createRpcClient } from "../../utils";
-import type { ChannelRpc } from "../../payment-channels/facilitator";
 import { getChannelDecoder } from "../../payment-channels/generated/accounts/channel";
 import { PAYMENT_CHANNELS_PROGRAM_ID } from "../../payment-channels/onchain";
+import { createRpcClient } from "../../utils";
 import type { PaymentRequirements, SettleResponse } from "@x402/core/types";
 
 import { signCloseAuthorization } from "../closeAuthorization";
 import { BatchError } from "../errors";
 import { BATCH_SETTLEMENT_SCHEME, type BatchSealPayload } from "../types";
-import type { ChannelState, ChannelStore } from "./storage";
+import type { ChannelState, ChannelStore } from "./types";
 
 /**
  * The spec packs no more than four channels into one claim transaction, and a
@@ -30,6 +29,23 @@ export type RedemptionSettler = (
   payload: { x402Version: number; payload: unknown; accepted: PaymentRequirements },
   requirements: PaymentRequirements,
 ) => Promise<SettleResponse>;
+
+/** Outcome of a successful onchain claim batch. */
+export interface ClaimResult {
+  vouchers: number;
+  transaction: string;
+}
+
+/** Outcome of a successful distribute batch that pays `payTo`. */
+export interface SettleResult {
+  transaction: string;
+}
+
+/** Outcome of a successful `seal` on a channel the payer is closing. */
+export interface SealResult {
+  channel: string;
+  transaction: string;
+}
 
 export interface BatchChannelManagerConfig {
   /** The server's channel state, holding the vouchers to redeem. */
@@ -44,10 +60,11 @@ export interface BatchChannelManagerConfig {
   requirements: PaymentRequirements;
   /** Channels per claim or distribute transaction. Defaults to, and is capped at, the spec's four. */
   maxChannelsPerBatch?: number | undefined;
-  /** RPC URL used to reconcile paid state after a sweep response, when no `rpc` is injected. */
+  /**
+   * RPC endpoint for confirmed watermark reads. Omit to use the public
+   * endpoint for `requirements.network`.
+   */
   rpcUrl?: string | undefined;
-  /** Injected RPC client, so the worker shares the server's client instead of building its own. */
-  rpc?: ChannelRpc | undefined;
   /** Optional confirmed channel reader for custom transports; never estimate from the response amount. */
   readPayoutWatermark?: ((channelId: string) => Promise<bigint | undefined>) | undefined;
   /**
@@ -56,16 +73,22 @@ export interface BatchChannelManagerConfig {
    * `success`, `transaction`, `network` and `amount` for a claim).
    */
   readSettledWatermark?: ((channelId: string) => Promise<bigint | undefined>) | undefined;
+  /** Fires after a successful onchain claim batch. */
+  onClaim?: ((result: ClaimResult) => void) | undefined;
+  /** Fires after a successful distribute (`settle`) batch. */
+  onSettle?: ((result: SettleResult) => void) | undefined;
+  /** Fires after a successful `seal` on a closing channel. */
+  onSeal?: ((result: SealResult) => void) | undefined;
   /** Reports a pass that failed, so an operator can see it. */
   onError?: ((error: unknown) => void) | undefined;
   /**
-   * Receiver-authorizer key advertised as `extra.receiverAuthorizer`. When a
-   * claim finds the payer has started a forced close, the worker signs a
-   * `CloseAuthorization` with it and retries as a `seal`, so vouchers above
-   * the onchain watermark are collected inside the grace period instead of
-   * forfeited. Without it a closing channel is only marked closing.
+   * Receiver-authorizer key advertised as `extra.receiverAuthorizer`. For a
+   * channel the payer is closing, the worker signs a `CloseAuthorization` with
+   * it and submits a `seal`, so vouchers above the onchain watermark are
+   * collected inside the grace period instead of forfeited. Omit it when the
+   * facilitator authenticates the close itself.
    */
-  closeAuthorizer?: MessagePartialSigner | undefined;
+  receiverAuthorizer?: MessagePartialSigner | undefined;
 }
 
 /** What one redemption pass moved. */
@@ -89,6 +112,7 @@ export class BatchChannelManager {
   private timer: ReturnType<typeof setInterval> | undefined;
   private passInFlight: Promise<unknown> = Promise.resolve();
   private running = false;
+  private readonly graceElapsedReported = new Set<string>();
 
   /**
    * Build a worker over a store and a way to submit redemption payloads.
@@ -131,12 +155,21 @@ export class BatchChannelManager {
     }, intervalSecs * 1_000);
   }
 
-  /** Stop the interval and wait for a pass already under way. */
-  async stop(): Promise<void> {
+  /**
+   * Stop the interval and wait for a pass already under way.
+   *
+   * @param opts - Stop options.
+   * @param opts.flush - When true, run one final {@link redeem} before returning.
+   * @returns Resolves when the interval is stopped (and flush work completes, if requested).
+   */
+  async stop(opts?: { flush?: boolean }): Promise<void> {
     this.running = false;
     if (this.timer !== undefined) {
       clearInterval(this.timer);
       this.timer = undefined;
+    }
+    if (opts?.flush) {
+      await this.redeem().catch(error => this.config.onError?.(error));
     }
     await this.passInFlight;
   }
@@ -166,15 +199,19 @@ export class BatchChannelManager {
    * @returns The channels whose claim landed
    */
   private async claim(channels: ChannelState[]): Promise<{ claimed: string[]; sealed: string[] }> {
-    const claimable = channels.filter(
+    const unclaimed = channels.filter(
       channel =>
-        channel.status === "open" &&
         channel.highestVoucherSignature !== undefined &&
         channel.signedMaxClaimable > channel.settled,
     );
+    const claimable = unclaimed.filter(channel => channel.status === "open");
+    const closing = unclaimed.filter(channel => channel.status === "closing");
     const result = { claimed: [] as string[], sealed: [] as string[] };
     for (const batch of chunk(claimable, this.batchSize())) {
       await this.claimBatch(batch, result);
+    }
+    for (const channel of closing) {
+      if (await this.seal(channel)) result.sealed.push(channel.channelId);
     }
     return result;
   }
@@ -269,6 +306,7 @@ export class BatchChannelManager {
           return;
         }
       }
+      let claimedInBatch = 0;
       for (const channel of batch) {
         let settled = channel.signedMaxClaimable;
         if (accepts === undefined) {
@@ -291,6 +329,13 @@ export class BatchChannelManager {
           settled: state.settled > settled ? state.settled : settled,
         }));
         result.claimed.push(channel.channelId);
+        claimedInBatch++;
+      }
+      if (claimedInBatch > 0) {
+        this.config.onClaim?.({
+          transaction: response.transaction ?? "",
+          vouchers: claimedInBatch,
+        });
       }
     }
   }
@@ -307,36 +352,50 @@ export class BatchChannelManager {
    * @returns Whether the seal landed
    */
   private async seal(channel: ChannelState): Promise<boolean> {
+    const closeRequestedAt = channel.closeRequestedAt ?? 0;
+    const graceElapsed =
+      closeRequestedAt > 0 &&
+      Math.floor(Date.now() / 1000) >= closeRequestedAt + channel.withdrawDelay;
+    if (graceElapsed) {
+      if (!this.graceElapsedReported.has(channel.channelId)) {
+        this.graceElapsedReported.add(channel.channelId);
+        this.config.onError?.(
+          new Error(
+            `${BATCH_SETTLEMENT_SCHEME} channel ${channel.channelId} grace period elapsed: ` +
+              `voucher value above the onchain watermark can no longer be sealed`,
+          ),
+        );
+      }
+      return false;
+    }
     // Whatever happens next, the payer has started a forced close: stop
     // serving paid requests against this channel.
     await this.record(channel.channelId, state =>
       state.status === "open" ? { ...state, status: "closing" } : state,
     );
-    const authorizer = this.config.closeAuthorizer;
     const feePayer = this.config.requirements.extra?.feePayer;
-    if (!authorizer || typeof feePayer !== "string") {
+    if (typeof feePayer !== "string") {
       this.config.onError?.(
-        new Error(
-          `${BATCH_SETTLEMENT_SCHEME} channel ${channel.channelId} is closing and no closeAuthorizer is configured: ` +
-            `voucher value above the onchain watermark cannot be sealed`,
-        ),
+        new Error(`${BATCH_SETTLEMENT_SCHEME} seal requires requirements.extra.feePayer`),
       );
       return false;
     }
     const { network, maxTimeoutSeconds } = this.config.requirements;
     const expiresAt = channel.highestVoucherExpiresAt ?? 0;
-    const closeAuthorization = await signCloseAuthorization(authorizer, {
-      channelId: channel.channelId,
-      feePayer,
-      maxClaimableAmount: channel.signedMaxClaimable,
-      network,
-      validBefore: Math.floor(Date.now() / 1000) + maxTimeoutSeconds,
-      voucherExpiresAt: BigInt(expiresAt),
-    });
+    const authorizer = this.config.receiverAuthorizer;
+    const closeAuthorization = authorizer
+      ? await signCloseAuthorization(authorizer, {
+          channelId: channel.channelId,
+          feePayer,
+          maxClaimableAmount: channel.signedMaxClaimable,
+          network,
+          validBefore: Math.floor(Date.now() / 1000) + maxTimeoutSeconds,
+          voucherExpiresAt: BigInt(expiresAt),
+        })
+      : undefined;
     const payload: BatchSealPayload = {
       channelConfig: channel.channelConfig,
       channelId: channel.channelId,
-      closeAuthorization,
       type: "seal",
       voucher: {
         channelId: channel.channelId,
@@ -344,6 +403,7 @@ export class BatchChannelManager {
         maxClaimableAmount: channel.signedMaxClaimable.toString(),
         signature: channel.highestVoucherSignature!,
       },
+      ...(closeAuthorization ? { closeAuthorization } : {}),
     };
     const response = await this.config.settle(
       { accepted: this.config.requirements, payload, x402Version: 2 },
@@ -363,6 +423,10 @@ export class BatchChannelManager {
       settled: state.settled > final ? state.settled : final,
       status: "distributed",
     }));
+    this.config.onSeal?.({
+      channel: channel.channelId,
+      transaction: response.transaction ?? "",
+    });
     return true;
   }
 
@@ -422,6 +486,7 @@ export class BatchChannelManager {
         );
         continue;
       }
+      let distributedInBatch = 0;
       for (const channel of batch) {
         try {
           // This response may recover an earlier sweep. A channel ID and a
@@ -434,11 +499,17 @@ export class BatchChannelManager {
             onchainSyncedAt: Date.now(),
             payoutWatermark: state.payoutWatermark > paid ? state.payoutWatermark : paid,
           }));
-          if (paid >= channel.settled) distributed.push(channel.channelId);
+          if (paid >= channel.settled) {
+            distributed.push(channel.channelId);
+            distributedInBatch++;
+          }
         } catch (error) {
           // Leave the balance payable for the next pass, including after restart.
           this.config.onError?.(error);
         }
+      }
+      if (distributedInBatch > 0) {
+        this.config.onSettle?.({ transaction: response.transaction ?? "" });
       }
     }
     return distributed;
@@ -475,8 +546,7 @@ export class BatchChannelManager {
   private async readSettlement(
     channelId: string,
   ): Promise<{ settled: bigint; payoutWatermark: bigint } | undefined> {
-    const rpc =
-      this.config.rpc ?? createRpcClient(this.config.requirements.network, this.config.rpcUrl);
+    const rpc = createRpcClient(this.config.requirements.network, this.config.rpcUrl);
     const account = await rpc
       .getAccountInfo(address(channelId), { commitment: "confirmed", encoding: "base64" })
       .send();

@@ -36,10 +36,12 @@ const BLOCKHASH = USDC_MAINNET_ADDRESS;
 
 let payer: Awaited<ReturnType<typeof generateKeyPairSigner>>;
 let feePayer: Awaited<ReturnType<typeof generateKeyPairSigner>>;
+let receiverAuthorizer: Awaited<ReturnType<typeof generateKeyPairSigner>>;
 
 beforeAll(async () => {
   payer = await generateKeyPairSigner();
   feePayer = await generateKeyPairSigner();
+  receiverAuthorizer = await generateKeyPairSigner();
 });
 
 beforeEach(() => {
@@ -60,6 +62,7 @@ function requirements(overrides: Partial<PaymentRequirements> = {}): PaymentRequ
     asset: MINT,
     extra: {
       feePayer: feePayer.address,
+      receiverAuthorizer: receiverAuthorizer.address,
       tokenProgram: TOKEN_PROGRAM_ADDRESS,
       withdrawDelay: 900,
     },
@@ -314,6 +317,7 @@ describe("batch client lifecycle", () => {
       payer: payer.address,
       payerAuthorizer: payer.address,
       receiver: RECEIVER,
+      receiverAuthorizer: receiverAuthorizer.address,
       salt: "0",
       token: MINT,
       withdrawDelay: 900,
@@ -354,6 +358,7 @@ describe("batch client lifecycle", () => {
       payer: payer.address,
       payerAuthorizer: payer.address,
       receiver: RECEIVER,
+      receiverAuthorizer: receiverAuthorizer.address,
       salt: "0",
       token: MINT,
       withdrawDelay: 900,
@@ -376,6 +381,7 @@ describe("batch client lifecycle", () => {
       payer: payer.address,
       payerAuthorizer: payer.address,
       receiver: RECEIVER,
+      receiverAuthorizer: receiverAuthorizer.address,
       salt: "0",
       token: MINT,
       withdrawDelay: 900,
@@ -464,6 +470,7 @@ describe("batch client lifecycle", () => {
       payer: payer.address,
       payerAuthorizer: payer.address,
       receiver: RECEIVER,
+      receiverAuthorizer: receiverAuthorizer.address,
       salt: "0",
       token: MINT,
       withdrawDelay: 900,
@@ -486,6 +493,7 @@ describe("batch client lifecycle", () => {
       payer: payer.address,
       payerAuthorizer: payer.address,
       receiver: RECEIVER,
+      receiverAuthorizer: receiverAuthorizer.address,
       salt: "0",
       token: MINT,
       withdrawDelay: 900,
@@ -508,6 +516,7 @@ describe("batch client lifecycle", () => {
       payer: payer.address,
       payerAuthorizer: payer.address,
       receiver: RECEIVER,
+      receiverAuthorizer: receiverAuthorizer.address,
       salt: "0",
       token: MINT,
       withdrawDelay: 900,
@@ -572,6 +581,7 @@ describe("batch client lifecycle", () => {
       payer: payer.address,
       payerAuthorizer: payer.address,
       receiver: RECEIVER,
+      receiverAuthorizer: receiverAuthorizer.address,
       salt: "0",
       token: MINT,
       withdrawDelay: 900,
@@ -700,6 +710,7 @@ describe("batch client lifecycle", () => {
       payer: payer.address,
       payerAuthorizer: payer.address,
       receiver: RECEIVER,
+      receiverAuthorizer: receiverAuthorizer.address,
       salt: "0",
       token: MINT,
       withdrawDelay: 900,
@@ -709,12 +720,72 @@ describe("batch client lifecycle", () => {
       deposit: 5_000n,
       tracker: new BatchChannelTracker(RECEIVER, config, payer, 1_000n),
     });
-    await expect(client.createRefundPayload(2, requirements())).resolves.toMatchObject({
+    const cooperative = await client.createRefundPayload(2, requirements());
+    expect(cooperative).toMatchObject({
       x402Version: 2,
-      payload: { type: "refund" },
+      payload: { type: "refund", voucher: { channelId: RECEIVER, maxClaimableAmount: "1000" } },
     });
+    expect(cooperative.payload).not.toHaveProperty("transaction");
+    const fallback = await client.createRefundPayload(2, requirements(), {
+      withTransaction: true,
+    });
+    expect(fallback.payload).toMatchObject({
+      transaction: expect.any(String),
+      voucher: { maxClaimableAmount: "1000" },
+    });
+
+    api.channels.set(key, {
+      deposit: 5_000n,
+      tracker: new BatchChannelTracker(
+        RECEIVER,
+        { ...config, payerAuthorizer: payer.address, voucherSigner: "server" },
+        payer,
+        1_000n,
+      ),
+    });
+    const serverRefund = await client.createRefundPayload(2, requirements());
+    expect(serverRefund.payload).toMatchObject({
+      authorization: { authorizedAmount: "0", channelId: RECEIVER },
+      type: "refund",
+    });
+    expect(serverRefund.payload).not.toHaveProperty("voucher");
     await expect(
       new BatchSvmScheme(payer, { discoverChannels: false }).createRefundPayload(2, requirements()),
     ).rejects.toThrow(/no batch-settlement channel/);
+  });
+
+  it("refunds a client-signed channel when the probe lists server-signed first", async () => {
+    const operator = await generateKeyPairSigner();
+    const client = new BatchSvmScheme(payer, { discoverChannels: false });
+    const api = internals(client);
+    const config: BatchChannelConfig = {
+      openSlot: 123,
+      payer: payer.address,
+      payerAuthorizer: payer.address,
+      receiver: RECEIVER,
+      receiverAuthorizer: receiverAuthorizer.address,
+      salt: "0",
+      token: MINT,
+      voucherSigner: "client",
+      withdrawDelay: 900,
+    };
+    const clientRequirements = requirements();
+    const key = api.channelKey(clientRequirements, feePayer.address, 900);
+    api.channels.set(key, {
+      deposit: 5_000n,
+      tracker: new BatchChannelTracker(RECEIVER, config, payer, 1_000n),
+    });
+    const serverFirstProbe = requirements({
+      extra: {
+        ...clientRequirements.extra,
+        operator: operator.address,
+        voucherSigner: "server",
+      },
+    });
+    const cooperative = await client.createRefundPayload(2, serverFirstProbe);
+    expect(cooperative).toMatchObject({
+      x402Version: 2,
+      payload: { type: "refund", voucher: { channelId: RECEIVER, maxClaimableAmount: "1000" } },
+    });
   });
 });

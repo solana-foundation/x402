@@ -48,7 +48,7 @@ export function pendingSignatureOf(error: unknown): string | undefined {
  * @param chargedCumulativeAmount - Server watermark to include, when known
  * @returns The corrective snapshot carried in responses and 402s
  */
-export function snapshotChannel(
+function snapshotChannel(
   channelId: string,
   channel: Channel,
   chargedCumulativeAmount?: bigint,
@@ -350,6 +350,7 @@ export function settlementPending(
 export function classifyError(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
   if (message.includes(CHANNEL_BUSY)) return CHANNEL_BUSY;
+  if (/\b429\b/.test(message) || /\b503\b/.test(message)) return BatchError.CHANNEL_STATE;
   const known = Object.values(BatchError).find(value => message.includes(value));
   return known ?? "transaction_failed";
 }

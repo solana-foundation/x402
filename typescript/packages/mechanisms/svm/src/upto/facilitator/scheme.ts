@@ -13,12 +13,32 @@ import {
   type PendingSettlementStore,
 } from "@x402/core/facilitator";
 
+import { SLOT_COMMITMENT } from "../../payment-channels/commitments";
 import {
   buildDistributeInstruction,
   buildSettleAndSealInstructions,
   type ServerInstruction,
 } from "../../payment-channels/onchain";
 import { parseU64, verifyOpenTransaction } from "../../payment-channels/open";
+import { resolveTokenProgram, resolveUptoSvmMemo } from "../../payment-channels/requirements";
+import {
+  accountFetchRpc,
+  assertPaymentChannelFacilitatorSigner,
+  type PaymentChannelFacilitatorSigner,
+} from "../../payment-channels/signer";
+import {
+  broadcastOpen,
+  channelExists,
+  ChannelBroadcastConfirmationError,
+  ChannelSimulationError,
+  fetchAndVerifyOpenChannel,
+  SettlementConfirmationTimeoutError,
+  simulateOpenSettleDistribute,
+  submitChannelTransactionWithSigner,
+  type ChannelReadPolicy,
+  type ChannelRpc,
+  type PaymentChannelSvmSigner,
+} from "../../payment-channels/facilitator";
 import {
   encodeVoucherMessageBytes,
   signVoucher,
@@ -35,32 +55,13 @@ import {
   validateSvmAddress,
 } from "../../utils";
 import { ErrSettlementPending } from "../../exact/facilitator/errors";
-import {
-  resolveTokenProgram,
-  resolveUptoSvmMemo,
-  resolveUptoSvmPaymentChannelConfig,
-  SLOT_COMMITMENT,
-  type UptoSvmPaymentChannelConfig,
-} from "../shared";
-import {
-  broadcastOpen,
-  channelExists,
-  ChannelOpenConfirmationError,
-  fetchAndVerifyOpenChannel,
-  SettlementConfirmationTimeoutError,
-  SettlementSimulationError,
-  simulateOpenSettleDistribute,
-  submitSettle,
-  type ChannelReadPolicy,
-  type UptoSvmSigner,
-} from "./channel";
+import { resolveUptoSvmPaymentChannelConfig, type UptoSvmPaymentChannelConfig } from "../shared";
 import {
   InMemoryUptoChannelStorage,
   type UptoChannelRecord,
   type UptoChannelStorage,
 } from "./channelStorage";
 import { InMemoryUptoDelegatedAuthStore, type UptoDelegatedAuthStore } from "./delegatedAuthStore";
-import { assertUptoFacilitatorSigner, type UptoFacilitatorSigner } from "./signer";
 import { UptoSvmRentCleanupManager } from "./rentCleanupManager";
 
 /** Scheme-specific error returned when the settlement amount exceeds the ceiling. */
@@ -261,7 +262,7 @@ type OpenAuthFailure = {
 type OpenAuthContext = {
   p: UptoSvmPayloadV2;
   channelConfig: UptoSvmPaymentChannelConfig;
-  feePayerSigner: UptoSvmSigner;
+  feePayerSigner: PaymentChannelSvmSigner;
   maxAmount: bigint;
   tokenProgram: string;
 };
@@ -296,7 +297,7 @@ export class UptoSvmScheme implements SchemeNetworkFacilitator {
   private readonly authorizerSigner: MessagePartialSigner | undefined;
   private readonly resolveCallerIdentity: UptoSvmFacilitatorConfig["resolveCallerIdentity"];
   private readonly delegatedAuthStore: UptoDelegatedAuthStore;
-  private readonly signer: UptoFacilitatorSigner;
+  private readonly signer: PaymentChannelFacilitatorSigner;
 
   private readonly getKitSigner: (feePayer: Address) => FacilitatorSigningCapabilities;
 
@@ -317,7 +318,7 @@ export class UptoSvmScheme implements SchemeNetworkFacilitator {
     assertLimit("maxRequiredSignatures", config.maxRequiredSignatures, 1);
     assertLimit("computeUnitPriceMicroLamports", config.computeUnitPriceMicroLamports, 0);
     assertLimit("settleComputeUnitLimit", config.settleComputeUnitLimit, 1);
-    assertUptoFacilitatorSigner(signer);
+    assertPaymentChannelFacilitatorSigner(signer, "UptoSvmScheme");
     this.signer = signer;
     this.getKitSigner = signer.getSigner.bind(signer);
     if (this.signer.getAddresses().length === 0) {
@@ -357,9 +358,9 @@ export class UptoSvmScheme implements SchemeNetworkFacilitator {
     network: Network,
     options?: { signer?: FacilitatorSvmSigner },
   ): UptoSvmRentCleanupManager {
-    let cleanupSigner: UptoFacilitatorSigner = this.signer;
+    let cleanupSigner: PaymentChannelFacilitatorSigner = this.signer;
     if (options?.signer) {
-      assertUptoFacilitatorSigner(options.signer, "UptoSvmRentCleanupManager");
+      assertPaymentChannelFacilitatorSigner(options.signer, "UptoSvmRentCleanupManager");
       cleanupSigner = options.signer;
     }
     return new UptoSvmRentCleanupManager({
@@ -678,7 +679,8 @@ export class UptoSvmScheme implements SchemeNetworkFacilitator {
     // One authorization → one deposit open. A confirmed channel is replay or a
     // stranded prior open, not a supported re-bind path; handler failure after
     // a successful deposit uses the zero-amount cancel/refund settle instead.
-    if (await channelExists(this.signer, network, p.channelId)) {
+    const channelRpc = accountFetchRpc(this.signer, network) as ChannelRpc;
+    if (await channelExists(channelRpc, p.channelId)) {
       return this.settleFailure(payload, ERR_CHANNEL_ALREADY_OPEN, p.from);
     }
 
@@ -771,7 +773,7 @@ export class UptoSvmScheme implements SchemeNetworkFacilitator {
       // lock in place (a fresh broadcast would double-open) and record the
       // signature so a retry reconciles via the fast path above instead of
       // re-validating.
-      if (error instanceof ChannelOpenConfirmationError) {
+      if (error instanceof ChannelBroadcastConfirmationError) {
         return recordPendingOrTerminal(
           this.pendingStore,
           depositKey,
@@ -796,8 +798,7 @@ export class UptoSvmScheme implements SchemeNetworkFacilitator {
 
     try {
       await fetchAndVerifyOpenChannel(
-        this.signer,
-        network,
+        channelRpc,
         p.channelId,
         {
           authorizedSigner: channelConfig.receiverAuthorizer,
@@ -971,8 +972,7 @@ export class UptoSvmScheme implements SchemeNetworkFacilitator {
     const network = requirements.network;
 
     const channelPromise = fetchAndVerifyOpenChannel(
-      this.signer,
-      network,
+      accountFetchRpc(this.signer, network) as ChannelRpc,
       p.channelId,
       {
         authorizedSigner: channelConfig.receiverAuthorizer,
@@ -1053,11 +1053,17 @@ export class UptoSvmScheme implements SchemeNetworkFacilitator {
       });
 
       const instructions: ServerInstruction[] = [...settle, distribute];
-      const signature = await submitSettle(feePayerSigner, this.signer, network, instructions, {
-        computeUnitLimit: this.config.settleComputeUnitLimit,
-        computeUnitPriceMicroLamports: this.config.computeUnitPriceMicroLamports,
-        latestBlockhash: prefetchedBlockhash,
-      });
+      const signature = await submitChannelTransactionWithSigner(
+        feePayerSigner,
+        this.signer,
+        network,
+        instructions,
+        {
+          computeUnitLimit: this.config.settleComputeUnitLimit,
+          computeUnitPriceMicroLamports: this.config.computeUnitPriceMicroLamports,
+          latestBlockhash: prefetchedBlockhash,
+        },
+      );
 
       // Settlement is confirmed onchain past this point; storage is cleanup
       // bookkeeping and must never turn a charged payment into a failure.
@@ -1088,7 +1094,7 @@ export class UptoSvmScheme implements SchemeNetworkFacilitator {
         payer: channel.payer,
       };
     } catch (error) {
-      if (error instanceof SettlementSimulationError) {
+      if (error instanceof ChannelSimulationError) {
         this.settlementCache.delete(settlementKey);
         return {
           success: false,
@@ -1560,7 +1566,7 @@ export class UptoSvmScheme implements SchemeNetworkFacilitator {
    * @param feePayerAddress - Fee-payer address from the challenge
    * @returns The matching kit signer, or undefined when not managed
    */
-  private resolveFeePayer(feePayerAddress: string): UptoSvmSigner | undefined {
+  private resolveFeePayer(feePayerAddress: string): PaymentChannelSvmSigner | undefined {
     if (!this.signer.getAddresses().includes(feePayerAddress as Address)) {
       return undefined;
     }

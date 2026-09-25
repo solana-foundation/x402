@@ -109,24 +109,27 @@ async function registerFamilySchemes(
       const receiverAuthorizerSigner = receiverAuthorizerPrivateKey
         ? await createKeyPairSignerFromBytes(base58.decode(receiverAuthorizerPrivateKey))
         : undefined;
-      if (receiverAuthorizerSigner) {
-        console.info(`SVM receiver authorizer: ${receiverAuthorizerSigner.address}`);
-        server.register(
-          pattern,
-          new UptoSvmScheme({
-            receiverAuthorizerSigner,
-            rpcUrl: process.env.SVM_RPC_URL,
-          }),
-        );
+      if (!receiverAuthorizerSigner) return;
+      console.info(`SVM receiver authorizer: ${receiverAuthorizerSigner.address}`);
+      server.register(
+        pattern,
+        new UptoSvmScheme({
+          receiverAuthorizerSigner,
+          rpcUrl: process.env.SVM_RPC_URL,
+        }),
+      );
+      const operatorPrivateKey = process.env.SERVER_SVM_OPERATOR_PRIVATE_KEY;
+      const operatorSigner = operatorPrivateKey
+        ? await createKeyPairSignerFromBytes(base58.decode(operatorPrivateKey))
+        : undefined;
+      if (operatorSigner) {
+        console.info(`SVM batch-settlement operator: ${operatorSigner.address}`);
       }
-      // Batch-settlement needs no server key: vouchers are client-signed and
-      // the receiver authorizer only adds the optional immediate close.
       server.register(
         pattern,
         new BatchSettlementSvmScheme({
-          ...(receiverAuthorizerSigner
-            ? { receiverAuthorizer: receiverAuthorizerSigner.address }
-            : {}),
+          receiverAuthorizer: receiverAuthorizerSigner,
+          ...(operatorSigner ? { operator: operatorSigner } : {}),
         }),
       );
       return;

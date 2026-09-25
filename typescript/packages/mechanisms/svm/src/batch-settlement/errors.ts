@@ -8,6 +8,8 @@ export const BatchError = {
   CHANNEL_ID_MISMATCH: `${PREFIX}channel_id_mismatch`,
   FEE_PAYER_MISMATCH: `${PREFIX}fee_payer_mismatch`,
   RECEIVER_AUTHORIZER_MISMATCH: `${PREFIX}receiver_authorizer_mismatch`,
+  RECEIVER_BINDING_UNAVAILABLE: `${PREFIX}receiver_binding_unavailable`,
+  DELEGATED_UNAUTHENTICATED: `${PREFIX}delegated_unauthenticated`,
   CLOSE_AUTHORIZATION: `${PREFIX}close_authorization`,
   CLOSE_AMOUNT_UNSUPPORTED: `${PREFIX}close_amount_unsupported`,
   CLOSE_STATE: `${PREFIX}close_state`,

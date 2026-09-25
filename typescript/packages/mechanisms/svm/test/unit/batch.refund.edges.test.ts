@@ -25,7 +25,27 @@ function requirements(scheme = "batch-settlement"): PaymentRequirements {
   };
 }
 
-const build = async (x402Version: number) => ({ payload: { type: "refund" }, x402Version });
+const refundPayload = {
+  channelConfig: {
+    openSlot: 1,
+    payer: USDC_DEVNET_ADDRESS,
+    payerAuthorizer: USDC_DEVNET_ADDRESS,
+    receiver: USDC_MAINNET_ADDRESS,
+    receiverAuthorizer: USDC_MAINNET_ADDRESS,
+    salt: "0",
+    token: USDC_DEVNET_ADDRESS,
+    withdrawDelay: 900,
+  },
+  type: "refund" as const,
+  voucher: {
+    channelId: USDC_MAINNET_ADDRESS,
+    expiresAt: 0,
+    maxClaimableAmount: "0",
+    signature: "sig",
+  },
+};
+
+const build = async (x402Version: number) => ({ payload: refundPayload, x402Version });
 
 /** A fetch that answers every call with the same response. */
 function respond(status: number, headers: Record<string, string> = {}): typeof fetch {
@@ -43,6 +63,29 @@ describe("batch-settlement refund driver edge cases", () => {
     await expect(probeBatchRequirements("https://example.test/paid", respond(402))).rejects.toThrow(
       /no PAYMENT-REQUIRED header/,
     );
+  });
+
+  it("selects the Solana accept when an EVM batch-settlement accept is listed first", async () => {
+    const evm = {
+      ...requirements(),
+      extra: {},
+      network: "eip155:84532",
+    };
+    const header = encodePaymentRequiredHeader({
+      accepts: [evm, requirements()],
+      x402Version: 2,
+    });
+    await expect(
+      probeBatchRequirements(
+        "https://example.test/paid",
+        respond(402, { "PAYMENT-REQUIRED": header }),
+      ),
+    ).resolves.toMatchObject({
+      requirements: {
+        extra: { feePayer: USDC_MAINNET_ADDRESS },
+        network: SOLANA_DEVNET_CAIP2,
+      },
+    });
   });
 
   it("rejects a route that advertises no batch-settlement accept", async () => {

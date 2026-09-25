@@ -60,10 +60,6 @@ const maxPrice = "$0.01";
  * Initializes facilitator capability checks and starts the batch-settlement server.
  */
 async function main() {
-  const svmReceiverAuthorizerSigner = svmReceiverAuthorizerPrivateKey
-    ? await createKeyPairSignerFromBytes(base58.decode(svmReceiverAuthorizerPrivateKey))
-    : undefined;
-
   let resourceServer = new x402ResourceServer(facilitatorClient);
   let channelManager: ReturnType<BatchSettlementEvmScheme["createChannelManager"]> | undefined;
   let svmChannelManager: BatchChannelManager | undefined;
@@ -104,12 +100,23 @@ async function main() {
     ? await createKeyPairSignerFromBytes(base58.decode(svmOperatorPrivateKey))
     : undefined;
 
+  let svmReceiverAuthorizerSigner:
+    | Awaited<ReturnType<typeof createKeyPairSignerFromBytes>>
+    | undefined;
+
   if (svmAddress) {
+    if (!svmReceiverAuthorizerPrivateKey) {
+      console.error("Missing required SVM_RECEIVER_AUTHORIZER_PRIVATE_KEY environment variable");
+      process.exit(1);
+    }
+    svmReceiverAuthorizerSigner = await createKeyPairSignerFromBytes(
+      base58.decode(svmReceiverAuthorizerPrivateKey),
+    );
     const batchedSvmScheme = new BatchSvmScheme({
       withdrawDelay,
-      // Advertised as extra.receiverAuthorizer and used by the redemption
-      // worker to seal a channel the payer is closing with the latest voucher.
-      ...(svmReceiverAuthorizerSigner ? { closeAuthorizer: svmReceiverAuthorizerSigner } : {}),
+      // Advertised as extra.receiverAuthorizer; signs cooperative refunds and
+      // seals of channels the payer is closing.
+      receiverAuthorizer: svmReceiverAuthorizerSigner,
       ...(svmOperatorSigner ? { operator: svmOperatorSigner } : {}),
       store: new MemoryChannelStore(),
     });
@@ -143,12 +150,21 @@ async function main() {
       svmChannelManager = batchedSvmScheme.createChannelManager(
         facilitatorClient,
         svmRequirements,
-        { onError: (e: unknown) => console.error("[SVM] Redemption error:", e) },
+        {
+          onClaim: (r: { vouchers: number; transaction: string }) =>
+            console.log(`[SVM] Claimed ${r.vouchers} vouchers (tx: ${r.transaction})`),
+          onSettle: (r: { transaction: string }) =>
+            console.log(`[SVM] Settled to ${svmAddress} (tx: ${r.transaction})`),
+          onSeal: (r: { channel: string; transaction: string }) =>
+            console.log(`[SVM] Sealed channel ${r.channel} (tx: ${r.transaction})`),
+          onError: (e: unknown) => console.error("[SVM] Settlement error:", e),
+        },
       );
+      const svmRedemptionIntervalSecs = 60;
       // Well inside the facilitator's idle window (default seven days).
-      svmChannelManager.start(60);
+      svmChannelManager.start(svmRedemptionIntervalSecs);
       console.log(
-        `[SVM] Redeeming every 60s; facilitator idle window: ${String(svmKind.extra?.maxIdleSecs ?? "none")}s`,
+        `[SVM] Redeeming every ${svmRedemptionIntervalSecs}s; facilitator idle window: ${String(svmKind.extra?.maxIdleSecs ?? "none")}s`,
       );
     } else {
       console.warn(
@@ -161,7 +177,7 @@ async function main() {
     process.on("SIGINT", async () => {
       console.log("Shutting down — flushing pending claims…");
       await channelManager?.stop({ flush: true });
-      svmChannelManager?.stop();
+      await svmChannelManager?.stop({ flush: true });
       process.exit(0);
     });
   }
@@ -250,8 +266,14 @@ async function main() {
         console.log("  EVM receiver authorizer: facilitator");
       }
     }
-    if (svmAddress && svmReceiverAuthorizerSigner) {
-      console.log(`  SVM receiver authorizer: ${svmReceiverAuthorizerSigner.address}`);
+    if (svmAddress) {
+      if (svmReceiverAuthorizerSigner) {
+        console.log(
+          `  SVM receiver authorizer: local signer ${svmReceiverAuthorizerSigner.address}`,
+        );
+      } else {
+        console.log("  SVM receiver authorizer: facilitator");
+      }
     }
     if (svmAddress) {
       console.log(

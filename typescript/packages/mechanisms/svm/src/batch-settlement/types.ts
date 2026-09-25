@@ -1,13 +1,15 @@
 /* eslint-disable jsdoc/require-jsdoc */
 /** Wire types for the SVM `batch-settlement` scheme. */
 
-export const BATCH_SETTLEMENT_SCHEME = "batch-settlement";
+import { BatchError } from "./errors";
+
+export { BATCH_SETTLEMENT_SCHEME } from "./constants";
 
 export type BatchExtra = {
   paymentFlow?: "authorization" | undefined;
   minDeposit?: string | undefined;
   feePayer: string;
-  receiverAuthorizer?: string | undefined;
+  receiverAuthorizer: string;
   withdrawDelay: number;
   tokenProgram: string;
   memo?: string | undefined;
@@ -59,7 +61,7 @@ export type BatchChannelConfig = {
   payer: string;
   payerAuthorizer: string;
   receiver: string;
-  receiverAuthorizer?: string | undefined;
+  receiverAuthorizer: string;
   token: string;
   withdrawDelay: number;
   salt: string;
@@ -102,11 +104,43 @@ export type BatchAuthorizationPayload = {
   authorization: BatchAuthorization;
 };
 
+/** Client-signed voucher or server-mode payer authorization. */
+export type BatchProof =
+  | { signer: "client"; voucher: BatchVoucher }
+  | { signer: "server"; authorization: BatchAuthorization };
+
+export function proofOf(
+  payload: BatchDepositPayload | BatchVoucherPayload | BatchAuthorizationPayload,
+): BatchProof {
+  switch (payload.type) {
+    case "voucher":
+      return { signer: "client", voucher: payload.voucher };
+    case "authorization":
+      return { signer: "server", authorization: payload.authorization };
+    case "deposit":
+      if (payload.voucher !== undefined) return { signer: "client", voucher: payload.voucher };
+      if (payload.authorization !== undefined) {
+        return { signer: "server", authorization: payload.authorization };
+      }
+      throw new Error(BatchError.VOUCHER_SIGNATURE);
+    default: {
+      const unexpected: never = payload;
+      throw new Error(String(unexpected));
+    }
+  }
+}
+
+/**
+ * Client mode: payer-signed `voucher` at the accepted cumulative. Server mode:
+ * payer `authorization` with `authorizedAmount` `"0"`; the server injects the
+ * operator voucher and `closeAuthorization` before settle.
+ */
 export type BatchRefundPayload = {
   type: "refund";
   channelConfig: BatchChannelConfig;
-  transaction: string;
   voucher?: BatchVoucher | undefined;
+  authorization?: BatchAuthorization | undefined;
+  transaction?: string | undefined;
   closeAuthorization?: CloseAuthorization | undefined;
 };
 
@@ -149,8 +183,8 @@ export type BatchSealPayload = {
   /** Latest accepted voucher; its cumulative becomes the final settled watermark. */
   voucher: BatchVoucher;
   /**
-   * Receiver-authorizer signature binding this exact close. Required unless
-   * the facilitator authenticates the server out of band.
+   * Required when the channel's receiver authorizer is a server key. Omitted
+   * when the facilitator is that authorizer and authenticates the caller.
    */
   closeAuthorization?: CloseAuthorization | undefined;
 };
@@ -185,7 +219,7 @@ export function isBatchChannelConfig(value: unknown): value is BatchChannelConfi
     typeof value.payer === "string" &&
     typeof value.payerAuthorizer === "string" &&
     typeof value.receiver === "string" &&
-    (value.receiverAuthorizer === undefined || typeof value.receiverAuthorizer === "string") &&
+    typeof value.receiverAuthorizer === "string" &&
     typeof value.token === "string" &&
     typeof value.withdrawDelay === "number" &&
     typeof value.salt === "string" &&
@@ -225,12 +259,29 @@ export function isBatchPayload(value: unknown): value is BatchPayload {
         value.requestId === undefined &&
         value.maxClaimableAmount === undefined
       );
-    case "refund":
-      return (
-        typeof value.transaction === "string" &&
-        (value.voucher === undefined || isBatchVoucher(value.voucher)) &&
-        (value.closeAuthorization === undefined || isCloseAuthorization(value.closeAuthorization))
-      );
+    case "refund": {
+      const txOk = value.transaction === undefined || typeof value.transaction === "string";
+      const closeOk =
+        value.closeAuthorization === undefined || isCloseAuthorization(value.closeAuthorization);
+      const signer = value.channelConfig.voucherSigner ?? "client";
+      if (signer === "server") {
+        const authOk =
+          value.authorization === undefined ||
+          (isBatchAuthorization(value.authorization) &&
+            value.authorization.authorizedAmount === "0");
+        if (isBatchVoucher(value.voucher)) {
+          return authOk && txOk && closeOk;
+        }
+        return (
+          value.voucher === undefined &&
+          isBatchAuthorization(value.authorization) &&
+          value.authorization.authorizedAmount === "0" &&
+          txOk &&
+          closeOk
+        );
+      }
+      return isBatchVoucher(value.voucher) && value.authorization === undefined && txOk && closeOk;
+    }
     default:
       return false;
   }

@@ -12,6 +12,8 @@ import { buildRequestCloseTransaction } from "../../payment-channels/close";
 import { buildOpenPaymentChannelTransaction } from "../../payment-channels/open";
 import { encodeVoucherMessageBytes } from "../../payment-channels/voucher";
 import { signBatchAuthorization } from "../authorization";
+import { CLIENT_VOUCHER_EXPIRES_AT, FULL_SPLIT_BPS } from "../constants";
+import { encodeReceiverBindingMemo } from "../receiverBinding";
 import type {
   BatchAuthorization,
   BatchChannelConfig,
@@ -71,7 +73,7 @@ export class BatchChannelTracker {
     }
     return signBatchVoucher(this.signer, {
       channelId: this.channelId,
-      expiresAt: 0,
+      expiresAt: CLIENT_VOUCHER_EXPIRES_AT,
       maxClaimableAmount: this.chargedCumulativeAmount + charge,
     });
   }
@@ -119,12 +121,74 @@ export class BatchChannelTracker {
     this.commit(this.chargedCumulativeAmount + charge);
     return voucher;
   }
+
+  /**
+   * Client-mode refund voucher at the confirmed cumulative allocation.
+   *
+   * @returns A voucher signed for the charged cumulative amount
+   */
+  async refundVoucher(): Promise<BatchVoucher> {
+    if (this.channelConfig.voucherSigner === "server") {
+      throw new Error("server-signed channels refund with payer authorization");
+    }
+    return signBatchVoucher(this.signer, {
+      channelId: this.channelId,
+      expiresAt: CLIENT_VOUCHER_EXPIRES_AT,
+      maxClaimableAmount: this.chargedCumulativeAmount,
+    });
+  }
+}
+
+// Client voucher, or the payer authorization a server-signed charge needs.
+export async function credentialFor(
+  mode: "client",
+  tracker: BatchChannelTracker,
+  charge: bigint,
+  authorization?: undefined,
+  refund?: boolean,
+): Promise<{ voucher: BatchVoucher }>;
+export async function credentialFor(
+  mode: "server",
+  tracker: BatchChannelTracker,
+  charge: bigint,
+  authorization: { requestId: string; expiresAt: number },
+  refund?: boolean,
+): Promise<{ authorization: BatchAuthorization }>;
+export async function credentialFor(
+  mode: "client" | "server",
+  tracker: BatchChannelTracker,
+  charge: bigint,
+  authorization?: { requestId: string; expiresAt: number },
+  refund = false,
+): Promise<{ voucher: BatchVoucher } | { authorization: BatchAuthorization }> {
+  switch (mode) {
+    case "client":
+      return {
+        voucher: refund ? await tracker.refundVoucher() : await tracker.previewVoucher(charge),
+      };
+    case "server": {
+      if (!authorization) {
+        throw new Error("authorizationExpiresAt is required for operator voucher signing");
+      }
+      return {
+        authorization: await tracker.authorization(
+          authorization.requestId,
+          charge,
+          authorization.expiresAt,
+        ),
+      };
+    }
+    default: {
+      const unexpected: never = mode;
+      throw new Error(String(unexpected));
+    }
+  }
 }
 
 export interface BuildDepositArgs {
   payer: BatchClientSigner;
   receiver: string;
-  receiverAuthorizer?: string | undefined;
+  receiverAuthorizer: string;
   mint: string;
   feePayer: string;
   tokenProgram: string;
@@ -157,14 +221,21 @@ export async function buildDepositPayload(args: BuildDepositArgs): Promise<Built
   const voucherSigner = args.voucherSigner ?? "client";
   const authorizedSigner = voucherSigner === "server" ? args.operator : args.payer.address;
   if (!authorizedSigner) throw new Error("operator is required for operator voucher signing");
-  if (
-    voucherSigner === "server" &&
-    (!Number.isSafeInteger(args.authorizationExpiresAt) || args.authorizationExpiresAt! <= 0)
-  ) {
-    throw new Error("authorizationExpiresAt is required for operator voucher signing");
+  const authorizationExpiresAt = args.authorizationExpiresAt;
+  let pendingAuthorization: { requestId: string; expiresAt: number } | undefined;
+  if (voucherSigner === "server") {
+    if (
+      authorizationExpiresAt === undefined ||
+      !Number.isSafeInteger(authorizationExpiresAt) ||
+      authorizationExpiresAt <= 0
+    ) {
+      throw new Error("authorizationExpiresAt is required for operator voucher signing");
+    }
+    pendingAuthorization = { requestId: crypto.randomUUID(), expiresAt: authorizationExpiresAt };
   }
   const open = await buildOpenPaymentChannelTransaction({
     authorizedSigner,
+    bindingMemo: encodeReceiverBindingMemo(args.receiverAuthorizer),
     blockhash: args.blockhash,
     deposit: args.depositAmount,
     feePayer: args.feePayer,
@@ -174,7 +245,7 @@ export async function buildDepositPayload(args: BuildDepositArgs): Promise<Built
     openSlot: args.openSlot,
     payee: args.feePayer,
     payer: args.payer,
-    recipients: [{ bps: 10_000, recipient: args.receiver }],
+    recipients: [{ bps: FULL_SPLIT_BPS, recipient: args.receiver }],
     ...(args.salt !== undefined ? { salt: args.salt } : {}),
     tokenProgram: args.tokenProgram,
   });
@@ -183,7 +254,7 @@ export async function buildDepositPayload(args: BuildDepositArgs): Promise<Built
     payer: args.payer.address,
     payerAuthorizer: authorizedSigner,
     receiver: args.receiver,
-    ...(args.receiverAuthorizer ? { receiverAuthorizer: args.receiverAuthorizer } : {}),
+    receiverAuthorizer: args.receiverAuthorizer,
     salt: open.salt.toString(),
     token: args.mint,
     withdrawDelay: args.withdrawDelay,
@@ -192,17 +263,9 @@ export async function buildDepositPayload(args: BuildDepositArgs): Promise<Built
   const tracker = new BatchChannelTracker(open.channelId, channelConfig, args.payer);
   // A payment payload is only an authorization.  Do not advance local state
   // until the resource server confirms it in PAYMENT-RESPONSE.
-  const requestId = crypto.randomUUID();
-  const credential =
-    voucherSigner === "server"
-      ? {
-          authorization: await tracker.authorization(
-            requestId,
-            args.firstCharge,
-            args.authorizationExpiresAt!,
-          ),
-        }
-      : { voucher: await tracker.previewVoucher(args.firstCharge) };
+  const credential = pendingAuthorization
+    ? await credentialFor("server", tracker, args.firstCharge, pendingAuthorization)
+    : await credentialFor("client", tracker, args.firstCharge);
   return {
     channelId: open.channelId,
     payload: {
@@ -215,14 +278,25 @@ export async function buildDepositPayload(args: BuildDepositArgs): Promise<Built
   };
 }
 
+// `blockhash` adds a payer-signed request_close for a facilitator that cannot
+// close cooperatively.
 export async function buildRefundPayload(args: {
   payer: BatchClientSigner;
   feePayer: string;
   channelId: string;
   channelConfig: BatchChannelConfig;
-  blockhash: { blockhash: string; lastValidBlockHeight: bigint };
+  voucher?: BatchVoucher | undefined;
+  authorization?: BatchAuthorization | undefined;
+  blockhash?: { blockhash: string; lastValidBlockHeight: bigint } | undefined;
   memo?: string | undefined;
 }): Promise<BatchRefundPayload> {
+  const serverMode = args.channelConfig.voucherSigner === "server";
+  const credential = serverMode
+    ? { authorization: serverRefundAuthorization(args) }
+    : { voucher: clientRefundVoucher(args) };
+  if (args.blockhash === undefined) {
+    return { channelConfig: args.channelConfig, type: "refund", ...credential };
+  }
   return {
     channelConfig: args.channelConfig,
     transaction: await buildRequestCloseTransaction({
@@ -233,5 +307,26 @@ export async function buildRefundPayload(args: {
       payer: args.payer,
     }),
     type: "refund",
+    ...credential,
   };
+}
+
+function serverRefundAuthorization(args: {
+  authorization?: BatchAuthorization | undefined;
+  voucher?: BatchVoucher | undefined;
+}): BatchAuthorization {
+  if (!args.authorization || args.voucher !== undefined) {
+    throw new Error("server-signed refund requires payer authorization only");
+  }
+  return args.authorization;
+}
+
+function clientRefundVoucher(args: {
+  authorization?: BatchAuthorization | undefined;
+  voucher?: BatchVoucher | undefined;
+}): BatchVoucher {
+  if (!args.voucher || args.authorization !== undefined) {
+    throw new Error("client-signed refund requires a voucher");
+  }
+  return args.voucher;
 }

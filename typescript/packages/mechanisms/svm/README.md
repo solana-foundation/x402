@@ -57,7 +57,7 @@ Usage-based payments: authorize a ceiling, settle actual usage. See [Upto SVM Sc
 
 ### Batch Settlement (`@x402/svm/batch-settlement/*`)
 
-Long-lived channels support cumulative client vouchers or concurrent server-signed metering with receipts. Server-signed channels hand the operator the client's onchain voucher authority, so the client only enters them for operator keys listed in `serverSignedChannelsPolicy.allowedOperators`, with the escrow capped by `maxDeposit` (a USD amount for default assets, default `$1`) or per-asset atomic caps in `allowedAssets`, the same shape as the core spend controls. An untrusted server-signed accept is refused and the scheme falls back to the same route's client-signed accept through its creation-failure hook, on any transport; `scheme.paymentPolicy` can be registered on the `x402Client` to prefer trusted metered accepts. Servers should offer the same route client-signed as well. See the [SVM batch-settlement specification](../../../../specs/schemes/batch-settlement/scheme_batch_settlement_svm.md).
+Long-lived payment channels with cumulative vouchers (client-signed) or operator-metered server-signed mode. See [Batch-Settlement SVM Scheme](./src/batch-settlement/README.md).
 
 | Role | Import |
 |------|--------|
@@ -73,7 +73,7 @@ The facilitator records signed bytes and their signature before submission, then
 
 Distribution `amount` is the receiver's actual token credit in the identified transaction, including on recovery. Deduplicate accounting by network, transaction, asset and recipient rather than summing HTTP responses. The optional facilitator `onDistributionConfirmed` callback runs before recovery completion and may run more than once; it must be idempotent. Recording failures leave the original signature pending.
 
-After distribution, `BatchChannelManager` reads the confirmed channel payout watermark before marking local claims paid. An older recovered payout cannot mark newer earnings paid. Use `rpcUrl` or `readPayoutWatermark` to configure that read; stale or unavailable results leave work for a later pass. Keep redemption outside the metered-request handler when payout latency should not delay responses.
+After distribution, `BatchChannelManager` reads the confirmed channel payout watermark before marking local claims paid. An older recovered payout cannot mark newer earnings paid. Pass `rpcUrl` to `createChannelManager` for that read; `readPayoutWatermark` can replace it. Stale or unavailable results leave work for a later pass. Keep redemption outside the metered-request handler when payout latency should not delay responses.
 
 `InMemoryBatchPendingSettlementStore` is the default single-process reference store and does not survive restarts. Persistent stores must retain unresolved records and implement `setIfAbsent` and `deleteIfEquals` atomically across processes. Shared deployments must also serialize overlapping distribution batches; these primitives do not provide a distributed scheduler. Stores without atomic methods provide only local serialization. Completed-result retention is an operator policy; unresolved records must not silently expire.
 

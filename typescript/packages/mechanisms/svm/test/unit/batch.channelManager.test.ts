@@ -1,13 +1,15 @@
+import { generateKeyPairSigner } from "@solana/kit";
 import type { PaymentRequirements, SettleResponse } from "@x402/core/types";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { BatchChannelManager } from "../../src/batch-settlement/server/channelManager";
-import { MemoryChannelStore, type ChannelState } from "../../src/batch-settlement/server/storage";
+import { MemoryChannelStore } from "../../src/batch-settlement/server/storage";
+import type { ChannelState } from "../../src/batch-settlement/server/types";
 import { SOLANA_DEVNET_CAIP2, TOKEN_PROGRAM_ADDRESS } from "../../src/constants";
 import { USDC_DEVNET_ADDRESS, USDC_MAINNET_ADDRESS } from "../../src/defaultAssets";
 
 const RECEIVER = USDC_MAINNET_ADDRESS;
-
+const receiverAuthorizer = await generateKeyPairSigner();
 function requirements(): PaymentRequirements {
   return {
     amount: "1000",
@@ -105,7 +107,12 @@ describe("batch-settlement redemption worker", () => {
     const store = new MemoryChannelStore();
     await store.put(channel("chan-a", { settled: 3000n, payoutWatermark: 1000n }));
     const { settle } = recorder();
-    const options = { requirements: requirements(), settle, store };
+    const options = {
+      receiverAuthorizer,
+      requirements: requirements(),
+      settle,
+      store,
+    };
     const result = await new BatchChannelManager({
       ...options,
       readPayoutWatermark: async () => 1000n,
@@ -131,6 +138,7 @@ describe("batch-settlement redemption worker", () => {
       },
     ]) {
       await new BatchChannelManager({
+        receiverAuthorizer,
         requirements: requirements(),
         settle,
         store,
@@ -150,6 +158,7 @@ describe("batch-settlement redemption worker", () => {
 
     const manager = new BatchChannelManager({
       readPayoutWatermark: async () => 3000n,
+      receiverAuthorizer,
       requirements: requirements(),
       settle,
       store,
@@ -176,6 +185,7 @@ describe("batch-settlement redemption worker", () => {
     const { settle, submitted } = recorder();
     const manager = new BatchChannelManager({
       readPayoutWatermark: async () => 3000n,
+      receiverAuthorizer,
       requirements: requirements(),
       settle,
       store,
@@ -208,6 +218,7 @@ describe("batch-settlement redemption worker", () => {
     const manager = new BatchChannelManager({
       readPayoutWatermark: async () => 3000n,
       onError: error => errors.push(error),
+      receiverAuthorizer,
       requirements: requirements(),
       settle,
       store,
@@ -235,6 +246,7 @@ describe("batch-settlement redemption worker", () => {
     );
     await new BatchChannelManager({
       readPayoutWatermark: async () => 3000n,
+      receiverAuthorizer,
       requirements: requirements(),
       settle: pending.settle,
       store,
@@ -244,6 +256,7 @@ describe("batch-settlement redemption worker", () => {
     const retry = recorder();
     const result = await new BatchChannelManager({
       readPayoutWatermark: async () => 3000n,
+      receiverAuthorizer,
       requirements: requirements(),
       settle: retry.settle,
       store,
@@ -261,6 +274,7 @@ describe("batch-settlement redemption worker", () => {
     const result = await new BatchChannelManager({
       readPayoutWatermark: async () => 3000n,
       onError: error => errors.push(error),
+      receiverAuthorizer,
       requirements: requirements(),
       settle,
       store,
@@ -271,17 +285,103 @@ describe("batch-settlement redemption worker", () => {
     expect(errors).toHaveLength(1);
   });
 
-  it("skips channels that are closing", async () => {
+  it("stop with flush runs one final redeem pass", async () => {
     const store = new MemoryChannelStore();
-    await store.put(channel("chan-a", { status: "closing" }));
+    await store.put(channel("chan-a"));
     const { settle, submitted } = recorder();
     const manager = new BatchChannelManager({
       readPayoutWatermark: async () => 3000n,
+      receiverAuthorizer,
       requirements: requirements(),
       settle,
       store,
     });
-    expect(await manager.redeem()).toEqual({ claimed: [], distributed: [], sealed: [] });
-    expect(submitted).toEqual([]);
+    manager.start(3600);
+    await manager.stop({ flush: true });
+    expect(submitted.map(entry => entry.type)).toEqual(["claim", "settle"]);
+  });
+
+  it("uses empty transaction in lifecycle callbacks when the facilitator omits it", async () => {
+    const onClaim = vi.fn();
+    const onSettle = vi.fn();
+    const onSeal = vi.fn();
+    const noTx = (payload: RedemptionPayload): SettleResponse => {
+      const { transaction: _tx, ...rest } = recovered(payload);
+      void _tx;
+      return rest;
+    };
+    const store = new MemoryChannelStore();
+    await store.put(channel("chan-a"));
+    await new BatchChannelManager({
+      onClaim,
+      onSettle,
+      readPayoutWatermark: async () => 3000n,
+      receiverAuthorizer,
+      requirements: requirements(),
+      settle: recorder(noTx).settle,
+      store,
+    }).redeem();
+    expect(onClaim).toHaveBeenCalledWith({ transaction: "", vouchers: 1 });
+    expect(onSettle).toHaveBeenCalledWith({ transaction: "" });
+
+    const id = (await generateKeyPairSigner()).address;
+    await store.put(channel(id, { status: "closing" }));
+    await new BatchChannelManager({
+      onSeal,
+      readPayoutWatermark: async () => 3000n,
+      receiverAuthorizer,
+      requirements: requirements(),
+      settle: recorder(noTx).settle,
+      store,
+    }).redeem();
+    expect(onSeal).toHaveBeenCalledWith({ channel: id, transaction: "" });
+  });
+
+  it("fires onClaim, onSettle, and onSeal with facilitator transaction signatures", async () => {
+    const onClaim = vi.fn();
+    const onSettle = vi.fn();
+    const onSeal = vi.fn();
+    const store = new MemoryChannelStore();
+    await store.put(channel("chan-a"));
+    await new BatchChannelManager({
+      onClaim,
+      onSettle,
+      readPayoutWatermark: async () => 3000n,
+      receiverAuthorizer,
+      requirements: requirements(),
+      settle: recorder().settle,
+      store,
+    }).redeem();
+    expect(onClaim).toHaveBeenCalledWith({ transaction: "sig", vouchers: 1 });
+    expect(onSettle).toHaveBeenCalledWith({ transaction: "sig" });
+
+    const id = (await generateKeyPairSigner()).address;
+    await store.put(channel(id, { status: "closing" }));
+    await new BatchChannelManager({
+      onSeal,
+      readPayoutWatermark: async () => 3000n,
+      receiverAuthorizer,
+      requirements: requirements(),
+      settle: recorder().settle,
+      store,
+    }).redeem();
+    expect(onSeal).toHaveBeenCalledWith({ channel: id, transaction: "sig" });
+  });
+
+  it("seals a closing channel instead of claiming it", async () => {
+    const store = new MemoryChannelStore();
+    const id = (await generateKeyPairSigner()).address;
+    await store.put(channel(id, { status: "closing" }));
+    const { settle, submitted } = recorder();
+    const manager = new BatchChannelManager({
+      readPayoutWatermark: async () => 3000n,
+      receiverAuthorizer,
+      requirements: requirements(),
+      settle,
+      store,
+    });
+    expect(await manager.redeem()).toEqual({ claimed: [], distributed: [], sealed: [id] });
+    expect(submitted.map(s => s.type)).toEqual(["seal"]);
+    expect((await store.get(id))?.status).toBe("distributed");
   });
 });

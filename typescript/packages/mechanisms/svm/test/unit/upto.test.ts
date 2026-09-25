@@ -50,26 +50,23 @@ import {
   parseU64,
   verifyOpenTransaction,
 } from "../../src/payment-channels/open";
+import { SLOT_COMMITMENT } from "../../src/payment-channels/commitments";
+import { parseTokenProgramHint, resolveUptoSvmMemo } from "../../src/payment-channels/requirements";
 import { encodeVoucherMessageBytes, VOUCHER_MAGIC } from "../../src/payment-channels/voucher";
 import { UptoSvmScheme as UptoClientScheme } from "../../src/upto/client/scheme";
-import {
-  parseTokenProgramHint,
-  resolveUptoSvmMemo,
-  resolveUptoSvmPaymentChannelConfig,
-  SLOT_COMMITMENT,
-} from "../../src/upto/shared";
+import { resolveUptoSvmPaymentChannelConfig } from "../../src/upto/shared";
 import { UptoSvmScheme as UptoServerScheme } from "../../src/upto/server/scheme";
 import {
   DEFAULT_SETTLE_COMPUTE_UNIT_LIMIT,
   getChannelDistributionHash,
   reclaimComputeUnitLimit,
   broadcastOpen,
-  ChannelOpenConfirmationError,
+  ChannelBroadcastConfirmationError as ChannelOpenConfirmationError,
   simulateOpenSettleDistribute,
   SettlementConfirmationTimeoutError,
-  submitSettle,
+  submitChannelTransactionWithSigner as submitSettle,
   verifyOpenChannelAccount,
-} from "../../src/upto/facilitator/channel";
+} from "../../src/payment-channels/facilitator";
 import {
   ERR_SETTLEMENT_EXCEEDS_AMOUNT,
   UptoSvmScheme as UptoFacilitatorScheme,
