@@ -31,7 +31,7 @@
     "eslint-plugin-jsdoc": "^50.6.9",
     "eslint-plugin-prettier": "^5.2.6",
     "eslint-plugin-sonarjs": "^3.0.7",
-    "fastify": "^5.0.0",
+    "fastify": "^5.12.5",
     "prettier": "3.5.2",
     "tsup": "^8.4.0",
     "tsx": "^4.21.0",
@@ -46,7 +46,7 @@
   },
   "peerDependencies": {
     "@x402/paywall": "workspace:^",
-    "fastify": "^5.0.0"
+    "fastify": "^5.12.5"
   },
   "peerDependenciesMeta": {
     "@x402/paywall": {
