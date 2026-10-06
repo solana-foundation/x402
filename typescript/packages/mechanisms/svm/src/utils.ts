@@ -29,6 +29,7 @@ import type { PendingSettlementStore } from "@x402/core/facilitator";
 import type { Network, PaymentRequirements, SettleResponse } from "@x402/core/types";
 import {
   ACCEPTED_TRANSACTION_VERSIONS,
+  CLIENT_SUPPORTED_TRANSACTION_VERSIONS,
   SVM_ADDRESS_REGEX,
   DEVNET_RPC_URL,
   TESTNET_RPC_URL,
@@ -106,27 +107,43 @@ export function isAcceptedTransactionVersion(version: number | string): boolean 
 /**
  * Pick the transaction message version a client builds from the versions the
  * facilitator advertised in `extra.transactionVersions`. This client only
- * builds version 0: when the field is absent, version 0 is assumed; when it is
- * present it must be an array that lists `0`.
+ * builds version 0 today. Negotiation selects the highest version shared by
+ * the facilitator advertisement and this client's supported-version set.
  *
  * @param extra - The `extra` field of the payment requirements
- * @returns The transaction message version to build (always `0`)
- * @throws Error prefixed with `unsupported_transaction_version` when the advertised set excludes version 0
+ * @returns The highest mutually supported transaction message version
+ * @throws Error prefixed with `unsupported_transaction_version` when the sets do not intersect
  */
 export function resolveTransactionVersion(extra: Record<string, unknown> | undefined): 0 {
-  const advertised = extra?.transactionVersions;
-  if (advertised === undefined) {
-    return 0;
-  }
+  const advertised = extra && "transactionVersions" in extra ? extra.transactionVersions : [0];
   if (!Array.isArray(advertised)) {
     throw new Error(`${ErrUnsupportedTransactionVersion}: transactionVersions must be an array`);
   }
-  if (advertised.includes(0)) {
-    return 0;
+  const selected = selectHighestMutuallySupportedTransactionVersion(
+    advertised,
+    CLIENT_SUPPORTED_TRANSACTION_VERSIONS,
+  );
+  if (selected !== undefined) {
+    return selected as 0;
   }
   throw new Error(
     `${ErrUnsupportedTransactionVersion}: facilitator accepts none of the transaction versions this client can build (advertised ${JSON.stringify(advertised)})`,
   );
+}
+
+/**
+ * Select the maximum numeric version present in both version sets.
+ *
+ * @param advertised - Versions accepted by the facilitator
+ * @param supported - Versions the client can construct
+ * @returns Highest mutual version, or undefined when the sets do not intersect
+ */
+export function selectHighestMutuallySupportedTransactionVersion(
+  advertised: readonly unknown[],
+  supported: readonly number[],
+): number | undefined {
+  const mutual = supported.filter(version => advertised.includes(version));
+  return mutual.length > 0 ? Math.max(...mutual) : undefined;
 }
 
 /**

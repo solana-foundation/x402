@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	x402 "github.com/x402-foundation/x402/go/v2"
 	"github.com/x402-foundation/x402/go/v2/mechanisms/svm"
 	"github.com/x402-foundation/x402/go/v2/types"
 )
@@ -46,7 +47,7 @@ func TestCreatePaymentPayloadHonorsAdvertisedTransactionVersions(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			client := NewExactSvmScheme(&mockClientSigner{keypair: solana.NewWallet().PrivateKey}, &svm.ClientConfig{RPCURL: server.URL})
-			payload, err := client.CreatePaymentPayload(context.Background(), newRequirements(test.versions))
+			payload, err := client.CreatePaymentPayload(context.Background(), newRequirements(test.versions), x402.PaymentPayloadContext{})
 			require.NoError(t, err)
 			decoded, err := svm.DecodeTransaction(payload.Payload["transaction"].(string))
 			require.NoError(t, err)
@@ -56,7 +57,7 @@ func TestCreatePaymentPayloadHonorsAdvertisedTransactionVersions(t *testing.T) {
 
 	t.Run("a facilitator that accepts no buildable version is refused before signing", func(t *testing.T) {
 		client := NewExactSvmScheme(&mockClientSigner{keypair: solana.NewWallet().PrivateKey}, &svm.ClientConfig{RPCURL: server.URL})
-		_, err := client.CreatePaymentPayload(context.Background(), newRequirements([]interface{}{float64(1)}))
+		_, err := client.CreatePaymentPayload(context.Background(), newRequirements([]interface{}{float64(1)}), x402.PaymentPayloadContext{})
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), svm.ErrUnsupportedTransactionVersion)
 	})

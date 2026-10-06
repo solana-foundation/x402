@@ -235,7 +235,7 @@ describe("ExactSvmScheme", () => {
       expect(result.extra.transactionVersions).toEqual([0]);
     });
 
-    it("omits transactionVersions when the facilitator does not advertise a list", async () => {
+    it("forwards malformed transactionVersions so the client fails closed", async () => {
       const result = await server.enhancePaymentRequirements(
         {
           scheme: "exact",
@@ -254,7 +254,7 @@ describe("ExactSvmScheme", () => {
         },
         [],
       );
-      expect(result.extra).not.toHaveProperty("transactionVersions");
+      expect(result.extra.transactionVersions).toBe("0");
     });
   });
 

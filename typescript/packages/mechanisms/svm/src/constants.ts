@@ -53,6 +53,9 @@ export const ACCEPTED_TRANSACTION_VERSIONS: readonly (number | string)[] = ["leg
  */
 export const ADVERTISED_TRANSACTION_VERSIONS: readonly number[] = [0];
 
+/** Transaction versions this client implementation can construct. */
+export const CLIENT_SUPPORTED_TRANSACTION_VERSIONS: readonly number[] = [0];
+
 /**
  * How long a transaction is held in the duplicate settlement cache (ms).
  * Covers the Solana blockhash lifetime (~60-90s) with margin.

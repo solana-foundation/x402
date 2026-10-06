@@ -145,6 +145,7 @@ func TestResolveTransactionVersion(t *testing.T) {
 		{name: "JSON-decoded [0] selects v0", extra: map[string]interface{}{ExtraTransactionVersions: []interface{}{float64(0)}}},
 		{name: "JSON-decoded [\"legacy\",0] selects v0", extra: map[string]interface{}{ExtraTransactionVersions: []interface{}{"legacy", float64(0)}}},
 		{name: "JSON-decoded [1,0] selects v0", extra: map[string]interface{}{ExtraTransactionVersions: []interface{}{float64(1), float64(0)}}},
+		{name: "highest mutually supported version wins", extra: map[string]interface{}{ExtraTransactionVersions: []interface{}{float64(2), float64(1), float64(0)}}},
 		{name: "in-process []int{0} selects v0", extra: map[string]interface{}{ExtraTransactionVersions: []int{0}}},
 		{name: "in-process []interface{}{0} selects v0", extra: map[string]interface{}{ExtraTransactionVersions: []interface{}{0}}},
 		{name: "advertised value selects v0", extra: map[string]interface{}{ExtraTransactionVersions: AdvertisedTransactionVersions}},
@@ -165,6 +166,18 @@ func TestResolveTransactionVersion(t *testing.T) {
 			assert.Equal(t, solana.MessageVersionV0, version)
 		})
 	}
+}
+
+func TestResolveTransactionVersionSelectsHighestMutualVersion(t *testing.T) {
+	original := ClientSupportedTransactionVersions
+	ClientSupportedTransactionVersions = []int{0, 1}
+	defer func() { ClientSupportedTransactionVersions = original }()
+
+	version, err := ResolveTransactionVersion(map[string]interface{}{
+		ExtraTransactionVersions: []interface{}{float64(0), float64(2), float64(1)},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, solana.MessageVersion(2), version)
 }
 
 // solana-go 1.14 reads any first message byte >= 0x7f as a versioned prefix and
