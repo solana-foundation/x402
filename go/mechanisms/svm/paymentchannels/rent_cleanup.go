@@ -25,13 +25,12 @@ const (
 	// no facilitator-visible activity is abandon-closed. Seven days.
 	DefaultMaxIdleSecs int64 = 7 * 24 * 60 * 60
 
-	// DefaultMaxReclaimsPerTx is the v1 instruction ceiling. Actual batches are
-	// also bounded by encoded size and static account count.
-	DefaultMaxReclaimsPerTx = solana.MaxInstructionsV1
+	// DefaultMaxReclaimsPerTx preserves the established cleanup batch size.
+	DefaultMaxReclaimsPerTx = 8
 
 	// MaxSafeReclaimsPerTx is the largest reclaim batch that serializes under
 	// Solana's packet data size. MaxReclaimsPerTx is clamped to this.
-	MaxSafeReclaimsPerTx = solana.MaxInstructionsV1
+	MaxSafeReclaimsPerTx = 16
 
 	// DefaultMaxTxsPerRun caps the close/distribute transactions the storage
 	// scan submits per run.
@@ -179,14 +178,15 @@ func (c RentCleanupStartConfig) discoveryOptions() RentDiscoveryOptions {
 
 // PaymentChannelRentCleanupConfig configures a rent cleanup manager for one network.
 type PaymentChannelRentCleanupConfig struct {
-	Signer                        svm.FacilitatorSvmSigner
-	Storage                       PaymentChannelStorage
-	Network                       string
-	ComputeUnitPriceMicroLamports *uint64
-	SettleComputeUnitLimit        *uint32
+	Signer                            svm.FacilitatorSvmSigner
+	Storage                           PaymentChannelStorage
+	Network                           string
+	ComputeUnitPriceMicroLamports     *uint64
+	SettleComputeUnitLimit            *uint32
 	SettleLoadedAccountsDataSizeLimit *uint32
-	MaxIdleSecs                   *int64
-	AbandonPolicy                 OpenAbandonPolicy
+	UseTransactionV1                  bool
+	MaxIdleSecs                       *int64
+	AbandonPolicy                     OpenAbandonPolicy
 	// SealClosingChannels nil defaults to true. upto sets it false.
 	SealClosingChannels *bool
 	Label               string
@@ -195,16 +195,17 @@ type PaymentChannelRentCleanupConfig struct {
 // PaymentChannelRentCleanupManager recovers rent a facilitator fronts for
 // payment channels on one network.
 type PaymentChannelRentCleanupManager struct {
-	signer                        PaymentChannelFacilitatorSigner
-	storage                       PaymentChannelStorage
-	network                       string
-	computeUnitPriceMicroLamports *uint64
-	settleComputeUnitLimit        *uint32
+	signer                            PaymentChannelFacilitatorSigner
+	storage                           PaymentChannelStorage
+	network                           string
+	computeUnitPriceMicroLamports     *uint64
+	settleComputeUnitLimit            *uint32
 	settleLoadedAccountsDataSizeLimit *uint32
-	maxIdleSecs                   *int64
-	abandonPolicy                 OpenAbandonPolicy
-	sealClosingChannels           bool
-	label                         string
+	useTransactionV1                  bool
+	maxIdleSecs                       *int64
+	abandonPolicy                     OpenAbandonPolicy
+	sealClosingChannels               bool
+	label                             string
 
 	mu     sync.Mutex
 	cancel context.CancelFunc
@@ -238,16 +239,17 @@ func NewPaymentChannelRentCleanupManager(config PaymentChannelRentCleanupConfig)
 		seal = *config.SealClosingChannels
 	}
 	return &PaymentChannelRentCleanupManager{
-		signer:                        AssertPaymentChannelFacilitatorSigner(config.Signer, label),
-		storage:                       config.Storage,
-		network:                       config.Network,
-		computeUnitPriceMicroLamports: config.ComputeUnitPriceMicroLamports,
-		settleComputeUnitLimit:        config.SettleComputeUnitLimit,
+		signer:                            AssertPaymentChannelFacilitatorSigner(config.Signer, label),
+		storage:                           config.Storage,
+		network:                           config.Network,
+		computeUnitPriceMicroLamports:     config.ComputeUnitPriceMicroLamports,
+		settleComputeUnitLimit:            config.SettleComputeUnitLimit,
 		settleLoadedAccountsDataSizeLimit: config.SettleLoadedAccountsDataSizeLimit,
-		maxIdleSecs:                   config.MaxIdleSecs,
-		abandonPolicy:                 policy,
-		sealClosingChannels:           seal,
-		label:                         label,
+		useTransactionV1:                  config.UseTransactionV1,
+		maxIdleSecs:                       config.MaxIdleSecs,
+		abandonPolicy:                     policy,
+		sealClosingChannels:               seal,
+		label:                             label,
 	}
 }
 
@@ -615,6 +617,7 @@ func (m *PaymentChannelRentCleanupManager) submitCloseOrDistribute(
 		ComputeUnitLimit:              m.settleComputeUnitLimit,
 		LoadedAccountsDataSizeLimit:   m.settleLoadedAccountsDataSizeLimit,
 		ComputeUnitPriceMicroLamports: m.computeUnitPriceMicroLamports,
+		UseTransactionV1:              m.useTransactionV1,
 	})
 }
 
@@ -690,6 +693,7 @@ func (m *PaymentChannelRentCleanupManager) submitReclaimGroup(
 				ComputeUnitLimit:              &reclaimLimit,
 				LoadedAccountsDataSizeLimit:   &loadedLimit,
 				ComputeUnitPriceMicroLamports: m.computeUnitPriceMicroLamports,
+				UseTransactionV1:              true,
 			}) {
 				break
 			}
@@ -716,6 +720,7 @@ func (m *PaymentChannelRentCleanupManager) submitReclaimGroup(
 			ComputeUnitLimit:              &reclaimLimit,
 			LoadedAccountsDataSizeLimit:   &loadedLimit,
 			ComputeUnitPriceMicroLamports: m.computeUnitPriceMicroLamports,
+			UseTransactionV1:              m.useTransactionV1,
 		})
 		if err != nil {
 			for _, channelID := range channelIDs {

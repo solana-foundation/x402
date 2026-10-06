@@ -9,6 +9,7 @@ import (
 
 	solana "github.com/gagliardetto/solana-go"
 
+	"github.com/x402-foundation/x402/go/v2/mechanisms/svm"
 	"github.com/x402-foundation/x402/go/v2/mechanisms/svm/paymentchannels"
 	"github.com/x402-foundation/x402/go/v2/types"
 )

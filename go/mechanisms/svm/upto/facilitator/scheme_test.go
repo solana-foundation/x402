@@ -780,7 +780,7 @@ func TestClaimSettleUsesTheConfiguredComputeBudget(t *testing.T) {
 	assert.Equal(t, settleLimit, limit)
 	assert.Equal(t, uint64(1), gotPrice)
 	require.NotNil(t, sent[0].Message.TransactionConfig.LoadedAccountsDataSizeLimit)
-	assert.Equal(t, DefaultSettleLoadedAccountsDataSizeLimit, *sent[0].Message.TransactionConfig.LoadedAccountsDataSizeLimit)
+	assert.Equal(t, paymentchannels.DefaultSettleLoadedAccountsDataSizeLimit, *sent[0].Message.TransactionConfig.LoadedAccountsDataSizeLimit)
 }
 
 func TestClaimSettleUsesTheConfiguredLoadedAccountsDataBudget(t *testing.T) {

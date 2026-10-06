@@ -930,6 +930,7 @@ func (f *UptoSvmScheme) submitClaim(
 		ComputeUnitLimit:              f.config.SettleComputeUnitLimit,
 		LoadedAccountsDataSizeLimit:   f.config.SettleLoadedAccountsDataSizeLimit,
 		ComputeUnitPriceMicroLamports: f.config.ComputeUnitPriceMicroLamports,
+		UseTransactionV1:              true,
 	}
 	if prefetchedBlockhash != nil {
 		opts.LatestBlockhash = prefetchedBlockhash
