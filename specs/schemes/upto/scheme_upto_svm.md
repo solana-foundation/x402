@@ -418,9 +418,10 @@ keep accepting legacy messages from existing clients for backward
 compatibility; that tolerance will be removed in a future revision of this
 scheme.
 
-- The client MUST build one of the advertised versions (`0` when the field
-  is absent) and SHOULD build version `0` whenever it is accepted.
-  It MAY build version `1` when `1` is advertised and its signer supports it.
+- The client MUST intersect the advertised versions (`[0]` when the field is
+  absent) with the versions it and its signer support, then build the highest
+  version in that intersection. It MUST fail with
+  `unsupported_transaction_version` when the intersection is empty.
   The client MUST NOT use Address Lookup Tables.
 - The facilitator MUST reject a message whose version is outside the set it
   accepts, before inspecting any instruction, with

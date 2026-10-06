@@ -206,9 +206,10 @@ keep accepting legacy messages from existing clients for backward
 compatibility; that tolerance will be removed in a future revision of this
 scheme.
 
-- The client MUST build one of the advertised versions (`0` when the field
-  is absent) and SHOULD build version `0` whenever it is accepted.
-  It MAY build version `1` when `1` is advertised and its signer supports it.
+- The client MUST intersect the advertised versions (`[0]` when the field is
+  absent) with the versions it and its signer support, then build the highest
+  version in that intersection. It MUST fail with
+  `unsupported_transaction_version` when the intersection is empty.
   A version-1 message MUST NOT use Address Lookup Tables because that message
   format does not support them. Legacy and version-0 messages remain subject
   to the ALT visibility requirements in §2.1.2.
