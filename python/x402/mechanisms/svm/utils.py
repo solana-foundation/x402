@@ -19,6 +19,7 @@ except ImportError as e:
 from ...schemas.helpers import convert_to_token_amount
 from .constants import (
     ACCEPTED_TRANSACTION_VERSIONS,
+    CLIENT_SUPPORTED_TRANSACTION_VERSIONS,
     ERR_UNSUPPORTED_TRANSACTION_VERSION,
     NETWORK_CONFIGS,
     SOLANA_DEVNET_CAIP2,
@@ -266,8 +267,9 @@ def resolve_transaction_version(extra: dict | None) -> int:
     """Pick the transaction message version a client should build.
 
     Reads ``extra.transactionVersions`` (copied by the server from the
-    facilitator's ``/supported`` extra). This client builds version ``0`` only;
-    legacy is deprecated and never built.
+    facilitator's ``/supported`` extra). It selects the highest version shared
+    with this client's supported-version set. This client currently builds
+    version ``0`` only; legacy is deprecated and never built.
 
     Args:
         extra: ``PaymentRequirements.extra`` (may be None).
@@ -278,15 +280,23 @@ def resolve_transaction_version(extra: dict | None) -> int:
     Raises:
         ValueError: If the advertised set does not include version 0.
     """
-    if extra is None or "transactionVersions" not in extra:
-        return 0
-    advertised = extra["transactionVersions"]
+    advertised = (
+        [0] if extra is None or "transactionVersions" not in extra else extra["transactionVersions"]
+    )
     if not isinstance(advertised, list):
         raise ValueError(
             f"{ERR_UNSUPPORTED_TRANSACTION_VERSION}: transactionVersions must be a list"
         )
-    if any(isinstance(v, int) and not isinstance(v, bool) and v == 0 for v in advertised):
-        return 0
+    mutually_supported = [
+        version
+        for version in CLIENT_SUPPORTED_TRANSACTION_VERSIONS
+        if any(
+            isinstance(offered, int) and not isinstance(offered, bool) and offered == version
+            for offered in advertised
+        )
+    ]
+    if mutually_supported:
+        return max(mutually_supported)
     raise ValueError(
         f"{ERR_UNSUPPORTED_TRANSACTION_VERSION}: facilitator accepts {advertised!r}, "
         "but this client only builds transaction version 0"

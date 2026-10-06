@@ -43,6 +43,7 @@ import {
   decodeTransactionFromPayload,
   isAcceptedTransactionVersion,
   resolveTransactionVersion,
+  selectHighestMutuallySupportedTransactionVersion,
   transactionMessageHash,
 } from "../../src/utils";
 import { buildExactPaymentTransaction } from "./helpers/signedTransaction";
@@ -159,6 +160,10 @@ describe("resolveTransactionVersion", () => {
     expect(resolveTransactionVersion({ transactionVersions: [1, 0] })).toBe(0);
   });
 
+  it("selects the highest mutually supported version", () => {
+    expect(selectHighestMutuallySupportedTransactionVersion([0, 2, 1], [0, 1])).toBe(1);
+  });
+
   it("never falls back to legacy and throws when version 0 is not advertised", () => {
     expect(() => resolveTransactionVersion({ transactionVersions: ["legacy"] })).toThrow(
       /^unsupported_transaction_version/,
@@ -207,7 +212,7 @@ describe("exact client honours extra.transactionVersions", () => {
     const client = new ExactSvmClientScheme(payer);
     const { payload } = await client.createPaymentPayload(
       2,
-      requirements({ transactionVersions: [0, 1] }),
+      requirements({ transactionVersions: [2, 1, 0] }),
     );
     expect(wireVersion((payload as { transaction: string }).transaction)).toBe(0);
   });

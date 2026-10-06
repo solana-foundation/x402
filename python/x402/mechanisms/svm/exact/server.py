@@ -153,9 +153,11 @@ class ExactSvmScheme:
 
         # Copy the transaction message versions the facilitator advertises so
         # the client builds one of them (absent means version 0).
-        versions = extra.get("transactionVersions")
-        if isinstance(versions, list):
-            requirements.extra["transactionVersions"] = list(versions)
+        if "transactionVersions" in extra:
+            versions = extra["transactionVersions"]
+            requirements.extra["transactionVersions"] = (
+                list(versions) if isinstance(versions, list) else versions
+            )
 
         if self._rpc_client:
             try:

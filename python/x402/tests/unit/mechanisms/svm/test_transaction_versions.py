@@ -134,9 +134,16 @@ class TestResolveTransactionVersion:
         with pytest.raises(ValueError, match=f"^{ERR_UNSUPPORTED_TRANSACTION_VERSION}"):
             resolve_transaction_version({"transactionVersions": advertised})
 
-    @pytest.mark.parametrize("advertised", [[0], [0, 1], ["legacy", 0], [1, 0]])
+    @pytest.mark.parametrize("advertised", [[0], [0, 1], [2, 1, 0], ["legacy", 0], [1, 0]])
     def test_picks_v0_when_advertised(self, advertised):
         assert resolve_transaction_version({"transactionVersions": advertised}) == 0
+
+    def test_picks_highest_mutually_supported_version(self, monkeypatch):
+        monkeypatch.setattr(
+            "x402.mechanisms.svm.utils.CLIENT_SUPPORTED_TRANSACTION_VERSIONS",
+            [0, 1],
+        )
+        assert resolve_transaction_version({"transactionVersions": [0, 2, 1]}) == 1
 
     @pytest.mark.parametrize("advertised", [[1], ["legacy"], [], [False], ["0"]])
     def test_raises_when_v0_not_advertised(self, advertised):
@@ -205,7 +212,7 @@ class TestServerCopiesTransactionVersions:
         assert result.extra is not None
         assert "transactionVersions" not in result.extra
 
-    def test_ignores_malformed_value(self):
+    def test_forwards_malformed_value_for_fail_closed_client_handling(self):
         server = ExactSvmServerScheme()
         kind = SupportedKind(
             x402_version=2,
@@ -215,7 +222,7 @@ class TestServerCopiesTransactionVersions:
         )
         result = server.enhance_payment_requirements(self._requirements(), kind, [])
         assert result.extra is not None
-        assert "transactionVersions" not in result.extra
+        assert result.extra["transactionVersions"] == "0"
 
 
 class TestClientBuildsAdvertisedVersion:

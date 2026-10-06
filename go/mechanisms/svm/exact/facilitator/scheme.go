@@ -120,7 +120,7 @@ func (f *ExactSvmScheme) GetExtra(network x402.Network) map[string]interface{} {
 
 	extra := map[string]interface{}{
 		"feePayer":                   addresses[randomIndex].String(),
-		svm.ExtraTransactionVersions: svm.AdvertisedTransactionVersions,
+		svm.ExtraTransactionVersions: append([]int(nil), svm.AdvertisedTransactionVersions...),
 	}
 	if f.config.EnableSmartWalletVerification {
 		extra["features"] = map[string]interface{}{

@@ -61,7 +61,7 @@ func (f *ExactSvmSchemeV1) GetExtra(network x402.Network) map[string]interface{}
 
 	return map[string]interface{}{
 		"feePayer":                   addresses[randomIndex].String(),
-		svm.ExtraTransactionVersions: svm.AdvertisedTransactionVersions,
+		svm.ExtraTransactionVersions: append([]int(nil), svm.AdvertisedTransactionVersions...),
 	}
 }
 

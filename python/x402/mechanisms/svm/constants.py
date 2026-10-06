@@ -45,6 +45,9 @@ MAX_MEMO_BYTES = 256
 # ``PaymentRequirements.extra`` and clients build one of the advertised versions.
 # Legacy is deprecated and never advertised.
 ADVERTISED_TRANSACTION_VERSIONS: list[str | int] = [0]
+# Versions the current client implementation can construct. Negotiation picks
+# the highest value shared with the facilitator's advertised set.
+CLIENT_SUPPORTED_TRANSACTION_VERSIONS: list[int] = [0]
 # ACCEPTED_TRANSACTION_VERSIONS is what verifiers tolerate on the wire. Legacy
 # stays accepted for backward compatibility. Every verifier derives its fee
 # policy from version-specific structure (ComputeBudget instructions on
