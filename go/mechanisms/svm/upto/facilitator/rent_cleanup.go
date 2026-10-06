@@ -208,15 +208,16 @@ func NewRentCleanupManager(config RentCleanupConfig) *RentCleanupManager {
 	sealClosingChannels := false
 	return &RentCleanupManager{
 		inner: paymentchannels.NewPaymentChannelRentCleanupManager(paymentchannels.PaymentChannelRentCleanupConfig{
-			Signer:                        config.Signer,
-			Storage:                       config.Storage,
-			Network:                       config.Network,
-			ComputeUnitPriceMicroLamports: config.ComputeUnitPriceMicroLamports,
-			SettleComputeUnitLimit:        config.SettleComputeUnitLimit,
+			Signer:                            config.Signer,
+			Storage:                           config.Storage,
+			Network:                           config.Network,
+			ComputeUnitPriceMicroLamports:     config.ComputeUnitPriceMicroLamports,
+			SettleComputeUnitLimit:            config.SettleComputeUnitLimit,
 			SettleLoadedAccountsDataSizeLimit: config.SettleLoadedAccountsDataSizeLimit,
-			AbandonPolicy:                 paymentchannels.OpenAbandonPolicyExpiry,
-			SealClosingChannels:           &sealClosingChannels,
-			Label:                         "RentCleanupManager",
+			UseTransactionV1:                  true,
+			AbandonPolicy:                     paymentchannels.OpenAbandonPolicyExpiry,
+			SealClosingChannels:               &sealClosingChannels,
+			Label:                             "RentCleanupManager",
 		}),
 	}
 }

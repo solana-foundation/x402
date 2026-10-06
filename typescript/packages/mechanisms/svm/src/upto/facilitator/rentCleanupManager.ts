@@ -75,6 +75,7 @@ export class UptoSvmRentCleanupManager extends PaymentChannelRentCleanupManager 
       abandonPolicy: "expiry",
       label: "UptoSvmRentCleanupManager",
       sealClosingChannels: false,
+      useTransactionV1: true,
     };
     super(shared);
   }

@@ -1,12 +1,10 @@
-package facilitator
+package paymentchannels
 
 import (
 	"testing"
 
 	solana "github.com/gagliardetto/solana-go"
 	"github.com/stretchr/testify/require"
-
-	"github.com/x402-foundation/x402/go/v2/mechanisms/svm/paymentchannels"
 )
 
 // buildReclaimBatch returns the exact distinct-channel instruction set the
@@ -20,7 +18,7 @@ func buildReclaimBatch(t *testing.T, n int) (solana.PublicKey, []solana.Instruct
 		channel, err := solana.NewRandomPrivateKey()
 		require.NoError(t, err)
 		instructions = append(instructions,
-			paymentchannels.BuildReclaimInstruction(channel.PublicKey(), rentPayer.PublicKey()))
+			BuildReclaimInstruction(channel.PublicKey(), rentPayer.PublicKey()))
 	}
 	return rentPayer.PublicKey(), instructions
 }
@@ -32,11 +30,11 @@ func TestReclaimBatchUsesEveryAvailableV1Account(t *testing.T) {
 	feePayer, instructions := buildReclaimBatch(t, 62)
 	limit := ReclaimComputeUnitLimit(len(instructions))
 	loadedLimit := ReclaimLoadedAccountsDataSizeLimit(len(instructions))
-	opts := submitSettleOptions{
+	opts := SubmitSettleOptions{
 		ComputeUnitLimit:            &limit,
 		LoadedAccountsDataSizeLimit: &loadedLimit,
 	}
-	require.True(t, facilitatorV1TransactionFits(feePayer, instructions, opts))
+	require.True(t, FacilitatorV1TransactionFits(feePayer, instructions, opts))
 
 	tx, err := buildSettleTransaction(feePayer, solana.Hash{}, instructions, opts)
 	require.NoError(t, err)
@@ -52,7 +50,7 @@ func TestReclaimBatchRejectsTheFirstAccountOverTheV1Limit(t *testing.T) {
 	feePayer, instructions := buildReclaimBatch(t, 63)
 	limit := ReclaimComputeUnitLimit(len(instructions))
 	loadedLimit := ReclaimLoadedAccountsDataSizeLimit(len(instructions))
-	require.False(t, facilitatorV1TransactionFits(feePayer, instructions, submitSettleOptions{
+	require.False(t, FacilitatorV1TransactionFits(feePayer, instructions, SubmitSettleOptions{
 		ComputeUnitLimit:            &limit,
 		LoadedAccountsDataSizeLimit: &loadedLimit,
 	}))
@@ -66,18 +64,18 @@ func TestFacilitatorV1PackingChecksInstructionAndWireLimits(t *testing.T) {
 	for i := range instructions {
 		instructions[i] = tiny
 	}
-	require.True(t, facilitatorV1TransactionFits(payer, instructions, submitSettleOptions{}))
+	require.True(t, FacilitatorV1TransactionFits(payer, instructions, SubmitSettleOptions{}))
 	tooManyInstructions := make([]solana.Instruction, len(instructions)+1)
 	copy(tooManyInstructions, instructions)
 	tooManyInstructions[len(instructions)] = tiny
-	require.False(t, facilitatorV1TransactionFits(payer, tooManyInstructions, submitSettleOptions{}))
+	require.False(t, FacilitatorV1TransactionFits(payer, tooManyInstructions, SubmitSettleOptions{}))
 
 	tooLarge := solana.NewInstruction(solana.MemoProgramID, nil, make([]byte, 4_000))
-	require.False(t, facilitatorV1TransactionFits(payer, []solana.Instruction{tooLarge}, submitSettleOptions{}))
+	require.False(t, FacilitatorV1TransactionFits(payer, []solana.Instruction{tooLarge}, SubmitSettleOptions{}))
 }
 
-func TestCleanupOptionsClampsMaxReclaimsPerTxToV1InstructionLimit(t *testing.T) {
+func TestCleanupOptionsClampsMaxReclaimsPerTxToSafeLimit(t *testing.T) {
 	t.Parallel()
-	opts := CleanupOptions{MaxReclaimsPerTx: MaxSafeReclaimsPerTx + 100}.withDefaults()
-	require.Equal(t, solana.MaxInstructionsV1, opts.MaxReclaimsPerTx)
+	opts, _ := (RentCleanupOptions{MaxReclaimsPerTx: MaxSafeReclaimsPerTx + 100}).withDefaults(nil)
+	require.Equal(t, MaxSafeReclaimsPerTx, opts.MaxReclaimsPerTx)
 }

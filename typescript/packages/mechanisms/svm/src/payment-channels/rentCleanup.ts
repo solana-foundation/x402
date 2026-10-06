@@ -31,7 +31,6 @@ import {
   reclaimComputeUnitLimit,
   reclaimLoadedAccountsDataSizeLimit,
   submitChannelTransactionWithSigner,
-  V1_MAX_INSTRUCTIONS,
 } from "./facilitator";
 import { fetchMaybeChannel, type Channel } from "./generated/accounts/channel";
 import {
@@ -242,7 +241,7 @@ export function assertMaxIdleSecs(value: number | undefined): number {
 }
 
 /** Default reclaim instruction ceiling; wire-size packing may choose fewer. */
-export const DEFAULT_MAX_RECLAIMS_PER_TX = V1_MAX_INSTRUCTIONS;
+export const DEFAULT_MAX_RECLAIMS_PER_TX = 8;
 
 /**
  * Largest reclaim batch proven, by the Go SDK's
@@ -252,7 +251,7 @@ export const DEFAULT_MAX_RECLAIMS_PER_TX = V1_MAX_INSTRUCTIONS;
  * operator value can never build a reclaim transaction that fails to
  * serialize or gets rejected on broadcast.
  */
-export const MAX_SAFE_RECLAIMS_PER_TX = V1_MAX_INSTRUCTIONS;
+export const MAX_SAFE_RECLAIMS_PER_TX = 16;
 
 /** Default close/distribute transactions the storage scan may submit per call. */
 export const DEFAULT_MAX_TXS_PER_RUN = 20;
@@ -371,6 +370,8 @@ export interface PaymentChannelRentCleanupManagerConfig {
    * derive their own budget per channel.
    */
   settleLoadedAccountsDataSizeLimit?: number;
+  /** Use transaction v1 for facilitator-owned cleanup submissions. */
+  useTransactionV1?: boolean;
   /**
    * Default idle window for passes that do not set
    * {@link RentCleanupOptions.maxIdleSecs}. Facilitator schemes pass the value
@@ -409,6 +410,7 @@ export class PaymentChannelRentCleanupManager {
   private readonly computeUnitPriceMicroLamports: number | undefined;
   private readonly settleComputeUnitLimit: number | undefined;
   private readonly settleLoadedAccountsDataSizeLimit: number | undefined;
+  private readonly useTransactionV1: boolean;
   private readonly maxIdleSecs: number | undefined;
   private readonly abandonPolicy: OpenAbandonPolicy;
   private readonly sealClosingChannels: boolean;
@@ -459,6 +461,7 @@ export class PaymentChannelRentCleanupManager {
     this.computeUnitPriceMicroLamports = config.computeUnitPriceMicroLamports;
     this.settleComputeUnitLimit = config.settleComputeUnitLimit;
     this.settleLoadedAccountsDataSizeLimit = config.settleLoadedAccountsDataSizeLimit;
+    this.useTransactionV1 = config.useTransactionV1 ?? false;
     this.maxIdleSecs = config.maxIdleSecs;
     this.abandonPolicy = config.abandonPolicy ?? "idle";
     this.sealClosingChannels = config.sealClosingChannels ?? true;
@@ -858,6 +861,7 @@ export class PaymentChannelRentCleanupManager {
         computeUnitLimit: this.settleComputeUnitLimit,
         loadedAccountsDataSizeLimit: this.settleLoadedAccountsDataSizeLimit,
         computeUnitPriceMicroLamports: this.computeUnitPriceMicroLamports,
+        useTransactionV1: this.useTransactionV1,
       },
     );
   }
@@ -1041,6 +1045,7 @@ export class PaymentChannelRentCleanupManager {
             computeUnitLimit: reclaimComputeUnitLimit(packed.length),
             loadedAccountsDataSizeLimit: reclaimLoadedAccountsDataSizeLimit(packed.length),
             computeUnitPriceMicroLamports: this.computeUnitPriceMicroLamports,
+            useTransactionV1: this.useTransactionV1,
           },
         );
         opts.onReclaim?.({

@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { USDC_DEVNET_ADDRESS, USDC_MAINNET_ADDRESS } from "../../src/defaultAssets";
 import type { Channel } from "../../src/payment-channels/generated/accounts/channel";
 import type { ChannelSplit } from "../../src/payment-channels/open";
+import { buildVersion0WireTransaction } from "./helpers/signedTransaction";
 
 const channelAccountMocks = vi.hoisted(() => ({
   fetchMaybeChannel: vi.fn(),
@@ -235,9 +236,15 @@ describe("payment-channel transaction submission", () => {
       confirmTransaction: vi.fn().mockImplementation(async () => events.push("confirmed")),
     };
     await expect(
-      broadcastOpen(facilitator, address(PAYEE), SOLANA_DEVNET_CAIP2, "open", async value => {
-        events.push(`broadcast:${value}`);
-      }),
+      broadcastOpen(
+        facilitator,
+        address(PAYEE),
+        SOLANA_DEVNET_CAIP2,
+        buildVersion0WireTransaction(address(PAYEE)),
+        async value => {
+          events.push(`broadcast:${value}`);
+        },
+      ),
     ).resolves.toBe(signature);
     expect(events).toEqual([`broadcast:${signature}`, "confirmed"]);
   });
@@ -249,7 +256,12 @@ describe("payment-channel transaction submission", () => {
       confirmTransaction: vi.fn().mockRejectedValue(new Error("timeout")),
     };
     await expect(
-      broadcastOpen(facilitator, address(PAYEE), SOLANA_DEVNET_CAIP2, "open"),
+      broadcastOpen(
+        facilitator,
+        address(PAYEE),
+        SOLANA_DEVNET_CAIP2,
+        buildVersion0WireTransaction(address(PAYEE)),
+      ),
     ).rejects.toMatchObject({ name: "ChannelBroadcastConfirmationError", signature });
     expect(new ChannelBroadcastConfirmationError(signature, "timeout").cause).toBe("timeout");
   });

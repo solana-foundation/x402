@@ -87,7 +87,13 @@ export const ERR_CHANNEL_ALREADY_OPEN = "invalid_upto_svm_channel_already_open";
  */
 export const ERR_CHANNEL_BROADCAST = "invalid_upto_svm_channel_broadcast";
 
-/** Map unsupported client transaction versions to their stable reason code. */
+/**
+ * Map unsupported client transaction versions to their stable reason code.
+ *
+ * @param error - The client-open verification error
+ * @param fallback - Reason for failures unrelated to the transaction version
+ * @returns The stable response reason
+ */
 function openTransactionFailureReason(error: unknown, fallback: string): string {
   const message = error instanceof Error ? error.message : String(error);
   return message.startsWith(ErrUnsupportedTransactionVersion)
@@ -731,10 +737,7 @@ export class UptoSvmScheme implements SchemeNetworkFacilitator {
         success: false,
         network: payload.accepted.network,
         transaction: "",
-        errorReason: openTransactionFailureReason(
-          error,
-          "invalid_upto_svm_settlement_simulation",
-        ),
+        errorReason: openTransactionFailureReason(error, "invalid_upto_svm_settlement_simulation"),
         errorMessage: error instanceof Error ? error.message : String(error),
         payer: p.from,
       };
@@ -1088,6 +1091,7 @@ export class UptoSvmScheme implements SchemeNetworkFacilitator {
           computeUnitLimit: this.config.settleComputeUnitLimit,
           loadedAccountsDataSizeLimit: this.config.settleLoadedAccountsDataSizeLimit,
           computeUnitPriceMicroLamports: this.config.computeUnitPriceMicroLamports,
+          useTransactionV1: true,
           latestBlockhash: prefetchedBlockhash,
         },
       );
@@ -1438,10 +1442,7 @@ export class UptoSvmScheme implements SchemeNetworkFacilitator {
       return {
         ok: false,
         failure: {
-          reason: openTransactionFailureReason(
-            error,
-            "invalid_upto_svm_payload_open_transaction",
-          ),
+          reason: openTransactionFailureReason(error, "invalid_upto_svm_payload_open_transaction"),
           message: error instanceof Error ? error.message : String(error),
           payer: p.from,
         },
