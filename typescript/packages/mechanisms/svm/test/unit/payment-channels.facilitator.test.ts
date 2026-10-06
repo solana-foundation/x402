@@ -1,4 +1,11 @@
-import { address, generateKeyPairSigner, type Signature } from "@solana/kit";
+import {
+  address,
+  generateKeyPairSigner,
+  getBase64Codec,
+  getCompiledTransactionMessageDecoder,
+  getTransactionDecoder,
+  type Signature,
+} from "@solana/kit";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { USDC_DEVNET_ADDRESS, USDC_MAINNET_ADDRESS } from "../../src/defaultAssets";
@@ -334,13 +341,15 @@ describe("payment-channel transaction submission", () => {
 
   it("submits through RPC and polls confirmed status", async () => {
     const feePayer = await generateKeyPairSigner();
+    const send = vi.fn().mockResolvedValue(signature);
+    const sendTransaction = vi.fn(() => ({ send }));
     const rpc = {
       getLatestBlockhash: vi.fn(() => ({
         send: vi.fn().mockResolvedValue({
           value: { blockhash: USDC_MAINNET_ADDRESS, lastValidBlockHeight: 1n },
         }),
       })),
-      sendTransaction: vi.fn(() => ({ send: vi.fn().mockResolvedValue(signature) })),
+      sendTransaction,
       getSignatureStatuses: vi.fn(() => ({
         send: vi.fn().mockResolvedValue({
           value: [{ confirmationStatus: "confirmed", err: null }],
@@ -348,6 +357,9 @@ describe("payment-channel transaction submission", () => {
       })),
     } as never;
     await expect(submitSettle(feePayer, rpc, [instruction])).resolves.toBe(signature);
+    const wire = sendTransaction.mock.calls[0]![0] as string;
+    const transaction = getTransactionDecoder().decode(getBase64Codec().encode(wire));
+    expect(getCompiledTransactionMessageDecoder().decode(transaction.messageBytes).version).toBe(0);
   });
 
   it("reports onchain errors and confirmation timeouts", async () => {

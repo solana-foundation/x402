@@ -655,9 +655,12 @@ export function facilitatorV1TransactionFits(
  * fee payer, broadcast it, and confirm. Other signers, such as the channel
  * payee on `settle_and_seal`, are carried by the instruction list.
  *
- * The v1 message carries a statically sized inline transaction config. Static sizing keeps the time-critical
- * claim free of extra RPC round-trips and failure modes; the limit is
- * operator-overridable for deployments outside the documented assumptions.
+ * Version 0 remains the default for backward compatibility. Callers that own
+ * the complete transaction may explicitly opt into v1, whose message carries
+ * a statically sized inline transaction config. Static sizing keeps the
+ * time-critical claim free of extra RPC round-trips and failure modes; the
+ * limit is operator-overridable for deployments outside the documented
+ * assumptions.
  *
  * @param feePayer - The fee-payer signer
  * @param rpc - The RPC client
@@ -678,7 +681,7 @@ export async function submitSettle(
     feePayer,
     { blockhash: fetched.blockhash, lastValidBlockHeight: fetched.lastValidBlockHeight },
     instructions,
-    { ...options, useTransactionV1: true },
+    options,
   );
   const signature = await rpc.sendTransaction(wire, { encoding: "base64" }).send();
   await confirmSignature(rpc, signature);
