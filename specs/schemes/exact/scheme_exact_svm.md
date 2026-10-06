@@ -209,7 +209,9 @@ scheme.
 - The client MUST build one of the advertised versions (`0` when the field
   is absent) and SHOULD build version `0` whenever it is accepted.
   It MAY build version `1` when `1` is advertised and its signer supports it.
-  The client MUST NOT use Address Lookup Tables.
+  A version-1 message MUST NOT use Address Lookup Tables because that message
+  format does not support them. Legacy and version-0 messages remain subject
+  to the ALT visibility requirements in §2.1.2.
 - The sponsor MUST reject a message whose version is outside the set it
   accepts, before inspecting any instruction, with
   `unsupported_transaction_version`. The sponsor enforces its own accepted
@@ -331,7 +333,10 @@ When `enableSmartWalletVerification` is enabled, the signer MUST implement the s
 
 ### 3.1 Path 1 — Static Layout Verification (standard wallets)
 
-The fast path for standard wallets. The decompiled transaction MUST contain 3 to 7 instructions in this order:
+The fast path for standard wallets has a version-specific layout.
+
+A legacy or version-0 transaction MUST contain 3 to 7 instructions in this
+order:
 
 1. Compute Budget: Set Compute Unit Limit
 2. Compute Budget: Set Compute Unit Price
@@ -341,12 +346,22 @@ The fast path for standard wallets. The decompiled transaction MUST contain 3 to
 6. (Optional) Lighthouse or Memo program instruction
 7. (Optional) Memo program instruction
 
+A version-1 transaction MUST contain 1 to 5 instructions in this order:
+
+1. SPL Token or Token-2022 `TransferChecked`
+2. (Optional) Lighthouse or Memo program instruction
+3. (Optional) Lighthouse or Memo program instruction
+4. (Optional) Lighthouse or Memo program instruction
+5. (Optional) Memo program instruction
+
 - Allowed optional programs: Lighthouse (`L2TExMFKdjpN9kozasaurPirfHy9P8sbXoAN1qA3S95`) and SPL Memo (`MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr`).
 - Phantom wallet injects up to 3 Lighthouse instructions; Solflare injects 2. These are wallet-injected user protection mechanisms and MUST be allowed. The cap of 7 instructions keeps these wallets on the fast path without needing Path 2.
 - The Memo instruction ensures transaction uniqueness across concurrent payments with identical parameters. Clients MUST include a Memo instruction containing either the value of `extra.memo` (when present) or a random nonce (at least 16 bytes, hex-encoded for UTF-8 compliance).
 - If `extra.memo` is present, the facilitator MUST verify that exactly one Memo instruction exists and that its data matches `extra.memo` encoded as UTF-8.
-- Fee payer isolation, compute budget validity (compute unit price ≤ 5 lamports/CU on this path), destination ATA derivation, and exact amount match are enforced as before.
-- A version-1 transaction carries no Compute Budget instructions (its budget is in `message.config`, checked per §1.5), so its static layout is `TransferChecked` at index 0 followed by up to four optional Lighthouse or Memo instructions, 1 to 5 instructions in total.
+- Fee payer isolation, destination ATA derivation, and exact amount match are
+  enforced on both layouts. The legacy/version-0 Compute Budget price and the
+  version-1 total priority fee MUST each be no greater than 5 lamports/CU on
+  this path, using the normalization in §1.5 for version 1.
 
 ### 3.2 Path 2 — Simulation-Based Smart Wallet Verification
 

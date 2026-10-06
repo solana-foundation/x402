@@ -1365,8 +1365,8 @@ The top-level instructions MUST consist only of the following ordered regions:
    instructions (`L2TExMFKdjpN9kozasaurPirfHy9P8sbXoAN1qA3S95`). The Memo data
    MUST be `extra.memo` as UTF-8 when supplied, or otherwise a random nonce of
    at least 16 bytes encoded as hexadecimal text. An `open` suffix also carries
-   exactly one binding Memo from section 3. The signed `open` transaction MUST
-   be at most 1232 bytes.
+   exactly one binding Memo from section 3. The signed transaction is subject
+   to the version-specific size limit above.
 
 No other top-level instruction or program is allowed. In particular, a
 top-level associated-token-account instruction, arbitrary wallet program,
