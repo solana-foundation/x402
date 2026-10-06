@@ -666,6 +666,51 @@ func (m *PaymentChannelRentCleanupManager) submitReclaimGroup(
 		}
 		return
 	}
+	if !m.useTransactionV1 {
+		for start := 0; start < len(group); start += opts.MaxReclaimsPerTx {
+			if atomic.AddInt64(budget, -1) < 0 {
+				atomic.AddInt64(budget, 1)
+				return
+			}
+			if ctx.Err() != nil {
+				return
+			}
+			end := start + opts.MaxReclaimsPerTx
+			if end > len(group) {
+				end = len(group)
+			}
+			batch := m.refreshReclaimBatch(ctx, rpcClient, group[start:end], opts)
+			if len(batch) == 0 {
+				continue
+			}
+			instructions := make([]solana.Instruction, 0, len(batch))
+			channelIDs := make([]string, 0, len(batch))
+			for _, candidate := range batch {
+				instructions = append(instructions, BuildReclaimInstruction(candidate.channelID, candidate.rentPayer))
+				channelIDs = append(channelIDs, candidate.channelID.String())
+			}
+			reclaimLimit := ReclaimComputeUnitLimit(len(batch))
+			signature, err := SubmitChannelTransactionWithSigner(ctx, m.signer, m.signer, feePayer, m.network, instructions, SubmitSettleOptions{
+				ComputeUnitLimit:              &reclaimLimit,
+				ComputeUnitPriceMicroLamports: m.computeUnitPriceMicroLamports,
+			})
+			if err != nil {
+				for _, channelID := range channelIDs {
+					opts.reportError(err, channelID)
+				}
+				continue
+			}
+			if opts.OnReclaim != nil {
+				opts.OnReclaim(RentCleanupReclaimResult{ChannelIDs: channelIDs, Transaction: signature})
+			}
+			for _, channelID := range channelIDs {
+				if err := m.storage.Delete(ctx, m.network, channelID); err != nil {
+					opts.reportError(err, channelID)
+				}
+			}
+		}
+		return
+	}
 	maxLive := int(atomic.LoadInt64(budget)) * opts.MaxReclaimsPerTx
 	if maxLive <= 0 {
 		return

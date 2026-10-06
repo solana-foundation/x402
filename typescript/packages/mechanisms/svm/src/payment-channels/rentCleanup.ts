@@ -977,6 +977,63 @@ export class PaymentChannelRentCleanupManager {
       return;
     }
 
+    if (!this.useTransactionV1) {
+      for (let i = 0; i < group.length; i += opts.maxReclaimsPerTx) {
+        if (budget.remaining <= 0 || opts.abort.aborted()) return;
+        budget.remaining -= 1;
+
+        const batch = group.slice(i, i + opts.maxReclaimsPerTx);
+        try {
+          const rpc = accountFetchRpc(this.signer, this.network);
+          const liveBatch: ReclaimCandidate[] = [];
+          for (const candidate of batch) {
+            const maybe = await fetchMaybeChannel(rpc, address(candidate.channelId), {
+              commitment: STATE_COMMITMENT,
+            });
+            if (!maybe.exists) {
+              await this.storage.delete(this.network, candidate.channelId);
+              continue;
+            }
+            if (maybe.data.status !== ChannelStatus.Distributed) continue;
+            liveBatch.push({
+              channelId: candidate.channelId,
+              rentPayer: maybe.data.rentPayer,
+            });
+          }
+          if (liveBatch.length === 0) continue;
+
+          const instructions = liveBatch.map(candidate =>
+            buildReclaimInstruction({
+              channelId: candidate.channelId,
+              rentPayer: candidate.rentPayer,
+            }),
+          );
+          const signature = await submitChannelTransactionWithSigner(
+            feePayerSigner,
+            this.signer,
+            this.network,
+            instructions,
+            {
+              computeUnitLimit: reclaimComputeUnitLimit(liveBatch.length),
+              computeUnitPriceMicroLamports: this.computeUnitPriceMicroLamports,
+            },
+          );
+          opts.onReclaim?.({
+            channelIds: liveBatch.map(candidate => candidate.channelId),
+            transaction: signature,
+          });
+          for (const candidate of liveBatch) {
+            await this.storage.delete(this.network, candidate.channelId);
+          }
+        } catch (error) {
+          for (const candidate of batch) {
+            opts.onError?.(error, { channelId: candidate.channelId });
+          }
+        }
+      }
+      return;
+    }
+
     // Refetch each account immediately before acting (stale -> skip).
     const rpc = accountFetchRpc(this.signer, this.network);
     const liveBatch: ReclaimCandidate[] = [];
