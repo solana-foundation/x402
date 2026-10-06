@@ -420,7 +420,7 @@ describe("UptoSvmRentCleanupManager — cleanup", () => {
 
     expect(onReclaim).toHaveBeenCalledTimes(2);
     const batchSizes = onReclaim.mock.calls.map(call => call[0].channelIds.length as number);
-    expect(Math.max(...batchSizes)).toBe(MAX_SAFE_RECLAIMS_PER_TX - 2);
+    expect(Math.max(...batchSizes)).toBe(MAX_SAFE_RECLAIMS_PER_TX);
     expect(batchSizes.reduce((a, b) => a + b, 0)).toBe(MAX_SAFE_RECLAIMS_PER_TX + 1);
   });
 

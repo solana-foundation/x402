@@ -80,6 +80,7 @@ import {
 import { toFacilitatorSvmSigner } from "../../src/signer";
 import { type UptoSvmPayloadV2 } from "../../src/types";
 import { resolveOpenSlot } from "../../src/utils";
+import { buildVersion0WireTransaction } from "./helpers/signedTransaction";
 
 // A valid 32-byte base58 pubkey reused as a deterministic blockhash in tests.
 const DUMMY_BLOCKHASH = USDC_MAINNET_ADDRESS;
@@ -2540,9 +2541,13 @@ describe("upto SVM scheme", () => {
       const feePayer = await generateKeyPairSigner();
       const { signer, simulateTransaction, sendTransaction } = makeSettleSigner();
 
-      const signature = await submitSettle(feePayer, signer as never, SOLANA_DEVNET_CAIP2, [
-        memoIx,
-      ]);
+      const signature = await submitSettle(
+        feePayer,
+        signer as never,
+        SOLANA_DEVNET_CAIP2,
+        [memoIx],
+        { useTransactionV1: true },
+      );
       expect(signature).toBe(SIG);
       expect(simulateTransaction).toHaveBeenCalledTimes(1);
       expect(sendTransaction).toHaveBeenCalledTimes(1);
@@ -2568,7 +2573,9 @@ describe("upto SVM scheme", () => {
       );
 
       await expect(
-        submitSettle(feePayer, signer as never, SOLANA_DEVNET_CAIP2, [memoIx]),
+        submitSettle(feePayer, signer as never, SOLANA_DEVNET_CAIP2, [memoIx], {
+          useTransactionV1: true,
+        }),
       ).rejects.toThrow(TransactionOnchainFailureError);
       expect(sendTransaction).toHaveBeenCalledTimes(1);
     });
@@ -2579,7 +2586,9 @@ describe("upto SVM scheme", () => {
       signer.confirmTransaction.mockRejectedValue(new Error("rpc timeout"));
 
       await expect(
-        submitSettle(feePayer, signer as never, SOLANA_DEVNET_CAIP2, [memoIx]),
+        submitSettle(feePayer, signer as never, SOLANA_DEVNET_CAIP2, [memoIx], {
+          useTransactionV1: true,
+        }),
       ).rejects.toBeInstanceOf(SettlementConfirmationTimeoutError);
     });
 
@@ -2589,7 +2598,9 @@ describe("upto SVM scheme", () => {
       signer.simulateTransaction.mockRejectedValue(new Error("sim failed"));
 
       await expect(
-        submitSettle(feePayer, signer as never, SOLANA_DEVNET_CAIP2, [memoIx]),
+        submitSettle(feePayer, signer as never, SOLANA_DEVNET_CAIP2, [memoIx], {
+          useTransactionV1: true,
+        }),
       ).rejects.toThrow("sim failed");
       expect(sendTransaction).not.toHaveBeenCalled();
     });
@@ -2600,6 +2611,7 @@ describe("upto SVM scheme", () => {
 
       await submitSettle(feePayer, signer as never, SOLANA_DEVNET_CAIP2, [memoIx], {
         computeUnitLimit: 222_222,
+        useTransactionV1: true,
       });
 
       const wire = sendTransaction.mock.calls[0]![0] as string;
@@ -2611,6 +2623,7 @@ describe("upto SVM scheme", () => {
       const priced = makeSettleSigner();
       await submitSettle(feePayer, priced.signer as never, SOLANA_DEVNET_CAIP2, [memoIx], {
         computeUnitPriceMicroLamports: 250,
+        useTransactionV1: true,
       });
       const pricedConfig = decodeV1Config(priced.sendTransaction.mock.calls[0]![0]);
       expect(pricedConfig.priorityFeeLamports).toBe(25n);
@@ -2618,6 +2631,7 @@ describe("upto SVM scheme", () => {
       const unpriced = makeSettleSigner();
       await submitSettle(feePayer, unpriced.signer as never, SOLANA_DEVNET_CAIP2, [memoIx], {
         computeUnitPriceMicroLamports: 0,
+        useTransactionV1: true,
       });
       const unpricedWire = unpriced.sendTransaction.mock.calls[0]![0];
       expect(decodeTopLevelInstructions(unpricedWire).map(ix => ix.program)).toEqual([
@@ -3058,7 +3072,12 @@ describe("upto SVM scheme", () => {
           .mockRejectedValue(new TransactionOnchainFailureError("Transaction failed onchain: {}")),
       };
       await expect(
-        broadcastOpen(facilitator, PAY_TO as never, SOLANA_DEVNET_CAIP2, "open"),
+        broadcastOpen(
+          facilitator,
+          PAY_TO as never,
+          SOLANA_DEVNET_CAIP2,
+          buildVersion0WireTransaction(address(PAY_TO)),
+        ),
       ).rejects.toBeInstanceOf(TransactionOnchainFailureError);
     });
 
@@ -3069,7 +3088,12 @@ describe("upto SVM scheme", () => {
         confirmTransaction: vi.fn().mockRejectedValue(new Error("rpc timeout")),
       };
       await expect(
-        broadcastOpen(facilitator, PAY_TO as never, SOLANA_DEVNET_CAIP2, "open"),
+        broadcastOpen(
+          facilitator,
+          PAY_TO as never,
+          SOLANA_DEVNET_CAIP2,
+          buildVersion0WireTransaction(address(PAY_TO)),
+        ),
       ).rejects.toBeInstanceOf(ChannelOpenConfirmationError);
     });
 
@@ -3080,7 +3104,12 @@ describe("upto SVM scheme", () => {
         confirmTransaction: vi.fn().mockResolvedValue(undefined),
       };
       await expect(
-        broadcastOpen(facilitator, PAY_TO as never, SOLANA_DEVNET_CAIP2, "open"),
+        broadcastOpen(
+          facilitator,
+          PAY_TO as never,
+          SOLANA_DEVNET_CAIP2,
+          buildVersion0WireTransaction(address(PAY_TO)),
+        ),
       ).resolves.toBe("openSig");
       expect(facilitator.confirmTransaction).toHaveBeenCalledWith("openSig", SOLANA_DEVNET_CAIP2);
     });

@@ -387,6 +387,9 @@ func SimulateOpenSettleDistribute(
 type SubmitSettleOptions struct {
 	ComputeUnitLimit            *uint32
 	LoadedAccountsDataSizeLimit *uint32
+	// UseTransactionV1 opts facilitator-owned submissions into the v1 message
+	// format. The zero value preserves the existing v0 wire format.
+	UseTransactionV1 bool
 	// ComputeUnitPriceMicroLamports is converted to v1's total priority fee.
 	ComputeUnitPriceMicroLamports *uint64
 	// LatestBlockhash, when set, skips a blockhash fetch.
@@ -593,14 +596,45 @@ func compileChannelTransaction(
 	instructions []solana.Instruction,
 	opts SubmitSettleOptions,
 ) (*solana.Transaction, error) {
-	tx, err := buildSettleTransaction(feePayerKey, blockhash, instructions, opts)
+	if opts.UseTransactionV1 {
+		tx, err := buildSettleTransaction(feePayerKey, blockhash, instructions, opts)
+		if err != nil {
+			return nil, err
+		}
+		if err := feePayer.SignTransaction(ctx, tx, feePayerKey, network); err != nil {
+			return nil, err
+		}
+		return tx, nil
+	}
+	budget, err := buildSettleComputeBudget(opts)
 	if err != nil {
 		return nil, err
 	}
-	if err := feePayer.SignTransaction(ctx, tx, feePayerKey, network); err != nil {
-		return nil, err
+	return buildSignedTransaction(ctx, feePayer, feePayerKey, network, blockhash, append(budget, instructions...))
+}
+
+func buildSettleComputeBudget(opts SubmitSettleOptions) ([]solana.Instruction, error) {
+	limit := DefaultSettleComputeUnitLimit
+	if opts.ComputeUnitLimit != nil {
+		limit = *opts.ComputeUnitLimit
 	}
-	return tx, nil
+	limitIx, err := computebudget.NewSetComputeUnitLimitInstructionBuilder().SetUnits(limit).ValidateAndBuild()
+	if err != nil {
+		return nil, fmt.Errorf("failed to build compute limit instruction: %w", err)
+	}
+	instructions := []solana.Instruction{limitIx}
+	price := uint64(svm.DefaultComputeUnitPriceMicrolamports)
+	if opts.ComputeUnitPriceMicroLamports != nil {
+		price = *opts.ComputeUnitPriceMicroLamports
+	}
+	if price == 0 {
+		return instructions, nil
+	}
+	priceIx, err := computebudget.NewSetComputeUnitPriceInstructionBuilder().SetMicroLamports(price).ValidateAndBuild()
+	if err != nil {
+		return nil, fmt.Errorf("failed to build compute price instruction: %w", err)
+	}
+	return append(instructions, priceIx), nil
 }
 
 func priorityFeeLamports(computeUnitLimit uint32, microLamports uint64) (uint64, error) {

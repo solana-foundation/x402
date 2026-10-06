@@ -552,6 +552,8 @@ async function buildOpenSettleDistributeSimulationInstructions(
 
 /** Options for {@link submitSettle}. */
 export interface SubmitSettleOptions {
+  /** Opt into v1; omitted preserves the existing v0 settlement wire format. */
+  useTransactionV1?: boolean | undefined;
   /**
    * Inline v1 compute-unit limit for the settlement transaction. Defaults to
    * {@link DEFAULT_SETTLE_COMPUTE_UNIT_LIMIT} (100k), sized for standard SPL
@@ -676,7 +678,7 @@ export async function submitSettle(
     feePayer,
     { blockhash: fetched.blockhash, lastValidBlockHeight: fetched.lastValidBlockHeight },
     instructions,
-    options,
+    { ...options, useTransactionV1: true },
   );
   const signature = await rpc.sendTransaction(wire, { encoding: "base64" }).send();
   await confirmSignature(rpc, signature);
@@ -774,7 +776,40 @@ async function buildChannelTransaction(
   instructions: readonly ServerInstruction[],
   options: SubmitSettleOptions,
 ): Promise<ReturnType<typeof getBase64EncodedWireTransaction>> {
-  const message = buildSettleMessage(feePayer, instructions, latestBlockhash, options);
+  const message = options.useTransactionV1
+    ? buildSettleMessage(feePayer, instructions, latestBlockhash, options)
+    : pipe(
+        createTransactionMessage({ version: 0 }),
+        m => setTransactionMessageFeePayerSigner(feePayer, m),
+        m =>
+          setTransactionMessageLifetimeUsingBlockhash(
+            {
+              blockhash: latestBlockhash.blockhash as Blockhash,
+              lastValidBlockHeight: latestBlockhash.lastValidBlockHeight,
+            },
+            m,
+          ),
+        m =>
+          appendTransactionMessageInstructions(
+            [
+              getSetComputeUnitLimitInstruction({
+                units: options.computeUnitLimit ?? DEFAULT_SETTLE_COMPUTE_UNIT_LIMIT,
+              }),
+              ...((options.computeUnitPriceMicroLamports ??
+                DEFAULT_COMPUTE_UNIT_PRICE_MICROLAMPORTS) > 0
+                ? [
+                    getSetComputeUnitPriceInstruction({
+                      microLamports:
+                        options.computeUnitPriceMicroLamports ??
+                        DEFAULT_COMPUTE_UNIT_PRICE_MICROLAMPORTS,
+                    }),
+                  ]
+                : []),
+              ...instructions,
+            ],
+            m,
+          ),
+      );
   const signed = await signTransactionMessageWithSigners(message);
   return getBase64EncodedWireTransaction(signed);
 }

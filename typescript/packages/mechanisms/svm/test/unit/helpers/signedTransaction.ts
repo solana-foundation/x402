@@ -124,6 +124,28 @@ const FAKE_BLOCKHASH = {
 };
 
 /**
+ * Build a minimally valid, unsigned v0 wire transaction for tests that only
+ * exercise facilitator co-sign/broadcast behavior.
+ *
+ * @param feePayer - Static fee-payer address
+ * @returns Base64 wire transaction with a placeholder fee-payer signature
+ */
+export function buildVersion0WireTransaction(feePayer: Address): string {
+  const message = pipe(
+    createTransactionMessage({ version: 0 }),
+    m => setTransactionMessageFeePayer(feePayer, m),
+    m => setTransactionMessageLifetimeUsingBlockhash(FAKE_BLOCKHASH, m),
+  );
+  const messageBytes = getCompiledTransactionMessageEncoder().encode(
+    compileTransactionMessage(message),
+  );
+  return getBase64EncodedWireTransaction({
+    messageBytes,
+    signatures: placeholderFeePayerSignature(feePayer),
+  } as never);
+}
+
+/**
  * Build a standard-wallet exact payment: compute budget + TransferChecked + memo.
  *
  * @param args - Transfer fields and optional memo text
