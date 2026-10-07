@@ -29,7 +29,8 @@ const (
 	DefaultMaxReclaimsPerTx = 8
 
 	// MaxSafeReclaimsPerTx is the largest reclaim batch that serializes under
-	// Solana's packet data size. MaxReclaimsPerTx is clamped to this.
+	// Solana's v0 packet data size. V0 MaxReclaimsPerTx is clamped to this;
+	// v1 batches are bounded by the actual transaction packer.
 	MaxSafeReclaimsPerTx = 16
 
 	// DefaultMaxTxsPerRun caps the close/distribute transactions the storage
@@ -109,13 +110,13 @@ type RentCleanupOptions struct {
 	OnError          func(err error, channelID string)
 }
 
-func (o RentCleanupOptions) withDefaults(configuredIdle *int64) (RentCleanupOptions, int64) {
+func (o RentCleanupOptions) withDefaults(configuredIdle *int64, useTransactionV1 bool) (RentCleanupOptions, int64) {
 	if o.AbandonGraceSecs <= 0 {
 		o.AbandonGraceSecs = DefaultAbandonGraceSecs
 	}
 	if o.MaxReclaimsPerTx <= 0 {
 		o.MaxReclaimsPerTx = DefaultMaxReclaimsPerTx
-	} else if o.MaxReclaimsPerTx > MaxSafeReclaimsPerTx {
+	} else if !useTransactionV1 && o.MaxReclaimsPerTx > MaxSafeReclaimsPerTx {
 		o.MaxReclaimsPerTx = MaxSafeReclaimsPerTx
 	}
 	if o.MaxTxsPerRun <= 0 {
@@ -332,7 +333,7 @@ func (m *PaymentChannelRentCleanupManager) Cleanup(ctx context.Context, opts Ren
 	m.passMu.Lock()
 	defer m.passMu.Unlock()
 
-	opts, maxIdleSecs := opts.withDefaults(m.maxIdleSecs)
+	opts, maxIdleSecs := opts.withDefaults(m.maxIdleSecs, m.useTransactionV1)
 	records, err := m.storage.List(ctx, m.network)
 	if err != nil {
 		return fmt.Errorf("failed to list stored channels: %w", err)
