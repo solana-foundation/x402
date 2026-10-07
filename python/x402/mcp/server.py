@@ -32,7 +32,10 @@ import logging
 from collections.abc import Callable
 from typing import Any
 
+from ..hook_policy import snapshot_payment_requirements_list
+from ..schemas.errors import PaymentAbortedError, VerifyError
 from ..schemas.payments import PaymentPayload, PaymentRequirements, ResourceInfo
+from ..schemas.responses import VerifyResponse
 from .constants import MCP_PAYMENT_META_KEY, MCP_PAYMENT_RESPONSE_META_KEY
 from .types import (
     AfterExecutionContext,
@@ -189,17 +192,27 @@ def create_payment_wrapper(
                         extensions,
                     )
 
-            if asyncio.iscoroutinefunction(resource_server.verify_payment):
-                verify_result = await resource_server.verify_payment(payload, payment_requirements)
-            else:
-                verify_result = await asyncio.to_thread(
-                    resource_server.verify_payment, payload, payment_requirements
+            try:
+                if asyncio.iscoroutinefunction(resource_server.verify_payment):
+                    verify_result = await resource_server.verify_payment(
+                        payload, payment_requirements
+                    )
+                else:
+                    verify_result = await asyncio.to_thread(
+                        resource_server.verify_payment, payload, payment_requirements
+                    )
+            except Exception as e:
+                return _create_payment_required_result(
+                    accepts,
+                    tool_resource,
+                    _payment_required_error_from_verify(e, None),
+                    extensions,
                 )
             if not verify_result.is_valid:
                 return _create_payment_required_result(
                     accepts,
                     tool_resource,
-                    f"Payment verification failed: {verify_result.invalid_reason}",
+                    _payment_required_error_from_verify(None, verify_result),
                     extensions,
                 )
 
@@ -388,6 +401,21 @@ def _extract_payment_from_context(ctx: Any) -> dict | None:
     return None
 
 
+def _payment_required_error_from_verify(
+    err: BaseException | None,
+    verify_result: VerifyResponse | None,
+) -> str:
+    if isinstance(err, VerifyError) and err.invalid_reason:
+        return err.invalid_reason
+    if isinstance(err, PaymentAbortedError) and err.reason:
+        return err.reason
+    if verify_result is not None and verify_result.invalid_reason:
+        return verify_result.invalid_reason
+    if err is not None:
+        return str(err)
+    return "Payment verification failed"
+
+
 def _create_payment_required_result(
     accepts: list[PaymentRequirements],
     resource: ResourceInfo,
@@ -397,6 +425,9 @@ def _create_payment_required_result(
     """Create a payment required CallToolResult."""
     from mcp.types import CallToolResult, TextContent
 
+    # Enrichers may mutate Extra in place (e.g. batch-settlement channelState).
+    # Snapshot so wrapper config stays a stable match baseline across tool calls.
+    accepts = snapshot_payment_requirements_list(accepts)
     accepts_dicts = [req.model_dump(by_alias=True, exclude_none=True) for req in accepts]
     payment_required: dict[str, Any] = {
         "x402Version": 2,

@@ -9,6 +9,7 @@ import {
   FacilitatorClient,
   FacilitatorResponseError,
   getFacilitatorResponseError,
+  attachBackgroundInitHandler,
   SETTLEMENT_OVERRIDES_HEADER,
   SettlementOverrides,
   checkIfBazaarNeeded,
@@ -229,6 +230,20 @@ function sendInternalError(reply: FastifyReply, error: unknown): void {
 }
 
 /**
+ * Decode percent-escapes in a request path.
+ *
+ * @param path - Request path
+ * @returns Decoded path, or the original if decoding fails
+ */
+function decodedRoutePath(path: string): string {
+  try {
+    return decodeURIComponent(path);
+  } catch {
+    return path;
+  }
+}
+
+/**
  * Configuration for registering a payment scheme with a specific network.
  */
 export interface SchemeRegistration {
@@ -282,11 +297,11 @@ export function paymentMiddlewareFromHTTPServer(
   app.decorateRequest("x402RawGuard", undefined);
 
   let initPromise: Promise<void> | null = syncFacilitatorOnStart ? httpServer.initialize() : null;
-  // Attach a no-op rejection handler so an early failure (e.g. a facilitator
-  // request timeout) cannot become an unhandled rejection before the first
-  // protected request awaits initPromise. The original promise is kept, so that
-  // request still observes the failure and triggers the retry path.
-  void initPromise?.catch(() => {});
+  // Retryable failures (e.g. a facilitator timeout) must not become unhandled
+  // rejections; the original promise is still awaited on the first protected
+  // request. Fatal capability / route mismatches exit the process so a
+  // misconfigured server does not stay up until that request.
+  attachBackgroundInitHandler(initPromise);
   let isInitialized = false;
 
   /**
@@ -330,11 +345,19 @@ export function paymentMiddlewareFromHTTPServer(
   }
 
   app.addHook("onRequest", async (request: FastifyRequest, reply: FastifyReply) => {
+    // find-my-way 9.5-9.8 and 9.9+ (both allowed by fastify ^5) resolve absolute-form and other
+    // non-origin-form request-targets to different paths, so the gate cannot mirror the router.
+    // Reject them before route matching instead.
+    if (request.url.charCodeAt(0) !== 47 /* "/" */) {
+      return reply.status(400).send({ error: "Bad Request" });
+    }
+
     const path = request.url.split("?")[0];
     const adapter = new FastifyAdapter(request);
     const context: HTTPRequestContext = {
       adapter,
       path,
+      decodedPath: decodedRoutePath(path),
       method: request.method,
       paymentHeader:
         (request.headers["payment-signature"] as string | undefined) ||

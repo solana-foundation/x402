@@ -13,9 +13,29 @@ import { paymentMiddleware } from "./index";
  * @returns A Hono app with a paid `:id` route and a catch-all, so a skipped
  * paywall is observable as the paid body rather than a framework 404.
  */
-function buildApp() {
+async function buildApp() {
   const app = new Hono();
-  const resourceServer = new x402ResourceServer();
+  const resourceServer = new x402ResourceServer({
+    getSupported: async () => ({
+      kinds: [{ x402Version: 2, scheme: "exact", network: "eip155:84532" }],
+      extensions: [],
+      signers: {},
+    }),
+    verify: async () => ({ isValid: true }),
+    settle: async () => ({ success: true, transaction: "", network: "eip155:84532" }),
+  });
+  resourceServer.register("eip155:84532", {
+    scheme: "exact",
+    parsePrice: async () => ({
+      amount: "1000000",
+      asset: "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+      extra: {},
+    }),
+    enhancePaymentRequirements: async paymentRequirements => paymentRequirements,
+    defaultAssetTransferMethod: "default",
+    paymentFlows: { default: { supported: ["upfront"], default: "upfront" } },
+  });
+  await resourceServer.initialize();
   app.use(
     "*",
     paymentMiddleware(
@@ -43,7 +63,7 @@ function buildApp() {
 
 describe("hono end-to-end: encoded path separator in a :param segment", () => {
   it("returns 402 for a baseline single-segment :id", async () => {
-    const res = await buildApp().request("/api/report/baseline");
+    const res = await (await buildApp()).request("/api/report/baseline");
     expect(res.status).toBe(402);
   });
 
@@ -53,7 +73,7 @@ describe("hono end-to-end: encoded path separator in a :param segment", () => {
     ["encoded backslash %5C", "/api/report/a%5Cb"],
     ["encoded backslash %5c (lowercase)", "/api/report/a%5cb"],
   ])("returns 402, not the paid body, for %s", async (_, path) => {
-    const res = await buildApp().request(path);
+    const res = await (await buildApp()).request(path);
 
     expect(res.status).toBe(402);
     expect(await res.text()).not.toContain("PAID_CONTENT");
@@ -70,4 +90,141 @@ describe("hono end-to-end: encoded path separator in a :param segment", () => {
 
     expect(res.status).toBe(200);
   });
+});
+
+describe("hono end-to-end: literal route percent-encoded separator", () => {
+  /**
+   * Literal paid `/api/premium` app.
+   *
+   * @returns Hono app with payment middleware
+   */
+  async function buildLiteralApp() {
+    const app = new Hono();
+    const resourceServer = new x402ResourceServer({
+      getSupported: async () => ({
+        kinds: [{ x402Version: 2, scheme: "exact", network: "eip155:84532" }],
+        extensions: [],
+        signers: {},
+      }),
+      verify: async () => ({ isValid: true }),
+      settle: async () => ({ success: true, transaction: "", network: "eip155:84532" }),
+    });
+    resourceServer.register("eip155:84532", {
+      scheme: "exact",
+      parsePrice: async () => ({
+        amount: "1000000",
+        asset: "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+        extra: {},
+      }),
+      enhancePaymentRequirements: async paymentRequirements => paymentRequirements,
+      defaultAssetTransferMethod: "default",
+      paymentFlows: { default: { supported: ["upfront"], default: "upfront" } },
+    });
+    await resourceServer.initialize();
+    app.use(
+      "*",
+      paymentMiddleware(
+        {
+          "GET /api/premium": {
+            accepts: {
+              scheme: "exact",
+              payTo: "0xabc",
+              price: "$0.01",
+              network: "eip155:84532",
+            },
+          },
+        },
+        resourceServer,
+        undefined,
+        undefined,
+        false,
+      ),
+    );
+    app.get("/api/premium", c => c.json({ secret: "paid content" }));
+    return app;
+  }
+
+  it("returns 402 for the baseline literal route", async () => {
+    const res = await (await buildLiteralApp()).request("/api/premium");
+    expect(res.status).toBe(402);
+  });
+
+  it.each([["/api%2Fpremium"], ["/api%2fpremium"], ["/%61pi%2Fpremium"]])(
+    "returns 402 for percent-encoded separator %s",
+    async path => {
+      const res = await (await buildLiteralApp()).request(path);
+      expect(res.status).toBe(402);
+    },
+  );
+
+  it("does not gate an unrelated path", async () => {
+    const res = await (await buildLiteralApp()).request("/health");
+    expect(res.status).toBe(404);
+  });
+});
+
+describe("hono end-to-end: literal route basePath", () => {
+  /**
+   * Paid `/api/premium` app mounted at `/svc`.
+   *
+   * @returns Hono app with payment middleware
+   */
+  async function buildMountedApp() {
+    const app = new Hono().basePath("/svc");
+    const resourceServer = new x402ResourceServer({
+      getSupported: async () => ({
+        kinds: [{ x402Version: 2, scheme: "exact", network: "eip155:84532" }],
+        extensions: [],
+        signers: {},
+      }),
+      verify: async () => ({ isValid: true }),
+      settle: async () => ({ success: true, transaction: "", network: "eip155:84532" }),
+    });
+    resourceServer.register("eip155:84532", {
+      scheme: "exact",
+      parsePrice: async () => ({
+        amount: "1000000",
+        asset: "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+        extra: {},
+      }),
+      enhancePaymentRequirements: async paymentRequirements => paymentRequirements,
+      defaultAssetTransferMethod: "default",
+      paymentFlows: { default: { supported: ["upfront"], default: "upfront" } },
+    });
+    await resourceServer.initialize();
+    app.use(
+      "*",
+      paymentMiddleware(
+        {
+          "GET /api/premium": {
+            accepts: {
+              scheme: "exact",
+              payTo: "0xabc",
+              price: "$0.01",
+              network: "eip155:84532",
+            },
+          },
+        },
+        resourceServer,
+        undefined,
+        undefined,
+        false,
+      ),
+    );
+    app.get("/api/premium", c => c.json({ secret: "paid content" }));
+    return app;
+  }
+
+  it("returns 402 for the mounted literal route", async () => {
+    const res = await (await buildMountedApp()).request("/svc/api/premium");
+    expect(res.status).toBe(402);
+  });
+
+  it.each([["/svc/api%2Fpremium"], ["/svc/api%2fpremium"]])(
+    "returns 402 for mounted percent-encoded separator %s",
+    async path => {
+      const res = await (await buildMountedApp()).request(path);
+      expect(res.status).toBe(402);
+    },
+  );
 });

@@ -72,6 +72,7 @@ from .interfaces import (
     PaymentFlowConfig,
     PaymentFlowName,
     PaymentFlowPhases,
+    PaymentPayloadContext,
     ResolvedPaymentFlow,
     SchemeNetworkClient,
     SchemeNetworkClientV1,
@@ -104,11 +105,12 @@ from .schemas import (
     AbortResult,
     AssetAmount,
     CompletedSettlement,
+    # Errors
+    FacilitatorCapabilityError,
     # Config
     FacilitatorConfig,
     Money,
     Network,
-    # Errors
     NoMatchingRequirementsError,
     PaymentAbortedError,
     PaymentCreatedContext,
@@ -171,7 +173,7 @@ from .server import (
     x402ResourceServerSync,
 )
 
-__version__ = "2.21.0"
+__version__ = "2.25.0"
 
 __all__ = [
     # Version
@@ -208,6 +210,7 @@ __all__ = [
     "SchemeNetworkServer",
     "SchemeNetworkFacilitator",
     "SchemeNetworkFacilitatorV1",
+    "PaymentPayloadContext",
     "PaymentFlowName",
     "PaymentFlowPhases",
     "PaymentFlowConfig",
@@ -275,6 +278,7 @@ __all__ = [
     "SchemeNotFoundError",
     "NoMatchingRequirementsError",
     "PaymentAbortedError",
+    "FacilitatorCapabilityError",
     # Types - Helpers
     "detect_version",
     "match_payload_to_requirements",

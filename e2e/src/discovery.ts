@@ -4,7 +4,7 @@ import { GenericServerProxy } from './servers/generic-server';
 import { GenericClientProxy } from './clients/generic-client';
 import { GenericFacilitatorProxy } from './facilitators/generic-facilitator';
 import { discoverComponentLocations, loadComponentConfig } from './component';
-import { schemesForSdkNetwork } from './mechanisms';
+import { schemesForComponent } from './mechanisms';
 import { verboseLog, errorLog } from './logger';
 import {
   TestConfig,
@@ -238,7 +238,12 @@ export class TestDiscovery {
             verboseLog(`  ⚠️  Skipping ${client.name}: No language specified`);
             continue;
           }
-          const clientSchemesForFamily = schemesForSdkNetwork(clientLanguage, endpointProtocolFamily);
+          const clientSchemesForFamily = schemesForComponent(
+            clientLanguage,
+            endpointProtocolFamily,
+            client.config.schemes,
+            'client',
+          );
           if (!clientSchemesForFamily.includes(endpointScheme)) {
             verboseLog(`  ⚠️  Skipping ${client.name} ↔ ${server.name} ${endpoint.path}: Payment scheme mismatch (client supports [${clientSchemesForFamily.join(', ')}] on ${endpointProtocolFamily}, endpoint requires ${endpointScheme})`);
             continue;
@@ -266,7 +271,12 @@ export class TestDiscovery {
             if (clientFacilitators && !clientFacilitators.includes(f.name)) {
               return false;
             }
-            const facilSchemesForFamily = schemesForSdkNetwork(facilLanguage, endpointProtocolFamily);
+            const facilSchemesForFamily = schemesForComponent(
+              facilLanguage,
+              endpointProtocolFamily,
+              f.config.schemes,
+              'facilitator',
+            );
             if (!facilSchemesForFamily.includes(endpointScheme)) return false;
             if (endpointProtocolFamily === 'evm') {
               const endpointAtm = endpointAssetTransferMethod(endpoint)!;

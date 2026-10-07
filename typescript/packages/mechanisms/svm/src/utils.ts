@@ -1,8 +1,9 @@
-import { createHash } from "node:crypto";
+import { sha256 } from "@noble/hashes/sha256";
 import { ErrInvalidPayloadTransaction } from "./exact/facilitator/errors";
 import {
   isAddress,
   getBase58Encoder,
+  getBase64Decoder,
   getBase64Encoder,
   getTransactionDecoder,
   getCompiledTransactionMessageDecoder,
@@ -35,7 +36,7 @@ import {
 } from "./constants";
 import { DEFAULT_ASSETS, findDefaultAsset, getDefaultAsset } from "./defaultAssets";
 import type { ExactSvmPayloadV1 } from "./types";
-import { SLOT_COMMITMENT } from "./upto/shared";
+import { SLOT_COMMITMENT } from "./payment-channels/commitments";
 
 export { normalizeNetwork } from "./constants";
 
@@ -64,7 +65,7 @@ export function validateSvmAddress(address: string): boolean {
  * @returns Base64-encoded SHA-256 hash of the transaction message bytes
  */
 export function transactionMessageHash(transaction: Transaction): string {
-  return createHash("sha256").update(Buffer.from(transaction.messageBytes)).digest("base64");
+  return getBase64Decoder().decode(sha256(Uint8Array.from(transaction.messageBytes)));
 }
 
 /**

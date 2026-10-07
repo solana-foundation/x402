@@ -8,6 +8,7 @@ import {
   getFacilitatorResponseError,
 } from "../../../src/types";
 import { PaymentPayload, PaymentRequirements } from "../../../src/types/payments";
+import { safeBase64Encode } from "../../../src/utils";
 
 const paymentRequirements: PaymentRequirements = {
   scheme: "exact",
@@ -169,6 +170,116 @@ describe("HTTPFacilitatorClient", () => {
     expect(result.errorReason).toBeUndefined();
     expect(result.errorMessage).toBeUndefined();
     expect(result.payer).toBeUndefined();
+  });
+
+  describe("EXTENSION-RESPONSES header", () => {
+    const extensionPayload = {
+      bazaar: { status: "accepted", catalogId: "cat-1" },
+    };
+
+    it("sets extensionResponses from header on settle without touching extensions", async () => {
+      const header = safeBase64Encode(JSON.stringify(extensionPayload));
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockResolvedValue(
+          new Response(
+            JSON.stringify({
+              success: true,
+              transaction: "0xabc",
+              network: "eip155:8453",
+            }),
+            {
+              status: 200,
+              headers: { "EXTENSION-RESPONSES": header },
+            },
+          ),
+        ),
+      );
+
+      const client = new HTTPFacilitatorClient({ url: "https://facilitator.test" });
+      const result = await client.settle(paymentPayload, paymentRequirements);
+
+      expect(result.extensionResponses).toEqual(extensionPayload);
+      expect(result.extensions).toBeUndefined();
+    });
+
+    it("sets extensionResponses from header on verify without touching extensions", async () => {
+      const header = safeBase64Encode(JSON.stringify(extensionPayload));
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockResolvedValue(
+          new Response(
+            JSON.stringify({
+              isValid: true,
+            }),
+            {
+              status: 200,
+              headers: { "EXTENSION-RESPONSES": header },
+            },
+          ),
+        ),
+      );
+
+      const client = new HTTPFacilitatorClient({ url: "https://facilitator.test" });
+      const result = await client.verify(paymentPayload, paymentRequirements);
+
+      expect(result.extensionResponses).toEqual(extensionPayload);
+      expect(result.extensions).toBeUndefined();
+    });
+
+    it("keeps body extensions independent from header extensionResponses", async () => {
+      const bodyExtensions = { bazaar: { status: "from-body" } };
+      const header = safeBase64Encode(JSON.stringify(extensionPayload));
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockResolvedValue(
+          new Response(
+            JSON.stringify({
+              success: true,
+              transaction: "0xabc",
+              network: "eip155:8453",
+              extensions: bodyExtensions,
+            }),
+            {
+              status: 200,
+              headers: { "EXTENSION-RESPONSES": header },
+            },
+          ),
+        ),
+      );
+
+      const client = new HTTPFacilitatorClient({ url: "https://facilitator.test" });
+      const result = await client.settle(paymentPayload, paymentRequirements);
+
+      expect(result.extensions).toEqual(bodyExtensions);
+      expect(result.extensionResponses).toEqual(extensionPayload);
+    });
+
+    it("ignores malformed EXTENSION-RESPONSES without throwing", async () => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockResolvedValue(
+          new Response(
+            JSON.stringify({
+              success: true,
+              transaction: "0xabc",
+              network: "eip155:8453",
+            }),
+            {
+              status: 200,
+              headers: { "EXTENSION-RESPONSES": "not-valid-base64!!!" },
+            },
+          ),
+        ),
+      );
+
+      const client = new HTTPFacilitatorClient({ url: "https://facilitator.test" });
+      const result = await client.settle(paymentPayload, paymentRequirements);
+
+      expect(result.success).toBe(true);
+      expect(result.extensions).toBeUndefined();
+      expect(result.extensionResponses).toBeUndefined();
+    });
   });
 
   describe("URL normalization", () => {
@@ -373,8 +484,8 @@ describe("request timeout", () => {
     vi.unstubAllGlobals();
   });
 
-  it("defaults timeoutMs to 30 seconds", () => {
-    expect(new HTTPFacilitatorClient().timeoutMs).toBe(30_000);
+  it("defaults timeoutMs to 90 seconds", () => {
+    expect(new HTTPFacilitatorClient().timeoutMs).toBe(90_000);
     expect(new HTTPFacilitatorClient({ timeoutMs: 5_000 }).timeoutMs).toBe(5_000);
   });
 
@@ -586,6 +697,14 @@ describe("request timeout", () => {
     expect(
       getFacilitatorResponseError(new Error("initialization failed", { cause: timeoutError })),
     ).toBe(timeoutError);
+  });
+
+  it("returns null from getFacilitatorResponseError when no facilitator error is present", () => {
+    expect(getFacilitatorResponseError("not an error")).toBeNull();
+    expect(getFacilitatorResponseError(new Error("plain error"))).toBeNull();
+    expect(
+      getFacilitatorResponseError(new Error("wrapped", { cause: new Error("inner") })),
+    ).toBeNull();
   });
 });
 

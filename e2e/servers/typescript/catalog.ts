@@ -4,10 +4,11 @@
  * Everything the express/hono/fastify servers mount comes from here, so adding a
  * mechanism means adding a catalog entry rather than editing each framework.
  */
+import { masumiEscrowAddress } from "@x402/cardano";
 import {
   CLOSE_PATH,
   HEALTH_PATH,
-  filterRoutes,
+  availableRoutes,
   resolvePaymentRoutes,
   routeFilterFromEnv,
   sdkRoutesFor,
@@ -28,14 +29,14 @@ const routeFilter = routeFilterFromEnv(key => process.env[key]);
  * configured — those answer 501 via {@link getUnconfiguredResponseForPath}.
  */
 export function catalogRoutes(): SdkRoute[] {
-  return filterRoutes(sdkRoutesFor(SDK), routeFilter);
+  return availableRoutes(sdkRoutesFor(SDK), key => process.env[key], routeFilter);
 }
 
 /** Catalog routes with env-dependent payment requirements resolved. */
 export function resolvedRoutes(cfg: ServerEnvConfig): ResolvedRoute[] {
   const env = (key: string): string | undefined =>
     (cfg as unknown as Record<string, string | undefined>)[key] ?? process.env[key];
-  return resolvePaymentRoutes(SDK, env, routeFilter);
+  return resolvePaymentRoutes(SDK, env, routeFilter, masumiEscrowAddress);
 }
 
 export type ServedNetwork = {

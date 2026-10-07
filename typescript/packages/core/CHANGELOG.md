@@ -1,10 +1,36 @@
 # @x402/core Changelog
 
+## 2.28.0
+
+### Minor Changes
+
+- Bumped to align version with dependent packages
+## 2.27.0
+
+### Minor Changes
+
+- [5d3a2b2](https://github.com/x402-foundation/x402/commit/5d3a2b2): HTTP resource servers now match protected routes against both the escaped request path and the framework's decoded routing view, requiring payment if either matches. A literal route such as `GET /api/premium` could previously be reached unpaid by encoding its path separator (`/api%2Fpremium`) when the adapter only consulted the escaped path while the framework dispatched on the decoded one. ([#3542](https://github.com/x402-foundation/x402/pull/3542)) - Thanks [@PhilBot402](https://github.com/PhilBot402) and [@phdargen](https://github.com/phdargen)!
+
+## 2.26.0
+
+### Minor Changes
+
+- [76fe973](https://github.com/x402-foundation/x402/commit/76fe973): Pass the resolved atomic `spendControls` cap to every scheme on `PaymentPayloadContext.maxAmountPerPayment` (omitted when uncapped) so capital-locking schemes can reuse client policy without re-resolving it. Batch-settlement EVM servers always announce `extra.minDeposit` (default `10 × amount`, optional per-route override via `accepts.extra.minDeposit`). Clients size deposits from the hint when valid, clamped to that cap × `depositMultiplier` when a spend cap is set. Uncapped payments (`spendControls: false` or no per-asset cap) also leave deposits uncapped. Older 402s fall back to `depositMultiplier` for sizing. Servers may opt in to SDK enforcement via `enforceMinDeposit: true` (default off; facilitator never enforces). Export `invalid_batch_settlement_evm_deposit_below_min_deposit` for custom server enforcement. ([#3372](https://github.com/x402-foundation/x402/pull/3372)) - Thanks [@phdargen](https://github.com/phdargen) and [@cursoragent](https://github.com/cursoragent)!
+
+## 2.25.0
+
+### Minor Changes
+
+- [1bc2ae8](https://github.com/x402-foundation/x402/commit/1bc2ae8): Populate `extensionResponses` on verify/settle from the facilitator `EXTENSION-RESPONSES` header as a server-internal sidechannel (aligned with Python). Do not merge into `extensions`; strip the sidechannel from buyer-facing `PAYMENT-RESPONSE` encoding. ([#3278](https://github.com/x402-foundation/x402/pull/3278)) - Thanks [@Bartok9](https://github.com/Bartok9)!
+- [299b9bc](https://github.com/x402-foundation/x402/commit/299b9bc): Exit the process when eager facilitator sync fails with a permanent capability or route-configuration error, instead of staying up until the first paid request. Transient facilitator timeouts remain retryable. ([#3346](https://github.com/x402-foundation/x402/pull/3346)) - Thanks [@phdargen](https://github.com/phdargen)!
+- [bbcb974](https://github.com/x402-foundation/x402/commit/bbcb974): `x402ResourceServer.buildPaymentRequirements()` now throws when no scheme server is registered for the requested scheme and network, instead of logging a `console.warn` and resolving with an empty array. It previously produced a 402 response carrying an empty `accepts` list, which is unusable to a client and gives no signal that the server is misconfigured. The new error matches the adjacent guard that already throws when the facilitator does not advertise the scheme and network. This is a breaking change. A call that previously resolved with `[]` now rejects, so any resource server that reaches a priced route without a registered scheme server changes from answering 402 to surfacing an error. Callers must register a scheme server for every network they price a route on. ([#3051](https://github.com/x402-foundation/x402/pull/3051)) - Thanks [@VedantAnand17](https://github.com/VedantAnand17) and [@cursoragent](https://github.com/cursoragent), [@phdargen](https://github.com/phdargen)!
+
 ## 2.24.0
 
 ### Minor Changes
 
 - Bumped to align version with dependent packages
+
 ## 2.23.0
 
 ### Minor Changes

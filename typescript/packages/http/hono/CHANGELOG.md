@@ -1,5 +1,57 @@
 # @x402/hono Changelog
 
+## 2.28.0
+
+### Minor Changes
+
+- Updated dependencies [dd89698](https://github.com/x402-foundation/x402/commit/dd89698)
+  - @x402/paywall@2.28.0
+  - @x402/core@2.28.0
+  - @x402/extensions@2.28.0
+
+## 2.27.0
+
+### Minor Changes
+
+- Updated dependencies [5d3a2b2](https://github.com/x402-foundation/x402/commit/5d3a2b2)
+  - @x402/core@2.27.0
+  - @x402/extensions@2.27.0
+  - @x402/paywall@2.27.0
+
+### Patch Changes
+
+- [5d3a2b2](https://github.com/x402-foundation/x402/commit/5d3a2b2): HTTP resource servers now match protected routes against both the escaped request path and the framework's decoded routing view, requiring payment if either matches. A literal route such as `GET /api/premium` could previously be reached unpaid by encoding its path separator (`/api%2Fpremium`) when the adapter only consulted the escaped path while the framework dispatched on the decoded one. ([#3542](https://github.com/x402-foundation/x402/pull/3542)) - Thanks [@PhilBot402](https://github.com/PhilBot402) and [@phdargen](https://github.com/phdargen)!
+
+## 2.26.0
+
+### Minor Changes
+
+- Updated dependencies [76fe973](https://github.com/x402-foundation/x402/commit/76fe973)
+- Updated dependencies [8ae5ff6](https://github.com/x402-foundation/x402/commit/8ae5ff6)
+  - @x402/core@2.26.0
+  - @x402/extensions@2.26.0
+  - @x402/paywall@2.26.0
+
+### Patch Changes
+
+- [ba7fc20](https://github.com/x402-foundation/x402/commit/ba7fc20): Preserved all values of repeated query parameters in the request adapter while keeping single values as strings. ([#3455](https://github.com/x402-foundation/x402/pull/3455)) - Thanks [@sunruize93-cmyk](https://github.com/sunruize93-cmyk)!
+
+## 2.25.0
+
+### Minor Changes
+
+- Updated dependencies [a140d2b](https://github.com/x402-foundation/x402/commit/a140d2b)
+- Updated dependencies [1bc2ae8](https://github.com/x402-foundation/x402/commit/1bc2ae8)
+- Updated dependencies [299b9bc](https://github.com/x402-foundation/x402/commit/299b9bc)
+- Updated dependencies [bbcb974](https://github.com/x402-foundation/x402/commit/bbcb974)
+  - @x402/extensions@2.25.0
+  - @x402/core@2.25.0
+  - @x402/paywall@2.25.0
+
+### Patch Changes
+
+- [299b9bc](https://github.com/x402-foundation/x402/commit/299b9bc): Exit the process when eager facilitator sync fails with a permanent capability or route-configuration error, instead of staying up until the first paid request. Transient facilitator timeouts remain retryable. ([#3346](https://github.com/x402-foundation/x402/pull/3346)) - Thanks [@phdargen](https://github.com/phdargen)!
+
 ## 2.24.0
 
 ### Minor Changes

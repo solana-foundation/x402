@@ -13,6 +13,7 @@ export type VerifyResponse = {
   invalidMessage?: string;
   payer?: string;
   extensions?: Record<string, unknown>;
+  extensionResponses?: Record<string, unknown>;
   extra?: Record<string, unknown>;
 };
 
@@ -32,6 +33,7 @@ export type SettleResponse = {
   /** Actual amount settled in atomic token units. Present for schemes like `upto` where settlement amount may differ from the authorized maximum. */
   amount?: string;
   extensions?: Record<string, unknown>;
+  extensionResponses?: Record<string, unknown>;
   extra?: Record<string, unknown>;
 };
 
@@ -149,6 +151,26 @@ export class FacilitatorTimeoutError extends FacilitatorResponseError {
     this.name = "FacilitatorTimeoutError";
     this.operation = operation;
     this.timeoutMs = timeoutMs;
+  }
+}
+
+/**
+ * Error thrown when a registered scheme's configuration is incompatible with
+ * the capabilities the facilitator advertised for that scheme and network.
+ */
+export class FacilitatorCapabilityError extends Error {
+  /** Human-readable problem lines, one per scheme/network mismatch. */
+  readonly problems: string[];
+
+  /**
+   * Creates a FacilitatorCapabilityError listing every capability problem.
+   *
+   * @param problems - Scheme/network problem lines to include in the message
+   */
+  constructor(problems: string[]) {
+    super(`x402 facilitator capability errors:\n${problems.map(e => `  - ${e}`).join("\n")}`);
+    this.name = "FacilitatorCapabilityError";
+    this.problems = problems;
   }
 }
 
