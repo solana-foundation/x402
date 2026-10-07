@@ -461,6 +461,9 @@ func VerifyTopUpTransaction(transactionBase64 string, expected VerifyTopUpExpect
 		return fmt.Errorf("verifyTopUpTransaction: %w", err)
 	}
 	message := &tx.Message
+	if !svm.IsAcceptedTransactionVersion(message.GetVersion()) {
+		return fmt.Errorf("%s: verifyTopUpTransaction: unsupported transaction message version %d", svm.ErrUnsupportedTransactionVersion, int(message.GetVersion())-1)
+	}
 	if len(message.AddressTableLookups) > 0 {
 		return fmt.Errorf("verifyTopUpTransaction: address-lookup tables are not permitted")
 	}
