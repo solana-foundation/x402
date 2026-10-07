@@ -262,6 +262,28 @@ func TestCleanupDistributesSealedChannels(t *testing.T) {
 	assert.False(t, harness.exists(record.ChannelID))
 }
 
+func TestCleanupPacks62LiveChannelsIntoOneV1ReclaimTransaction(t *testing.T) {
+	harness := newCleanupHarness(t)
+	openSlot := testSlot - paymentchannels.OpenSlotWindow - 1
+	for i := 0; i < 62; i++ {
+		harness.seedRecord(
+			paymentchannels.PaymentChannelRecord{PayTo: harness.payTo.String()},
+			harness.channel(generated.ChannelStatus_Distributed, openSlot),
+		)
+	}
+
+	require.NoError(t, harness.manager.Cleanup(context.Background(), harness.options(CleanupOptions{
+		MaxReclaimsPerTx: 62,
+		MaxTxsPerSigner:  1,
+	})))
+
+	require.Empty(t, harness.errors)
+	require.Len(t, harness.reclaims, 1)
+	require.Len(t, harness.reclaims[0].ChannelIDs, 62)
+	require.Len(t, harness.signer.sentTransactions(), 1)
+	require.Len(t, harness.sentInstructionData(0), 62)
+}
+
 func TestCleanupDefersClosingChannels(t *testing.T) {
 	harness := newCleanupHarness(t)
 	record := harness.seedRecord(
