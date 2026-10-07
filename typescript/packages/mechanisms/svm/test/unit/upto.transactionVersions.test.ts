@@ -13,9 +13,11 @@ import { describe, expect, it } from "vitest";
 
 import { TOKEN_PROGRAM_ADDRESS } from "../../src/constants";
 import { USDC_DEVNET_ADDRESS } from "../../src/defaultAssets";
+import { verifyRequestCloseTransaction } from "../../src/payment-channels/close";
 import {
   buildOpenPaymentChannelTransaction,
   verifyOpenTransaction,
+  verifyTopUpTransaction,
 } from "../../src/payment-channels/open";
 import { resolveTransactionVersion } from "../../src/utils";
 import { buildVersion1WireTransaction } from "./helpers/signedTransaction";
@@ -81,5 +83,35 @@ describe("verifyOpenTransaction version gate", () => {
     await expect(verifyOpenTransaction(open.transaction, expected)).resolves.toMatchObject({
       channelId: open.channelId,
     });
+  });
+});
+
+describe("payment-channels top-up and close version gates", () => {
+  it("rejects a real version 1 top-up before layout checks", async () => {
+    const { open, expected, payer, feePayer } = await openTransaction();
+    const v1 = await buildVersion1WireTransaction({ feePayer: feePayer.address, payer });
+    expect(wireVersion(v1)).toBe(1);
+    await expect(
+      verifyTopUpTransaction(v1, {
+        ...expected,
+        channelId: open.channelId,
+        amount: 1n,
+        maxPriorityFeeMicroLamports: 0,
+      }),
+    ).rejects.toThrow(/^unsupported_transaction_version/);
+  });
+
+  it("rejects a real version 1 close before signer and layout checks", async () => {
+    const { open, payer, feePayer } = await openTransaction();
+    const v1 = await buildVersion1WireTransaction({ feePayer: feePayer.address, payer });
+    expect(wireVersion(v1)).toBe(1);
+    await expect(
+      verifyRequestCloseTransaction(v1, {
+        payer: payer.address,
+        feePayer: feePayer.address,
+        channelId: open.channelId,
+        maxPriorityFeeMicroLamports: 0,
+      }),
+    ).rejects.toThrow(/^unsupported_transaction_version/);
   });
 });

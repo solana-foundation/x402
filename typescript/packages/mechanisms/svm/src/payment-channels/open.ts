@@ -616,9 +616,13 @@ export async function verifyTopUpTransaction(
   expected: VerifyTopUpExpected,
 ): Promise<void> {
   const decoded = getTransactionDecoder().decode(getBase64Codec().encode(transactionBase64));
-  const message = getCompiledTransactionMessageDecoder().decode(
-    decoded.messageBytes,
-  ) as unknown as CompiledOpenMessage;
+  const compiledMessage = getCompiledTransactionMessageDecoder().decode(decoded.messageBytes);
+  if (!isAcceptedTransactionVersion(compiledMessage.version)) {
+    throw new Error(
+      `${ErrUnsupportedTransactionVersion}: verifyTopUpTransaction: transaction message version ${String(compiledMessage.version)} is not accepted; top-up transactions must be legacy or version 0`,
+    );
+  }
+  const message = compiledMessage as unknown as CompiledOpenMessage;
   if (message.addressTableLookups && message.addressTableLookups.length > 0) {
     throw new Error("verifyTopUpTransaction: address-lookup tables are not permitted");
   }
