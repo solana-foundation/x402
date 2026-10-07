@@ -247,9 +247,9 @@ export const DEFAULT_MAX_RECLAIMS_PER_TX = 8;
  * Largest reclaim batch proven, by the Go SDK's
  * `TestReclaimBatchFitsInOneTransaction`, to serialize under Solana's
  * `PACKET_DATA_SIZE` (1232 bytes) with every channel PDA distinct and one
- * shared fee payer. `maxReclaimsPerTx` is clamped to this so a misconfigured
+ * shared fee payer. V0 `maxReclaimsPerTx` is clamped to this so a misconfigured
  * operator value can never build a reclaim transaction that fails to
- * serialize or gets rejected on broadcast.
+ * serialize or gets rejected on broadcast. V1 uses the actual transaction packer.
  */
 export const MAX_SAFE_RECLAIMS_PER_TX = 16;
 
@@ -576,7 +576,7 @@ export class PaymentChannelRentCleanupManager {
     const maxReclaimsPerTx = resolveCleanupCount(
       opts.maxReclaimsPerTx,
       DEFAULT_MAX_RECLAIMS_PER_TX,
-      MAX_SAFE_RECLAIMS_PER_TX,
+      this.useTransactionV1 ? undefined : MAX_SAFE_RECLAIMS_PER_TX,
     );
     const maxTxsPerRun = resolveCleanupCount(opts.maxTxsPerRun, DEFAULT_MAX_TXS_PER_RUN);
     const maxTxsPerSigner = resolveCleanupCount(opts.maxTxsPerSigner, DEFAULT_MAX_TXS_PER_SIGNER);

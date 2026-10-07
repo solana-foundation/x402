@@ -76,6 +76,18 @@ func TestFacilitatorV1PackingChecksInstructionAndWireLimits(t *testing.T) {
 
 func TestCleanupOptionsClampsMaxReclaimsPerTxToSafeLimit(t *testing.T) {
 	t.Parallel()
-	opts, _ := (RentCleanupOptions{MaxReclaimsPerTx: MaxSafeReclaimsPerTx + 100}).withDefaults(nil)
+	opts, _ := (RentCleanupOptions{MaxReclaimsPerTx: MaxSafeReclaimsPerTx + 100}).withDefaults(nil, false)
 	require.Equal(t, MaxSafeReclaimsPerTx, opts.MaxReclaimsPerTx)
+}
+
+func TestCleanupOptionsV1ReclaimLimits(t *testing.T) {
+	t.Parallel()
+	for _, value := range []int{0, -1, 62, 1000} {
+		opts, _ := (RentCleanupOptions{MaxReclaimsPerTx: value}).withDefaults(nil, true)
+		expected := value
+		if value <= 0 {
+			expected = DefaultMaxReclaimsPerTx
+		}
+		require.Equal(t, expected, opts.MaxReclaimsPerTx)
+	}
 }

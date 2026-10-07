@@ -17,7 +17,8 @@ const (
 	DefaultMaxReclaimsPerTx = paymentchannels.DefaultMaxReclaimsPerTx
 
 	// MaxSafeReclaimsPerTx is the largest reclaim batch that serializes under
-	// Solana's packet data size. MaxReclaimsPerTx is clamped to this.
+	// Solana's v0 packet data size. V1 cleanup uses the actual transaction
+	// packer instead of this fixed cap.
 	MaxSafeReclaimsPerTx = paymentchannels.MaxSafeReclaimsPerTx
 
 	// DefaultMaxTxsPerRun caps the close/distribute transactions the storage
@@ -83,8 +84,6 @@ func (o CleanupOptions) withDefaults() CleanupOptions {
 	}
 	if o.MaxReclaimsPerTx <= 0 {
 		o.MaxReclaimsPerTx = DefaultMaxReclaimsPerTx
-	} else if o.MaxReclaimsPerTx > MaxSafeReclaimsPerTx {
-		o.MaxReclaimsPerTx = MaxSafeReclaimsPerTx
 	}
 	if o.MaxTxsPerRun <= 0 {
 		o.MaxTxsPerRun = DefaultMaxTxsPerRun
