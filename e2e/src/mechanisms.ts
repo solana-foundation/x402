@@ -17,7 +17,6 @@ import { readFileSync, readdirSync } from 'fs';
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
 import type { PaymentFlowName } from '@x402/core/types';
-import { masumiEscrowAddress } from '@x402/cardano';
 
 /** always-succeeds Plutus V3 fixture (same bytes as cardano test stubs). */
 const CARDANO_ALWAYS_SUCCEEDS_SCRIPT = '4d01000033222220051200120011';
@@ -31,7 +30,7 @@ export type ConfigRole = 'server' | 'client' | 'facilitator';
 /** Network id, e.g. "evm" — one per `mechanisms_<id>.json` file. No fixed union: adding a network is a catalog-only edit. */
 export type CatalogNetworkId = string;
 
-type PaymentScheme = 'exact' | 'upto' | 'batch-settlement';
+type PaymentScheme = 'exact' | 'upto' | 'batch-settlement' | 'auth-capture';
 type AssetTransferMethod =
   | 'eip3009'
   | 'permit2'
@@ -118,8 +117,10 @@ export type RouteDefinition = {
   scheme: PaymentScheme;
   network: CatalogNetworkId;
   assetTransferMethod?: AssetTransferMethod;
-  /** SDKs that implement this route. */
+  /** SDKs that implement this route end to end (client, server and facilitator). */
   sdks: SdkId[];
+  /** SDKs that implement only the client role. Servers and facilitators never see them. */
+  clientSdks?: SdkId[];
   schemeOptions?: Record<string, boolean>;
   /** Every route declares its own price. */
   price: PriceSpec;
@@ -135,8 +136,14 @@ export type RouteDefinition = {
   paymentFlow?: PaymentFlow;
   /** Omit this route unless the named env var is set (optional add-on routes). */
   requiresEnv?: string;
+  /** Omit this route when the named env var is set (mutually exclusive add-on routes). */
+  requiresEnvAbsent?: string;
   /** Payment completion window advertised on this route. */
   maxTimeoutSeconds?: number;
+  /** Merged into the route payment option's `extra` (wire `PaymentRequirements.extra`). */
+  requirementsExtra?: Record<string, unknown>;
+  /** Scheme-specific `accepts.extra` fields (e.g. auth-capture deadlines and flow). */
+  schemeExtra?: Record<string, string | number | boolean>;
 };
 
 /** Fixed success body for every paid route (`timestamp` is added by the server). */
@@ -187,6 +194,7 @@ type EndpointLike = {
   paymentFlow?: PaymentFlow;
   schemeOptions?: Record<string, boolean>;
   extensions?: string[];
+  schemeExtra?: Record<string, string | number | boolean>;
   health?: boolean;
   close?: boolean;
   /** MCP tool name, equal to `path` for MCP endpoints (`method: 'tool'`). */
@@ -282,9 +290,14 @@ export function getRouteDefinition(path: string): RouteDefinition {
   return def;
 }
 
-export function sdkRoutesFor(sdk: string): SdkRoute[] {
+/** Routes an SDK implements. With `role: 'client'`, routes it implements only as a client are included. */
+export function sdkRoutesFor(sdk: string, role?: ConfigRole): SdkRoute[] {
   return Object.entries(catalog.routes)
-    .filter(([, def]) => def.sdks.includes(sdk as SdkId))
+    .filter(
+      ([, def]) =>
+        def.sdks.includes(sdk as SdkId) ||
+        (role === 'client' && def.clientSdks?.includes(sdk as SdkId)),
+    )
     .map(([path, def]) => ({ path, ...def }));
 }
 
@@ -307,9 +320,13 @@ export function schemesForSdk(sdk: string): PaymentScheme[] {
 }
 
 /** Schemes an SDK implements for one catalog network (from route `sdks`). */
-export function schemesForSdkNetwork(sdk: string, network: CatalogNetworkId): PaymentScheme[] {
+export function schemesForSdkNetwork(
+  sdk: string,
+  network: CatalogNetworkId,
+  role?: ConfigRole,
+): PaymentScheme[] {
   const schemes = new Set<PaymentScheme>();
-  for (const route of sdkRoutesFor(sdk)) {
+  for (const route of sdkRoutesFor(sdk, role)) {
     if (route.network === network) {
       schemes.add(route.scheme);
     }
@@ -326,8 +343,9 @@ export function schemesForComponent(
   sdk: string,
   network: CatalogNetworkId,
   declaredSchemes: PaymentScheme[] | undefined,
+  role?: ConfigRole,
 ): PaymentScheme[] {
-  const sdkSchemes = schemesForSdkNetwork(sdk, network);
+  const sdkSchemes = schemesForSdkNetwork(sdk, network, role);
   if (!declaredSchemes?.length) {
     return sdkSchemes;
   }
@@ -390,6 +408,7 @@ export function sdkRouteToEndpoint(route: SdkRoute, transport: RouteTransport = 
       paymentFlow: route.paymentFlow,
       schemeOptions: route.schemeOptions,
       extensions: route.extensions,
+      ...(route.schemeExtra ? { schemeExtra: route.schemeExtra } : {}),
     };
   }
 
@@ -404,6 +423,7 @@ export function sdkRouteToEndpoint(route: SdkRoute, transport: RouteTransport = 
     paymentFlow: route.paymentFlow,
     schemeOptions: route.schemeOptions,
     extensions: route.extensions,
+    ...(route.schemeExtra ? { schemeExtra: route.schemeExtra } : {}),
   };
 }
 
@@ -476,11 +496,17 @@ export type RouteFilter = {
 };
 
 export function routeEnvSatisfied(route: SdkRoute, env: EnvLookup): boolean {
-  if (!route.requiresEnv) {
-    return true;
+  if (route.requiresEnv && !env(route.requiresEnv)?.trim()) {
+    return false;
   }
-  return Boolean(env(route.requiresEnv)?.trim());
+  if (route.requiresEnvAbsent && env(route.requiresEnvAbsent)?.trim()) {
+    return false;
+  }
+  return true;
 }
+
+/** Harness-only POST path to trigger deferred auth-capture lifecycle capture on e2e servers. */
+export const AUTH_CAPTURE_E2E_CAPTURE_PATH = '/__e2e/auth-capture/capture';
 
 export function filterRoutes(routes: SdkRoute[], filter?: RouteFilter): SdkRoute[] {
   if (!filter?.excludeSchemes?.length && !filter?.excludeNetworks?.length) {
@@ -489,6 +515,24 @@ export function filterRoutes(routes: SdkRoute[], filter?: RouteFilter): SdkRoute
   const schemes = new Set(filter.excludeSchemes ?? []);
   const networks = new Set(filter.excludeNetworks ?? []);
   return routes.filter(route => !schemes.has(route.scheme) && !networks.has(route.network));
+}
+
+/** True when a catalog network/scheme pair is excluded by a harness or component route filter. */
+export function isRouteExcludedByFilter(
+  network: string,
+  scheme: string,
+  filter?: RouteFilter,
+): boolean {
+  if (!filter) {
+    return false;
+  }
+  if (filter.excludeNetworks?.includes(network)) {
+    return true;
+  }
+  if (filter.excludeSchemes?.includes(scheme)) {
+    return true;
+  }
+  return false;
 }
 
 export function availableRoutes(
@@ -653,7 +697,7 @@ export function enrichConfigFromMechanisms(
     excludeSchemes: config.excludeSchemes as string[] | undefined,
     excludeNetworks: config.excludeNetworks as string[] | undefined,
   };
-  const routes = availableRoutes(sdkRoutesFor(sdk), key => process.env[key], filter);
+  const routes = availableRoutes(sdkRoutesFor(sdk, type), key => process.env[key], filter);
 
   const fromCatalog = NETWORK_IDS.filter(id => routes.some(route => route.network === id));
   const protocolFamilies =
@@ -896,6 +940,7 @@ function resolvePayTo(
   caip2: string,
   serverPayTo: string | undefined,
   env: EnvLookup,
+  masumiEscrowAddress: (network: string) => string,
 ): string | undefined {
   if (route.network !== 'cardano') {
     return serverPayTo;
@@ -990,7 +1035,8 @@ function resolvePrice(
 export function resolvePaymentRoutes(
   sdk: string,
   env: EnvLookup,
-  filter?: RouteFilter,
+  filter: RouteFilter | undefined,
+  masumiEscrowAddress: (network: string) => string,
 ): ResolvedRoute[] {
   const resolved: ResolvedRoute[] = [];
 
@@ -1000,11 +1046,18 @@ export function resolvePaymentRoutes(
     if (!serverPayTo) continue;
 
     const caip2 = env(derivedNetworkKey(route.network)) ?? def.networks.testnet.caip2;
-    const payTo = resolvePayTo(route, caip2, serverPayTo, env);
+    const payTo = resolvePayTo(route, caip2, serverPayTo, env, masumiEscrowAddress);
     if (!payTo) continue;
 
     const { price, extra: priceExtra } = resolvePrice(route, caip2, env);
-    const extra = mergeRouteExtra(priceExtra, cardanoRouteExtra(route, env), route.paymentFlow);
+    const extra = mergeRouteExtra(
+      priceExtra,
+      route.requirementsExtra
+        ? { ...route.requirementsExtra, ...cardanoRouteExtra(route, env) }
+        : cardanoRouteExtra(route, env),
+      route.paymentFlow,
+    );
+    const mergedExtra = route.schemeExtra ? { ...(extra ?? {}), ...route.schemeExtra } : extra;
 
     resolved.push({
       path: route.path,
@@ -1013,7 +1066,7 @@ export function resolvePaymentRoutes(
       network: caip2,
       payTo,
       price,
-      ...(extra ? { extra } : {}),
+      ...(mergedExtra ? { extra: mergedExtra } : {}),
       ...(route.maxTimeoutSeconds ? { maxTimeoutSeconds: route.maxTimeoutSeconds } : {}),
       extensions: route.extensions ?? [],
       ...(route.settlementOverride ? { settlementOverride: route.settlementOverride } : {}),
@@ -1037,6 +1090,53 @@ export function routeDiscoveryOutput(): {
     properties[key] = { type: 'string' };
   }
   return { example, schema: { properties, required: Object.keys(example) } };
+}
+
+const HARNESS_PAYMENT_SCHEMES = ['exact', 'upto', 'batch-settlement'] as const;
+
+/** Merge component-level and run-level route exclusions (union of exclude lists). */
+export function mergeRouteFilters(...filters: (RouteFilter | undefined)[]): RouteFilter {
+  const excludeSchemes = new Set<string>();
+  const excludeNetworks = new Set<string>();
+  for (const filter of filters) {
+    if (!filter) continue;
+    for (const scheme of filter.excludeSchemes ?? []) {
+      excludeSchemes.add(scheme);
+    }
+    for (const network of filter.excludeNetworks ?? []) {
+      excludeNetworks.add(network);
+    }
+  }
+  return {
+    ...(excludeSchemes.size > 0 ? { excludeSchemes: [...excludeSchemes] } : {}),
+    ...(excludeNetworks.size > 0 ? { excludeNetworks: [...excludeNetworks] } : {}),
+  };
+}
+
+/** Serialize a {@link RouteFilter} into env vars read by TS/Go/Python e2e servers. */
+export function routeFilterToEnv(filter: RouteFilter): Record<string, string> {
+  const env: Record<string, string> = {};
+  if (filter.excludeSchemes?.length) {
+    env.E2E_EXCLUDE_SCHEMES = filter.excludeSchemes.join(',');
+  }
+  if (filter.excludeNetworks?.length) {
+    env.E2E_EXCLUDE_NETWORKS = filter.excludeNetworks.join(',');
+  }
+  return env;
+}
+
+/**
+ * Route exclusions for the current harness run from selected scenarios
+ * (`--families`, `--schemes`, and other filters that narrow `filteredScenarios`).
+ */
+export function runRouteFilterForHarness(
+  selectedFamilies: ReadonlySet<string>,
+  selectedSchemes: ReadonlySet<string>,
+): RouteFilter {
+  return {
+    excludeNetworks: NETWORK_IDS.filter(id => !selectedFamilies.has(id)),
+    excludeSchemes: HARNESS_PAYMENT_SCHEMES.filter(scheme => !selectedSchemes.has(scheme)),
+  };
 }
 
 /** Route filter parsed from the exclude env vars the harness injects. */

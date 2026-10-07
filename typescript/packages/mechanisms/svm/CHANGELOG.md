@@ -1,5 +1,35 @@
 # @x402/svm Changelog
 
+## 2.28.0
+
+### Minor Changes
+
+- [600131c](https://github.com/x402-foundation/x402/commit/600131c): Added an SVM `batch-settlement` implementation for long-lived payment channels and cumulative offchain vouchers. Reuses the `upto` payment-channel primitives, adds client-signed vouchers and concurrent server-signed metering with itemized receipts, batched claim/distribution operations, payer-forced close and grace-period finalization, and onchain facilitator recovery. Ships dedicated client, server, and facilitator entry points. Recovery preserves signed transactions before submission, constrains postcondition reads to the confirmation slot, and reconciles actual payouts and merchant paid state without new distribution request fields. Includes replaceable recovery storage and an idempotent payout-recording callback. A broadcast whose blockhash has expired with no record of its signature is reported as `transaction_failed` and released rather than left pending, reads rejected for the confirmation-slot floor are retried, and a payout whose attribution is ambiguous is answered with `invalid_batch_settlement_svm_payout_attribution_ambiguous` and released. The facilitator signer gains an optional `isBlockhashValid` capability. Server-signed channels are opt-in on the client. `BatchSvmScheme` (client) takes `serverSignedChannelsPolicy`, shaped like the core spend controls: `allowedOperators` lists the operator keys that may hold the client's voucher authority, `maxDeposit` (a USD amount, default `$1`, or `false`) caps the escrow locked per channel for default assets, and `allowedAssets` opts in other tokens with atomic caps. Every deposit hint, including the server's `minDeposit`, is clamped to the cap. Trust is keyed by operator only, so it behaves the same over HTTP and MCP. Without a grant a server-signed accept is refused and the scheme's own creation-failure hook pays the same resource's client-signed accept instead; the optional `scheme.paymentPolicy` can be registered on the `x402Client` to prefer trusted metered accepts. Server-mode clients also refuse a corrective 402 whose cumulative exceeds their confirmed watermark plus their own unresolved request ceilings. On the server, a route can pin `extra.voucherSigner: "client"` next to a configured operator so one resource lists both accepts, and server-signed accepts advertise a smaller `minDeposit` hint (3x instead of 10x). The facilitator now verifies the payer proof behind `authorization` and server-mode `deposit` payloads in `/verify`. The facilitator advertises `extra.maxIdleSecs` (default seven days, configurable via `maxIdleSecs`, `0` disables) and its rent cleanup abandon-closes an `Open` channel at the onchain settled watermark once it has seen no facilitator-visible lifecycle activity for that long; channel records now carry `lastActivityAt`. Servers copy the window into the 402 so they know how long they have to claim. The server scheme gains `createChannelManager(facilitator, requirements, options)` for the redemption worker. Watermark reads use the manager's `rpcUrl` through `createRpcClient`. The facilitator's open-deposit simulation and rent cleanup run through the signer's RPC like every other read. ([#3164](https://github.com/x402-foundation/x402/pull/3164)) - Thanks [@lgalabru](https://github.com/lgalabru) and [@claude](https://github.com/claude), [@phdargen](https://github.com/phdargen), [@notorious-d-e-v](https://github.com/notorious-d-e-v)!
+- [a349e7f](https://github.com/x402-foundation/x402/commit/a349e7f): Unified SVM facilitator channel storage. Upto and batch settlement share one `PaymentChannelStorage`: opens and activity are recorded before broadcast and a failed write does not broadcast. A failed open is reverted; activity is kept. Delegated caller identity and the batch receiver-authorizer binding live on that row. `UptoChannelStorage`, `UptoDelegatedAuthStore`, `BatchReceiverAuthorizerStore`, and `BatchDelegatedAuthStore` are removed. Delegated mode requires a caller-identity callback and writes that identity on the channel row. ([#3603](https://github.com/x402-foundation/x402/pull/3603)) - Thanks [@phdargen](https://github.com/phdargen) and [@cursoragent](https://github.com/cursoragent)!
+
+### Patch Changes
+
+- [a349e7f](https://github.com/x402-foundation/x402/commit/a349e7f): Batch-settlement client refund flow adds `NoBatchChannelToRefundError`, `clientSignedRefundRequirements`, and `locateRefundChannel` so discovery works when the 402 advertises server-signed mode but the open channel is client-signed or only visible on chain. ([#3603](https://github.com/x402-foundation/x402/pull/3603)) - Thanks [@phdargen](https://github.com/phdargen) and [@cursoragent](https://github.com/cursoragent)!
+- [c84154b](https://github.com/x402-foundation/x402/commit/c84154b): `findPaymentChannelPda` now caches derived channel addresses (bounded LRU, 4,096 entries). The batch-settlement server and facilitator derive the channel PDA on every request; repeat requests on a channel now skip the SHA-256 + off-curve bump search. ([#3601](https://github.com/x402-foundation/x402/pull/3601)) - Thanks [@notorious-d-e-v](https://github.com/notorious-d-e-v)!
+- [a349e7f](https://github.com/x402-foundation/x402/commit/a349e7f): Batch settlement validates payment-channel signer capabilities at construction and records confirmation slots via a signer proxy, removing scattered runtime checks and the `submissionSigner()` wrapper. ([#3603](https://github.com/x402-foundation/x402/pull/3603)) - Thanks [@phdargen](https://github.com/phdargen) and [@cursoragent](https://github.com/cursoragent)!
+  - @x402/core@2.28.0
+
+## 2.27.0
+
+### Minor Changes
+
+- Updated dependencies [5d3a2b2](https://github.com/x402-foundation/x402/commit/5d3a2b2)
+  - @x402/core@2.27.0
+
+## 2.26.0
+
+### Minor Changes
+
+- Updated dependencies [76fe973](https://github.com/x402-foundation/x402/commit/76fe973)
+  - @x402/core@2.26.0
+- [14e9c2a](https://github.com/x402-foundation/x402/commit/14e9c2a): SVM upto facilitator channel-account re-reads now back off linearly (200/400/600/800/1000ms across 6 reads) rather than doubling (200/400/800/1600ms across 5 reads). Replica lag behind a confirmed open is a small multiple of Solana's slot time, so the same 3.0s budget now buys one more read and caps any single wait at 1s. `UptoSvmFacilitatorConfig.channelReadMaxAttempts` and `channelReadBackoffStepMs` make it configurable. ([#3367](https://github.com/x402-foundation/x402/pull/3367)) - Thanks [@PhilBot402](https://github.com/PhilBot402) and [@phdargen](https://github.com/phdargen)!
+- [3c2ddfb](https://github.com/x402-foundation/x402/commit/3c2ddfb): SVM upto delegated claim settle now returns `invalid_upto_svm_delegated_auth_store` when the identity store Get fails, instead of collapsing that outage into unauthenticated. ([#3431](https://github.com/x402-foundation/x402/pull/3431)) - Thanks [@phdargen](https://github.com/phdargen)!
+
 ## 2.25.0
 
 ### Minor Changes
