@@ -1697,10 +1697,21 @@ instruction count.
 In a devnet measurement, a four-channel claim serializes to 1,046 bytes as a
 legacy message and 1,070 bytes as version 1, executes in 1,696 compute units
 (Ed25519 verification is charged separately by the precompile), and costs
-25,000 lamports. The fee is per transaction, so the saving from version 1 comes
-from packing: 18 channels per claim instead of 4 divides the network fee per
-settled channel by about 4.5. A version-1 batch packed at 4 channels saves
-nothing.
+25,000 lamports. The [base fee](https://solana.com/docs/core/fees/fee-structure#base-fee)
+includes both transaction signatures and Ed25519 precompile signatures, so
+each additional channel adds a signature fee.
+
+A read-only devnet `getFeeForMessage` check at slot `508336903` returned
+25,000 lamports for four-channel v0 and v1 claims (one transaction signature
+and four Ed25519 precompile signatures), and 95,000 lamports for an
+18-channel v1 claim (one transaction signature and 18 precompile signatures).
+These fee probes were not live settlement executions. At those full batch
+sizes, packing 18 channels instead of 4 reduces transaction count by a factor
+of 4.5, but reduces the base fee per channel from 6,250 to about 5,278
+lamports, roughly 15.6%, excluding priority fees. Larger batches reduce
+RPC/submission overhead and amortize the transaction-signature fee; the
+per-channel precompile-signature fee remains. A version-1 batch packed at
+4 channels has the same base fee as version 0.
 
 The close authorization does not remove the facilitator's independent
 permissionless lifecycle authority to finalize a forced close at the current
