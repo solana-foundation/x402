@@ -14,13 +14,27 @@ import (
 	"github.com/x402-foundation/x402/go/v2/mechanisms/svm"
 )
 
-func retagMessageVersion(t *testing.T, tx *solana.Transaction, prefix byte) string {
+func encodeUnsupportedV1Transaction(t *testing.T) string {
 	t.Helper()
+	payer := solana.NewWallet()
+	tx, err := solana.NewTransaction(
+		[]solana.Instruction{solana.NewInstruction(solana.MemoProgramID, nil, []byte("v1"))},
+		solana.Hash{},
+		solana.TransactionPayer(payer.PublicKey()),
+		solana.TransactionV1Config(solana.TransactionConfig{}.
+			WithComputeUnitLimit(10_000).
+			WithLoadedAccountsDataSizeLimit(65_536)),
+	)
+	require.NoError(t, err)
+	_, err = tx.Sign(func(key solana.PublicKey) *solana.PrivateKey {
+		if key.Equals(payer.PublicKey()) {
+			return &payer.PrivateKey
+		}
+		return nil
+	})
+	require.NoError(t, err)
 	raw, err := tx.MarshalBinary()
 	require.NoError(t, err)
-	offset := 1 + 64*len(tx.Signatures)
-	require.Equal(t, byte(0x80), raw[offset], "fixture must be a v0 transaction")
-	raw[offset] = prefix
 	return base64.StdEncoding.EncodeToString(raw)
 }
 
@@ -34,10 +48,8 @@ func TestExactSvmSchemeV1_GetExtraAdvertisesTransactionVersions(t *testing.T) {
 }
 
 func TestExactSvmSchemeV1_VerifyRejectsUnsupportedTransactionVersion(t *testing.T) {
-	payload, requirements, facilitatorAddr, tx, ownerKey := buildV1Fixture(t)
-	tx.Message.SetVersion(solana.MessageVersionV0)
-	signV1Tx(t, tx, ownerKey)
-	payload.Payload = (&svm.ExactSvmPayload{Transaction: retagMessageVersion(t, tx, 0x81)}).ToMap()
+	payload, requirements, facilitatorAddr, _, _ := buildV1Fixture(t)
+	payload.Payload = (&svm.ExactSvmPayload{Transaction: encodeUnsupportedV1Transaction(t)}).ToMap()
 
 	signer := &mockV1Signer{addresses: []solana.PublicKey{facilitatorAddr}}
 	scheme := NewExactSvmSchemeV1(signer)
@@ -52,10 +64,8 @@ func TestExactSvmSchemeV1_VerifyRejectsUnsupportedTransactionVersion(t *testing.
 }
 
 func TestExactSvmSchemeV1_SettleRejectsUnsupportedTransactionVersion(t *testing.T) {
-	payload, requirements, facilitatorAddr, tx, ownerKey := buildV1Fixture(t)
-	tx.Message.SetVersion(solana.MessageVersionV0)
-	signV1Tx(t, tx, ownerKey)
-	payload.Payload = (&svm.ExactSvmPayload{Transaction: retagMessageVersion(t, tx, 0x81)}).ToMap()
+	payload, requirements, facilitatorAddr, _, _ := buildV1Fixture(t)
+	payload.Payload = (&svm.ExactSvmPayload{Transaction: encodeUnsupportedV1Transaction(t)}).ToMap()
 
 	signer := &mockV1Signer{addresses: []solana.PublicKey{facilitatorAddr}}
 	scheme := NewExactSvmSchemeV1(signer)
