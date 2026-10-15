@@ -387,6 +387,7 @@ Splits are declared by the Resource Server in `PaymentRequirements.extra.splits`
       {
         "payTo": "3pF8Kg2aHbNvJkLMwEqR7YtDxZ5sGhJn4UV6mWcXrT9A",
         "amount": "50000",
+        "memo": "platform fee",
         "ataCreationRequired": false
       }
     ]
@@ -401,9 +402,10 @@ In the example the client pays `1050000` base units in total: `50000` to the spl
 | `splits` | array | OPTIONAL | 1–8 entries. Absent or empty ⇒ single-payee `exact`. |
 | `splits[].payTo` | string | REQUIRED | Base58-encoded recipient public key. |
 | `splits[].amount` | string | REQUIRED | Decimal string in base units of `asset`. An **absolute** amount, not a percentage or basis points. |
+| `splits[].memo` | string | OPTIONAL | Human-readable label for this leg (e.g. `"platform fee"`, `"referral"`), ≤ 566 bytes. This is what a client displays to the payer when obtaining consent for the split (§5.6); it is **not** emitted as an on-chain Memo instruction and is not verified by the Sponsor. Mirrors `splits[].memo` in the MPP Solana charge draft for wire parity. |
 | `splits[].ataCreationRequired` | boolean | OPTIONAL | Default `false`. Marks this recipient's ATA as possibly needing creation in the payment transaction; authorizes fee-payer-funded creation when the Sponsor advertises `ataCreationSponsored` (§5.4, §5.5). Meaningful only for SPL / Token-2022 assets. |
 
-The primary `payTo` carries the equivalent top-level flag `extra.ataCreationRequired` (default `false`), governed by the same rules (§5.4). Splits carry no per-entry memo: the single on-chain Memo remains governed by `extra.memo` (§3.1), and off-chain reconciliation labels belong in the Resource Server's own records.
+The primary `payTo` carries the equivalent top-level flag `extra.ataCreationRequired` (default `false`), governed by the same rules (§5.4). The single on-chain Memo remains governed by `extra.memo` (§3.1); per-split memos never reach the chain.
 
 Every split shares the top-level `asset`; a split MUST NOT name a different mint. Split `payTo` values MUST be distinct from one another and from the primary `payTo`.
 
@@ -478,7 +480,7 @@ Within what it advertises, a Sponsor retains the policy flexibility of §2.3 (fo
 
 Before signing, the client MUST verify that `extra.splits` — when present — contains only the recipients and amounts it expects. A malicious Resource Server could otherwise inject or alter splits to divert a portion of the payment. Specifically, the client MUST:
 
-- Confirm each split `payTo` and `amount` against the terms it agreed to.
+- Confirm each split `payTo` and `amount` against the terms it agreed to, presenting the split's `memo` (when present) as the human-readable label for that leg.
 - Independently compute the primary remainder (`amount − Σ splits[].amount`) and confirm it is the amount reaching the merchant.
 - Reject requirements whose split recipients or amounts it did not agree to, and reject any `ataCreationRequired: true` it is unwilling to fund.
 
