@@ -1,6 +1,8 @@
 import { describe, it, expect } from "vitest";
 import { ExactEvmScheme } from "../../src/exact/server/scheme";
+import { registerExactEvmScheme } from "../../src/exact/server/register";
 import { convertToTokenAmount } from "@x402/core/utils";
+import { x402ResourceServer } from "@x402/core/server";
 
 describe("ExactEvmScheme (Server)", () => {
   const server = new ExactEvmScheme();
@@ -204,6 +206,16 @@ describe("ExactEvmScheme (Server)", () => {
     });
   });
 
+  describe("paymentFlows", () => {
+    it("declares authorization and upfront with authorization as the default", () => {
+      expect(server.defaultAssetTransferMethod).toBe("eip3009");
+      expect(server.paymentFlows).toEqual({
+        eip3009: { supported: ["authorization", "upfront"], default: "authorization" },
+        permit2: { supported: ["authorization", "upfront"], default: "authorization" },
+      });
+    });
+  });
+
   describe("enhancePaymentRequirements", () => {
     it("should return payment requirements unchanged", async () => {
       const requirements = {
@@ -228,5 +240,22 @@ describe("ExactEvmScheme (Server)", () => {
 
       expect(result).toEqual(requirements);
     });
+  });
+});
+
+describe("registerExactEvmScheme (server)", () => {
+  it("registers the exact scheme on eip155:* when networks are omitted", () => {
+    const server = new x402ResourceServer();
+    registerExactEvmScheme(server);
+    expect(server.hasRegisteredScheme("eip155:*", "exact")).toBe(true);
+    expect(server.getRegisteredScheme("eip155:*", "exact")?.scheme).toBe("exact");
+    expect(server.hasRegisteredScheme("eip155:84532", "exact")).toBe(true);
+  });
+
+  it("registers only the requested networks when a list is provided", () => {
+    const server = new x402ResourceServer();
+    registerExactEvmScheme(server, { networks: ["eip155:8453"] });
+    expect(server.hasRegisteredScheme("eip155:8453", "exact")).toBe(true);
+    expect(server.hasRegisteredScheme("eip155:*", "exact")).toBe(false);
   });
 });

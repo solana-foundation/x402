@@ -316,13 +316,6 @@ type AssetInfo struct {
 	SupportsEip2612     bool
 }
 
-// NetworkConfig contains network-specific configuration
-// See DEFAULT_ASSETS.md for guidelines on adding new chains
-type NetworkConfig struct {
-	ChainID      *big.Int
-	DefaultAsset AssetInfo
-}
-
 // PayloadToMap converts an ExactEIP3009Payload to a map for JSON marshaling
 func (p *ExactEIP3009Payload) ToMap() map[string]interface{} {
 	result := map[string]interface{}{
@@ -540,4 +533,8 @@ type ERC6492SignatureData struct {
 	Factory         [20]byte // CREATE2 factory address (zero address if not ERC-6492)
 	FactoryCalldata []byte   // Calldata to deploy the wallet (empty if not ERC-6492)
 	InnerSignature  []byte   // The actual signature (EIP-1271 or EOA)
+
+	// CodeDeployed reports whether the signer had bytecode, as determined by
+	// VerifyUniversalSignature. Zero value elsewhere.
+	CodeDeployed bool
 }

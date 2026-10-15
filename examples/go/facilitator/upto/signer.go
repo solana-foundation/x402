@@ -73,7 +73,7 @@ func (s *facilitatorSvmSigner) SimulateTransaction(
 	ctx context.Context, tx *solana.Transaction, _ string,
 ) error {
 	result, err := s.rpcClient.SimulateTransactionWithOpts(ctx, tx, &rpc.SimulateTransactionOpts{
-		SigVerify:  true,
+		SigVerify:  false,
 		Commitment: svmmech.DefaultCommitment,
 	})
 	if err != nil {
@@ -122,7 +122,73 @@ func (s *facilitatorSvmSigner) ConfirmTransaction(
 				}
 			}
 		}
-		time.Sleep(svmmech.ConfirmRetryDelay)
+		delay := svmmech.ConfirmRetryDelay
+		if attempt < svmmech.ConfirmInitialAttempts {
+			delay = svmmech.ConfirmInitialRetryDelay
+		}
+		time.Sleep(delay)
 	}
 	return fmt.Errorf("transaction %s was not confirmed in time", signature)
+}
+
+func (s *facilitatorSvmSigner) GetAccountInfo(
+	ctx context.Context,
+	account solana.PublicKey,
+	_ string,
+	opts *rpc.GetAccountInfoOpts,
+) (*rpc.GetAccountInfoResult, error) {
+	return s.rpcClient.GetAccountInfoWithOpts(ctx, account, opts)
+}
+
+func (s *facilitatorSvmSigner) GetLatestBlockhash(ctx context.Context, _ string) (solana.Hash, uint64, error) {
+	latest, err := s.rpcClient.GetLatestBlockhash(ctx, rpc.CommitmentFinalized)
+	if err != nil {
+		return solana.Hash{}, 0, err
+	}
+	return latest.Value.Blockhash, latest.Value.LastValidBlockHeight, nil
+}
+
+func (s *facilitatorSvmSigner) GetSlot(ctx context.Context, _ string, commitment rpc.CommitmentType) (uint64, error) {
+	return s.rpcClient.GetSlot(ctx, commitment)
+}
+
+func (s *facilitatorSvmSigner) SimulateTransactionWithOpts(
+	ctx context.Context,
+	tx *solana.Transaction,
+	_ string,
+	opts *rpc.SimulateTransactionOpts,
+) error {
+	result, err := s.rpcClient.SimulateTransactionWithOpts(ctx, tx, opts)
+	if err != nil {
+		return fmt.Errorf("simulation failed: %w", err)
+	}
+	if result != nil && result.Value != nil && result.Value.Err != nil {
+		return fmt.Errorf("simulation failed: %v", result.Value.Err)
+	}
+	return nil
+}
+
+func (s *facilitatorSvmSigner) GetProgramAccounts(
+	ctx context.Context,
+	_ string,
+	programID solana.PublicKey,
+	opts *rpc.GetProgramAccountsOpts,
+) (rpc.GetProgramAccountsResult, error) {
+	return s.rpcClient.GetProgramAccountsWithOpts(ctx, programID, opts)
+}
+
+func (s *facilitatorSvmSigner) SimulateTransactionWithInnerInstructions(ctx context.Context, tx *solana.Transaction, _ string) ([]rpc.InnerInstruction, error) {
+	return svmmech.SimulateWithInnerInstructions(ctx, s.rpcClient, tx)
+}
+
+func (s *facilitatorSvmSigner) GetConfirmedTransactionInnerInstructions(ctx context.Context, signature solana.Signature, _ string) ([]rpc.InnerInstruction, solana.PublicKeySlice, error) {
+	return svmmech.ConfirmedTransactionInnerInstructions(ctx, s.rpcClient, signature)
+}
+
+func (s *facilitatorSvmSigner) GetTokenAccountBalance(ctx context.Context, tokenAccount solana.PublicKey, _ string) (uint64, bool, error) {
+	return svmmech.TokenAccountBalance(ctx, s.rpcClient, tokenAccount)
+}
+
+func (s *facilitatorSvmSigner) FetchAddressLookupTables(ctx context.Context, tables []solana.PublicKey, _ string) (map[solana.PublicKey]solana.PublicKeySlice, error) {
+	return svmmech.AddressLookupTables(ctx, s.rpcClient, tables)
 }

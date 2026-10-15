@@ -50,7 +50,7 @@ Four edits, no catalog type to touch:
 3. **Client** — register the scheme in `clients/<lang>/` (e.g. [`clients/typescript/client.ts`](clients/typescript/client.ts) / [`clients/python/client.py`](clients/python/client.py) / [`clients/go/client.go`](clients/go/client.go)).
 4. **Facilitator** — register the scheme in [`facilitators/typescript`](facilitators/typescript) / [`facilitators/go`](facilitators/go) / [`facilitators/python`](facilitators/python).
 
-Also add `SERVER_*` / `CLIENT_*` / `FACILITATOR_*` secrets to [`.env-local`](.env-local) and the [Environment Variables](#environment-variables) section below. HTTP frameworks, Next, and MCP all pick up routes and scheme registration from the language-root modules — no per-framework CAIP-2 tables. Only custom flows (e.g. svm-smart-wallet) keep a local `endpoints` overlay.
+Also add `SERVER_*` / `CLIENT_*` / `FACILITATOR_*` secrets to [`.env-local`](.env-local) and the [Environment Variables](#environment-variables) section below. HTTP frameworks, Next, and MCP all pick up routes and scheme registration from the language-root modules — no per-framework CAIP-2 tables. Custom client surfaces (e.g. svm-smart-wallet) keep a local `test.config.json` overlay for narrowing (`protocolFamilies`, `facilitators`, extra env) — not a separate catalog route.
 
 ## Add an HTTP framework
 
@@ -61,13 +61,13 @@ Also add `SERVER_*` / `CLIENT_*` / `FACILITATOR_*` secrets to [`.env-local`](.en
 
 ## Custom flows (escape hatches)
 
-These keep local `endpoints` overlays and/or special orchestration — not just a catalog append:
+These keep local `test.config.json` overlays and/or special orchestration — not just a catalog append:
 
 | Flow | Where it lives |
 |------|----------------|
 | Batch-settlement multi-phase | Catalog `routes` entries + orchestration in [`test.ts`](test.ts) + shared scheme registration |
 | Gas sponsoring / Permit2 coldstart | Route `schemeOptions.coldstart` + declared gas `extensions` + fund/revoke/drain in `test.ts` + facilitator extension registration |
-| Swig smart wallet | Overlay [`clients/typescript/http/svm-smart-wallet/test.config.json`](clients/typescript/http/svm-smart-wallet/test.config.json) + [`scripts/swig-setup.ts`](scripts/swig-setup.ts) |
+| Swig smart wallet | Client overlay [`clients/typescript/http/svm-smart-wallet/test.config.json`](clients/typescript/http/svm-smart-wallet/test.config.json) (`protocolFamilies`, `facilitators`, Swig env) + [`scripts/swig-setup.ts`](scripts/swig-setup.ts); uses catalog route `/exact/svm` |
 | Legacy (v1) | `legacy/` trees only — separate configs; do not extend the mechanisms catalog for v1 |
 
 If an SDK implements a route end-to-end (client + server + facilitator), list it in that route’s `sdks`. Omit only when the mechanism package is missing (e.g. Go has no TVM; Python/Go have no AVM/NEAR/XRPL; Python has no SVM upto).
@@ -113,6 +113,15 @@ cd facilitators/go
 go mod tidy && go build -o go .
 ```
 
+### Wallet status
+
+Print facilitator / client / server addresses plus facilitator native and client payment-token balances for every family whose catalog-required env keys are set.
+
+```bash
+pnpm wallet:status
+pnpm wallet:status --mainnet
+```
+
 ## Usage
 
 ### Interactive Test Mode
@@ -128,6 +137,8 @@ Launches an interactive CLI where you can select:
 - **Extensions** - Additional features like Bazaar discovery
 - **Protocols** - EVM, SVM, AVM, Aptos, Concordium, Hedera, NEAR, Stellar, and/or TVM networks
 - **Payment schemes** (when multiple apply) - `exact`, `upto`, or `batch-settlement`
+- **Payment flows** (when multiple apply) - `authorization`, `upfront`, or `escrow`
+- **Asset transfer methods** (when multiple apply) - `eip3009`, `permit2`, `sequence`, or `ticketSequence`
 
 Every valid combination of your selections will be tested. For example, selecting 2 facilitators, 3 servers, and 2 clients will generate and run all compatible test scenarios.
 
@@ -198,6 +209,7 @@ CLIENT_HEDERA_ACCOUNT_ID=0.0....    # Hedera account id for client payments
 CLIENT_HEDERA_PRIVATE_KEY=0x...     # Hedera ECDSA private key for client payments
 CLIENT_KEETA_MNEMONIC=...           # Keeta mnemonic for client payments
 CLIENT_STELLAR_PRIVATE_KEY=...      # Stellar private key for client payments
+CLIENT_CARDANO_MNEMONIC=...         # Cardano wallet mnemonic (24 words) for client payments
 CLIENT_TVM_PRIVATE_KEY=...          # TVM private key for client payments
 CLIENT_NEAR_ACCOUNT_ID=...          # NEAR payer account id that owns the access key
 CLIENT_NEAR_PRIVATE_KEY=ed25519:... # NEAR private key for that payer account
@@ -230,7 +242,16 @@ FACILITATOR_STELLAR_PRIVATE_KEY=... # Stellar private key for facilitator
 FACILITATOR_TVM_PRIVATE_KEY=...     # TVM private key for facilitator
 FACILITATOR_NEAR_ACCOUNT_ID=...     # NEAR relayer account id (submits meta-tx, sponsors gas)
 FACILITATOR_NEAR_PRIVATE_KEY=ed25519:... # NEAR relayer private key
+FACILITATOR_CARDANO_MNEMONIC=...    # Optional: the Cardano facilitator only broadcasts, so it runs provider-only without a mnemonic
 # XRPL needs no facilitator wallet — the facilitator is keyless (payer signs and pays fees)
+
+BLOCKFROST_PROJECT_ID=preprod...    # Blockfrost preprod project id (get one at blockfrost.io)
+CARDANO_TESTNET_RPC_URL=...         # Optional Blockfrost base URL override (default https://cardano-preprod.blockfrost.io/api/v0)
+CARDANO_L1_CONFIRMATIONS=           # Optional (-1..20). Unset = 1 confirmation; -1 = mempool (faster local runs)
+SERVER_CARDANO_SELLER_MNEMONIC=     # Masumi quote signer (no funds needed)
+# SERVER_CARDANO_SCRIPT_ADDRESS=    # Optional script-route payee (default: always-succeeds fixture)
+# SERVER_CARDANO_SCRIPT_CODE=       # Optional script-route validator hex
+# SERVER_CARDANO_SCRIPT_DATUM=      # Optional script-route inline datum hex
 
 # Concordium network override
 CCD_NETWORK=ccd:4221332d34e1694168c2a0c0b3fd0f27  # Optional; defaults to testnet
@@ -253,6 +274,14 @@ TVM_PROVIDER=tonapi \
 TVM_TONAPI_API_KEY=<tonapi-key> \
 pnpm test --testnet --families=tvm --facilitators=python --clients=python/http/httpx,python/http/requests --servers=python/http/fastapi,python/http/flask --min -v
 ```
+
+Catalog dimensions can also be filtered from the CLI (`pnpm test --help` for the full list):
+
+```bash
+pnpm test --testnet --min --families=evm --sdk=ts --paymentflow=upfront --assetTransferMethod=eip3009
+```
+
+`--sdk` keeps scenarios whose client, server, and facilitator are that language (`ts` / `typescript`, `py` / `python`, `go`). `--paymentflow` and `--assetTransferMethod` match the catalog route fields (omitted `paymentFlow` is `authorization`).
 
 Optional environment variables (batch-settlement scheme):
 
@@ -329,6 +358,12 @@ You need **three separate NEAR testnet accounts** for e2e tests — client (paye
 1. Create three testnet accounts (e.g. via [MyNearWallet testnet](https://testnet.mynearwallet.com/) or `near create-account`); export each account's private key (`ed25519:...`) — e.g. from `~/.near-credentials/testnet/<account>.json`.
 2. Fund the **facilitator (relayer)** account with testnet NEAR for gas from the [NEAR faucet](https://near-faucet.io/). The relayer submits the NEP-366 `SignedDelegate` and sponsors gas, so the payer spends zero gas.
 3. Give the **client (payer)** the payment token. The default asset is **wNEAR** (`wrap.testnet`, a NEP-141): wrap NEAR via `wrap.testnet` `near_deposit`. Both payer and merchant must be `storage_deposit`-registered on the token contract.
+
+#### Cardano Preprod
+
+1. Create a preprod wallet (CIP-30 wallet or `PrivateKey.generateMnemonic()` from `@evolution-sdk/evolution`) and set `CLIENT_CARDANO_MNEMONIC` plus `SERVER_CARDANO_ADDRESS` (the client's `addr_test1...` works).
+2. Fund the client wallet with test ADA from the [Cardano testnets faucet](https://docs.cardano.org/cardano-testnets/tools/faucet/) (select **Preprod**). Override the asset with `SERVER_CARDANO_ASSET` / `SERVER_CARDANO_AMOUNT` for token runs.
+3. Get a free **Blockfrost** preprod project id at [blockfrost.io](https://blockfrost.io/) and set `BLOCKFROST_PROJECT_ID`.
 
 > **Note:** payer key = `CLIENT_NEAR_*`, relayer key = `FACILITATOR_NEAR_*`, merchant = `SERVER_NEAR_ADDRESS`. `CLIENT_NEAR_ACCOUNT_ID` is required because a NEAR private key identifies a public key, but the signer must also know which account owns that access key to read its nonce and set the delegated action `senderId`. Override the token with `SERVER_NEAR_ASSET` / `SERVER_NEAR_AMOUNT` (defaults: `wrap.testnet` / `1000000000000000000000` = 0.001 wNEAR; set them to a NEP-141 like Circle USDC for stablecoin runs).
 

@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	solana "github.com/gagliardetto/solana-go"
+	"github.com/gagliardetto/solana-go/rpc"
 )
 
 // ExactSvmPayload represents a SVM (Solana) payment payload
@@ -18,6 +19,9 @@ type ExactSvmPayloadV1 = ExactSvmPayload
 
 // ExactSvmPayloadV2 - alias for v2 (currently identical, reserved for future)
 type ExactSvmPayloadV2 = ExactSvmPayload
+
+// UptoSvmPayloadV2 is an alias for v2 compatibility.
+type UptoSvmPayloadV2 = UptoSvmPayload
 
 // UptoSvmPayload is the SVM `upto` payment payload: the client-signed channel
 // `open` plus the channel facts the facilitator rebinds it against.
@@ -44,11 +48,26 @@ type UptoSvmPayload struct {
 	OpenTransaction string `json:"openTransaction"`
 	// VoucherSignature is the base58 Ed25519 voucher signature by AuthorizedSigner.
 	// Claim-only and server-owned: verify and deposit settle reject any client-supplied value.
+	// Omitted when the channel delegates receiver authorization to the facilitator.
 	VoucherSignature string `json:"voucherSignature,omitempty"`
+	// Type is the per-settle phase stamped by the resource server. Not part of
+	// the client authorization (that payload is reused for deposit and claim).
+	// Verify rejects it if present. Required when the channel delegates
+	// receiver authorization.
+	Type string `json:"type,omitempty"`
 }
 
 // UptoVoucherSignatureField is the payload key carrying the settle-time voucher.
 const UptoVoucherSignatureField = "voucherSignature"
+
+// UptoPayloadTypeField is the payload key carrying the server-stamped settle phase.
+const UptoPayloadTypeField = "type"
+
+// Server-stamped settle phases for SVM `upto`.
+const (
+	UptoPayloadTypeDeposit = "deposit"
+	UptoPayloadTypeClaim   = "claim"
+)
 
 // ToMap converts an UptoSvmPayload to a map for JSON marshaling.
 func (p *UptoSvmPayload) ToMap() map[string]interface{} {
@@ -66,6 +85,9 @@ func (p *UptoSvmPayload) ToMap() map[string]interface{} {
 	}
 	if p.VoucherSignature != "" {
 		out[UptoVoucherSignatureField] = p.VoucherSignature
+	}
+	if p.Type != "" {
+		out[UptoPayloadTypeField] = p.Type
 	}
 	return out
 }
@@ -98,6 +120,9 @@ func UptoPayloadFromMap(data map[string]interface{}) (*UptoSvmPayload, error) {
 			return nil, fmt.Errorf("missing %s field in payload", field)
 		}
 	}
+	if payload.Type != "" && payload.Type != UptoPayloadTypeDeposit && payload.Type != UptoPayloadTypeClaim {
+		return nil, fmt.Errorf("invalid type field in payload")
+	}
 
 	return &payload, nil
 }
@@ -116,7 +141,38 @@ func IsUptoSvmPayload(payload map[string]interface{}) bool {
 			return false
 		}
 	}
+	if !jsonNumberIsInt64(payload["expiresAt"]) {
+		return false
+	}
+	if !jsonNumberIsInt64(payload["validAfter"]) {
+		return false
+	}
+	if voucher, present := payload[UptoVoucherSignatureField]; present {
+		if _, ok := voucher.(string); !ok {
+			return false
+		}
+	}
+	if payloadType, present := payload[UptoPayloadTypeField]; present {
+		typed, ok := payloadType.(string)
+		if !ok || (typed != UptoPayloadTypeDeposit && typed != UptoPayloadTypeClaim) {
+			return false
+		}
+	}
 	return true
+}
+
+func jsonNumberIsInt64(value interface{}) bool {
+	switch v := value.(type) {
+	case float64:
+		return v == float64(int64(v))
+	case int64, int:
+		return true
+	case json.Number:
+		_, err := v.Int64()
+		return err == nil
+	default:
+		return false
+	}
 }
 
 // HasUptoVoucherSignature reports whether the payload carries the voucher key
@@ -124,6 +180,14 @@ func IsUptoSvmPayload(payload map[string]interface{}) bool {
 // deposit settle, so an empty client-supplied value is still a rejection.
 func HasUptoVoucherSignature(payload map[string]interface{}) bool {
 	_, present := payload[UptoVoucherSignatureField]
+	return present
+}
+
+// HasUptoPayloadType reports whether the payload carries the server-stamped
+// settle-phase key. Presence is rejected at verify: the client authorization
+// must not include it.
+func HasUptoPayloadType(payload map[string]interface{}) bool {
+	_, present := payload[UptoPayloadTypeField]
 	return present
 }
 
@@ -149,8 +213,9 @@ type FacilitatorSvmSigner interface {
 	// Returns error if no signer exists for feePayer or signing fails
 	SignTransaction(ctx context.Context, tx *solana.Transaction, feePayer solana.PublicKey, network string) error
 
-	// SimulateTransaction simulates a signed transaction to verify it would succeed
-	// Returns error if simulation fails
+	// SimulateTransaction simulates a transaction to verify it would succeed.
+	// Does not verify signatures (RPC sigVerify is off). Callers must verify
+	// required signatures themselves; the fee-payer slot may be empty.
 	SimulateTransaction(ctx context.Context, tx *solana.Transaction, network string) error
 
 	// SendTransaction sends a signed transaction to the network
@@ -160,6 +225,39 @@ type FacilitatorSvmSigner interface {
 	// ConfirmTransaction waits for transaction confirmation
 	// Returns error if confirmation fails or times out
 	ConfirmTransaction(ctx context.Context, signature solana.Signature, network string) error
+}
+
+// FacilitatorSimulateTransactionOptions configures facilitator transaction
+// simulation. Nil pointer fields use RPC defaults (sigVerify off,
+// replaceRecentBlockhash off).
+type FacilitatorSimulateTransactionOptions struct {
+	SigVerify              *bool
+	ReplaceRecentBlockhash *bool
+	Commitment             rpc.CommitmentType
+}
+
+// FacilitatorAccountInfo is the account shape returned by GetAccountInfo on
+// facilitator signers that expose read RPC.
+type FacilitatorAccountInfo struct {
+	Data     solana.Data
+	Owner    solana.PublicKey
+	Lamports uint64
+}
+
+// FacilitatorProgramAccount is one row from GetProgramAccounts.
+type FacilitatorProgramAccount struct {
+	Pubkey  solana.PublicKey
+	Account FacilitatorAccountInfo
+}
+
+// SmartWalletRPCCapabilities is the extra read-only RPC surface a
+// FacilitatorSvmSigner must also provide for a facilitator to verify payments
+// made by a smart wallet.
+type SmartWalletRPCCapabilities interface {
+	SimulateTransactionWithInnerInstructions(ctx context.Context, tx *solana.Transaction, network string) ([]rpc.InnerInstruction, error)
+	GetConfirmedTransactionInnerInstructions(ctx context.Context, signature solana.Signature, network string) ([]rpc.InnerInstruction, solana.PublicKeySlice, error)
+	GetTokenAccountBalance(ctx context.Context, tokenAccount solana.PublicKey, network string) (uint64, bool, error)
+	FetchAddressLookupTables(ctx context.Context, tables []solana.PublicKey, network string) (map[solana.PublicKey]solana.PublicKeySlice, error)
 }
 
 // ReceiverAuthorizerSigner is the server-controlled hot key advertised as
@@ -173,20 +271,18 @@ type ReceiverAuthorizerSigner interface {
 	SignMessage(ctx context.Context, message []byte) ([]byte, error)
 }
 
+// NetworkConfig holds static transport endpoints for a Solana network.
+// Default assets live in DefaultAssets, not here.
+type NetworkConfig struct {
+	RPCURL string
+	WSURL  string
+}
+
 // AssetInfo contains information about a SPL token
 type AssetInfo struct {
 	Address  string // Mint address
 	Symbol   string // Token symbol (e.g., "USDC")
 	Decimals int    // Token decimals
-}
-
-// NetworkConfig contains network-specific configuration
-// See DEFAULT_ASSETS.md for guidelines on adding new chains
-type NetworkConfig struct {
-	Name         string    // Network name
-	CAIP2        string    // CAIP-2 identifier
-	RPCURL       string    // Default RPC URL
-	DefaultAsset AssetInfo // Default stablecoin
 }
 
 // ClientConfig contains optional client configuration
@@ -228,15 +324,6 @@ func PayloadFromMap(data map[string]interface{}) (*ExactSvmPayload, error) {
 
 // IsValidNetwork checks if the network is supported for Solana
 func IsValidNetwork(network string) bool {
-	// Check CAIP-2 format
-	if _, ok := NetworkConfigs[network]; ok {
-		return true
-	}
-
-	// Check V1 format
-	if _, ok := V1ToV2NetworkMap[network]; ok {
-		return true
-	}
-
-	return false
+	_, err := NormalizeNetwork(network)
+	return err == nil
 }

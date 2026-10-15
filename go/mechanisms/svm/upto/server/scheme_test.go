@@ -107,9 +107,9 @@ func TestDynamicExtraFieldsExcludeRegeneratedHints(t *testing.T) {
 	)
 }
 
-func TestNewUptoSvmSchemeRequiresAnAuthorizer(t *testing.T) {
-	assert.Panics(t, func() { NewUptoSvmScheme(nil) })
-	assert.Panics(t, func() { NewUptoSvmScheme(&Config{}) })
+func TestNewUptoSvmSchemeAllowsOmittingAnAuthorizer(t *testing.T) {
+	assert.NotPanics(t, func() { NewUptoSvmScheme(nil) })
+	assert.NotPanics(t, func() { NewUptoSvmScheme(&Config{}) })
 }
 
 func TestParsePrice(t *testing.T) {
@@ -215,6 +215,27 @@ func TestEnhancePaymentRequirements(t *testing.T) {
 	assert.Equal(t, uint32(paymentchannels.DefaultGracePeriodSeconds), enhanced.Extra[upto.ExtraWithdrawDelay],
 		"the grace period defaults to 900s when maxTimeoutSeconds is shorter")
 	assert.NotContains(t, enhanced.Extra, upto.ExtraRecentBlockhash, "blockhash hints need a configured RPC")
+}
+
+func TestEnhancePaymentRequirementsRejectsUnsupportedNetwork(t *testing.T) {
+	scheme, _ := newTestScheme(t)
+	requirements := types.PaymentRequirements{
+		Scheme:            svm.SchemeUpto,
+		Network:           "solana:fake",
+		Amount:            "10000",
+		Asset:             svm.USDCDevnetAddress,
+		PayTo:             solana.SysVarRentPubkey.String(),
+		MaxTimeoutSeconds: 600,
+	}
+	supportedKind := types.SupportedKind{
+		Scheme:  svm.SchemeUpto,
+		Network: "solana:fake",
+		Extra:   map[string]interface{}{upto.ExtraFeePayer: solana.SysVarClockPubkey.String()},
+	}
+
+	_, err := scheme.EnhancePaymentRequirements(context.Background(), requirements, supportedKind, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unsupported Solana network")
 }
 
 // Token-2022 mints must be advertised with their own program: the client seals
@@ -406,7 +427,7 @@ func TestSettleOnCancelRefundsOnlyFailedHandlers(t *testing.T) {
 	}
 }
 
-func TestEnrichSettlementPayloadSkipsTheDepositSettle(t *testing.T) {
+func TestEnrichSettlementPayloadStampsDepositTypeWithoutAVoucher(t *testing.T) {
 	scheme, authorizer := newTestScheme(t)
 
 	fields, err := scheme.EnrichSettlementPayload(x402.SettleContext{
@@ -417,7 +438,7 @@ func TestEnrichSettlementPayloadSkipsTheDepositSettle(t *testing.T) {
 	})
 
 	require.NoError(t, err)
-	assert.Nil(t, fields, "the deposit settle carries no voucher because no usage has occurred")
+	assert.Equal(t, map[string]interface{}{svm.UptoPayloadTypeField: svm.UptoPayloadTypeDeposit}, fields)
 }
 
 func TestEnrichSettlementPayloadSignsTheMeteredVoucher(t *testing.T) {
@@ -446,6 +467,7 @@ func TestEnrichSettlementPayloadSignsTheMeteredVoucher(t *testing.T) {
 
 			signatureBase58, ok := fields[svm.UptoVoucherSignatureField].(string)
 			require.True(t, ok, "the voucher signature is returned as base58")
+			assert.Equal(t, svm.UptoPayloadTypeClaim, fields[svm.UptoPayloadTypeField])
 
 			decoded, err := svm.UptoPayloadFromMap(payload.Payload)
 			require.NoError(t, err)
@@ -495,7 +517,7 @@ func TestEnrichSettlementPayloadIgnoresForeignPayloads(t *testing.T) {
 	})
 
 	require.NoError(t, err)
-	assert.Nil(t, fields)
+	assert.Equal(t, map[string]interface{}{svm.UptoPayloadTypeField: svm.UptoPayloadTypeClaim}, fields)
 }
 
 func TestEnrichSettlementPayloadRejectsANonIntegerAmount(t *testing.T) {
@@ -509,4 +531,141 @@ func TestEnrichSettlementPayloadRejectsANonIntegerAmount(t *testing.T) {
 	})
 
 	require.ErrorContains(t, err, ErrInvalidPayload)
+}
+
+func TestServerDelegatedReceiverAuthorizerFallsBackToFacilitatorExtra(t *testing.T) {
+	advertised := svm.USDCMainnetAddress
+	delegated := NewUptoSvmScheme(&Config{WithdrawDelay: 3600})
+	supportedKind := types.SupportedKind{
+		X402Version: 2,
+		Scheme:      svm.SchemeUpto,
+		Network:     testNetwork,
+		Extra: map[string]interface{}{
+			upto.ExtraFeePayer:           advertised,
+			upto.ExtraReceiverAuthorizer: advertised,
+		},
+	}
+	requirements := types.PaymentRequirements{
+		Scheme:            svm.SchemeUpto,
+		Network:           testNetwork,
+		Asset:             svm.USDCDevnetAddress,
+		Amount:            "1000000",
+		PayTo:             solana.SysVarRentPubkey.String(),
+		MaxTimeoutSeconds: 300,
+		Extra:             map[string]interface{}{},
+	}
+
+	result, err := delegated.EnhancePaymentRequirements(context.Background(), requirements, supportedKind, nil)
+	require.NoError(t, err)
+	assert.Equal(t, advertised, result.Extra[upto.ExtraReceiverAuthorizer])
+}
+
+func TestServerDelegatedReceiverAuthorizerThrowsWhenNeitherSideSuppliesOne(t *testing.T) {
+	advertised := svm.USDCMainnetAddress
+	delegated := NewUptoSvmScheme(&Config{WithdrawDelay: 3600})
+	requirements := types.PaymentRequirements{
+		Scheme:            svm.SchemeUpto,
+		Network:           testNetwork,
+		Asset:             svm.USDCDevnetAddress,
+		Amount:            "1000000",
+		PayTo:             solana.SysVarRentPubkey.String(),
+		MaxTimeoutSeconds: 300,
+		Extra:             map[string]interface{}{},
+	}
+
+	_, err := delegated.EnhancePaymentRequirements(
+		context.Background(),
+		requirements,
+		types.SupportedKind{
+			X402Version: 2,
+			Scheme:      svm.SchemeUpto,
+			Network:     testNetwork,
+			Extra:       map[string]interface{}{upto.ExtraFeePayer: advertised},
+		},
+		nil,
+	)
+	require.ErrorContains(t, err, "valid extra.receiverAuthorizer")
+}
+
+func TestValidateFacilitatorSupportFailsWithoutLocalSignerOrAdvertisement(t *testing.T) {
+	advertised := svm.USDCMainnetAddress
+	delegated := NewUptoSvmScheme(&Config{WithdrawDelay: 3600})
+
+	err := delegated.ValidateFacilitatorSupport(testNetwork, types.SupportedKind{
+		X402Version: 2,
+		Scheme:      svm.SchemeUpto,
+		Network:     testNetwork,
+		Extra:       map[string]interface{}{upto.ExtraFeePayer: advertised},
+	}, nil)
+	require.ErrorContains(t, err, "receiverAuthorizer")
+}
+
+func TestValidateFacilitatorSupportAcceptsFacilitatorAdvertisedAuthorizer(t *testing.T) {
+	advertised := svm.USDCMainnetAddress
+	delegated := NewUptoSvmScheme(&Config{WithdrawDelay: 3600})
+
+	err := delegated.ValidateFacilitatorSupport(testNetwork, types.SupportedKind{
+		X402Version: 2,
+		Scheme:      svm.SchemeUpto,
+		Network:     testNetwork,
+		Extra: map[string]interface{}{
+			upto.ExtraFeePayer:           advertised,
+			upto.ExtraReceiverAuthorizer: advertised,
+		},
+	}, nil)
+	require.NoError(t, err)
+}
+
+func TestEnrichSettlementPayloadStampsTypeAndOmitsVoucherWhenDelegating(t *testing.T) {
+	advertised := svm.USDCMainnetAddress
+	delegated := NewUptoSvmScheme(&Config{WithdrawDelay: 3600})
+	requirements := types.PaymentRequirements{
+		Scheme:            svm.SchemeUpto,
+		Network:           testNetwork,
+		Asset:             svm.USDCDevnetAddress,
+		Amount:            "1000000",
+		PayTo:             solana.SysVarRentPubkey.String(),
+		MaxTimeoutSeconds: 300,
+		Extra:             map[string]interface{}{},
+	}
+	payload := types.PaymentPayload{
+		X402Version: 2,
+		Accepted:    requirements,
+		Payload: (&svm.UptoSvmPayload{
+			From:             solana.SysVarRentPubkey.String(),
+			MaxAmount:        "1000000",
+			Deposit:          "1000000",
+			ChannelId:        svm.USDCMainnetAddress,
+			AuthorizedSigner: advertised,
+			OpenTransaction:  "unused",
+			OpenSlot:         "341000000",
+			ExpiresAt:        1893456000,
+			ValidAfter:       0,
+			Nonce:            "1",
+		}).ToMap(),
+	}
+
+	deposit, err := delegated.EnrichSettlementPayload(x402.SettleContext{
+		Payload:      payload,
+		Requirements: requirements,
+		Phase:        x402.SettlePhaseBeforeHandler,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, map[string]interface{}{svm.UptoPayloadTypeField: svm.UptoPayloadTypeDeposit}, deposit)
+
+	claim, err := delegated.EnrichSettlementPayload(x402.SettleContext{
+		Payload: payload,
+		Requirements: types.PaymentRequirements{
+			Scheme:            requirements.Scheme,
+			Network:           requirements.Network,
+			Asset:             requirements.Asset,
+			Amount:            "1858",
+			PayTo:             requirements.PayTo,
+			MaxTimeoutSeconds: requirements.MaxTimeoutSeconds,
+			Extra:             requirements.Extra,
+		},
+		Phase: x402.SettlePhaseAfterHandler,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, map[string]interface{}{svm.UptoPayloadTypeField: svm.UptoPayloadTypeClaim}, claim)
 }

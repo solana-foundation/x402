@@ -18,10 +18,11 @@ x402 uses [CAIP-2](https://chainagnostic.org/CAIPs/caip-2) standard network iden
 - **NEAR**: `near:<network>` (`mainnet` or `testnet`)
 - **Concordium**: `ccd:<genesisHash>` (e.g., `ccd:9dd9ca4d19e9393877d2c44b70f89acb` for mainnet)
 - **XRPL**: `xrpl:<networkId>` (e.g., `xrpl:0` for mainnet, `xrpl:1` for testnet)
+- **Cardano**: `cardano:<network>` (`mainnet`, `preprod`, or `preview`). CIP-34 aliases (`cip34:1-764824073`, `cip34:0-1`, `cip34:0-2`) are accepted as input aliases and normalized to the canonical form.
 
 ## Token Support
 
-x402 supports tokens on EVM, Solana, TON, Algorand (AVM), Stellar, Aptos, Hedera, Keeta, NEAR, Concordium, and XRPL networks:
+x402 supports tokens on EVM, Solana, TON, Algorand (AVM), Stellar, Aptos, Hedera, Keeta, NEAR, Concordium, XRPL, and Cardano networks:
 
 | Ecosystem | Supported Tokens | Transfer Method |
 |-----------|------------------|-----------------|
@@ -36,6 +37,7 @@ x402 supports tokens on EVM, Solana, TON, Algorand (AVM), Stellar, Aptos, Hedera
 | **NEAR** | Any NEP-141 token | NEP-366 `SignedDelegate` authorizing `ft_transfer` |
 | **Concordium** | CCD or any PLT token (e.g., EURR) | Sponsored V1 transfer |
 | **XRPL** | XRP or any issued currency (e.g., RLUSD) | Payer-signed `Payment` transaction |
+| **Cardano** | ADA (lovelace) or any Cardano Native Token (e.g., USDM) | Client-signed, facilitator-submitted transaction |
 
 Facilitators support **networks**, not specific tokens — any compatible token works on any facilitator that supports that network.
 
@@ -109,6 +111,8 @@ When you use `"$0.01"` syntax, x402 needs to know which stablecoin to use. The f
 |-------|--------|---------------|--------------|----------|-----------------|
 | Base | `eip155:8453` | `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913` | USD Coin | 6 | EIP-3009 |
 | Base Sepolia | `eip155:84532` | `0x036CbD53842c5426634e7929541eC2318f3dCF7e` | USDC | 6 | EIP-3009 |
+| Ethereum | `eip155:1` | `0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48` | USD Coin | 6 | EIP-3009 |
+| Avalanche C-Chain | `eip155:43114` | `0xB97EF9Ef8734C71904D8002F8b6Bc66Dd9c48a6E` | USD Coin | 6 | EIP-3009 |
 | Polygon | `eip155:137` | `0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359` | USD Coin | 6 | EIP-3009 |
 | Arbitrum One | `eip155:42161` | `0xaf88d065e77c8cC2239327C5EDb3A432268e5831` | USD Coin | 6 | EIP-3009 |
 | Arbitrum Sepolia | `eip155:421614` | `0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d` | USD Coin | 6 | EIP-3009 |
@@ -129,6 +133,8 @@ When you use `"$0.01"` syntax, x402 needs to know which stablecoin to use. The f
 | Flare | `eip155:14` | `0xe7cd86e13AC4309349F30B3435a9d337750fC82D` | USD₮0 | 6 | EIP-3009 |
 | Celo | `eip155:42220` | `0xcebA9300f2b948710d2653dD7B07f33A8B32118C` | USDC | 6 | EIP-3009 |
 | Celo Sepolia | `eip155:11142220` | `0x01C5C0122039549AD1493B8220cABEdD739BC44E` | USDC | 6 | EIP-3009 |
+| Sei | `eip155:1329` | `0xe15fC38F6D8c56aF07bbCBe3BAf5708A2Bf42392` | USDC | 6 | EIP-3009 |
+| Sei Testnet | `eip155:1328` | `0x4fCF1784B31630811181f670Aea7A7bEF803eaED` | USDC | 6 | EIP-3009 |
 
 
 
@@ -189,6 +195,15 @@ HBAR (native token) is also supported using asset ID `0.0.0`, with amounts in ti
 |-------|--------|----------------|----------|
 | NEAR Mainnet | `near:mainnet` | `17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1` (USDC) | 6 |
 | NEAR Testnet | `near:testnet` | `3e2210e1184b45b64c8a434c0a7e7b23cc04ea7eb7a6c3c32520d03d4afcb8af` (USDC) | 6 |
+
+### Cardano
+
+| Chain | CAIP-2 | Token | Decimals |
+|-------|--------|-------|----------|
+| Cardano Mainnet | `cardano:mainnet` | `c48cbb3d5e57ed56e276bc45f99ab39abe94e6cd7ac39fb402da47ad.0014df105553444d` (USDM) | 6 |
+| Cardano Preprod | `cardano:preprod` | `e675b46e4d2242c991a8932a99db3044e80515ae14b4c4ccf6b3f4c9.0014df10745553444d` (tUSDM) | 6 |
+
+ADA (lovelace) is also supported natively using asset `lovelace`, with amounts in lovelace (1 ADA = 1,000,000 lovelace). The client pays the Cardano network fee; the facilitator only broadcasts the signed transaction and requires no funded wallet.
 
 ## Adding Support for New Networks
 
@@ -335,7 +350,7 @@ Video Guide: [Adding EVM Chains to x402](https://x.com/jaycoolh/status/192085155
 
 Key takeaways:
 
-* **Any EVM chain** is supported via `eip155:<chainId>` — plus Solana, TON (TVM), Algorand (AVM), Stellar, Aptos, Hedera, Keeta, NEAR, Concordium, and XRPL
+* **Any EVM chain** is supported via `eip155:<chainId>` — plus Solana, TON (TVM), Algorand (AVM), Stellar, Aptos, Hedera, Keeta, NEAR, Concordium, XRPL, and Cardano
 * [Default assets](#default-assets-for-dollar-string-pricing) are a convenience for `"$0.01"` dollar-string pricing; explicit `TokenAmount` works on any chain
 * Any ERC-20 token works on any EVM facilitator (via EIP-3009 or Permit2)
 * CAIP-2 identifiers provide unambiguous cross-chain support

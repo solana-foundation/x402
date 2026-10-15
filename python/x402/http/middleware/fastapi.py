@@ -21,6 +21,7 @@ except ImportError as e:
     ) from e
 
 from ...schemas import SettleResponse, VerifiedPaymentCancelOptions
+from ..background_init import handle_background_init_error
 from ..constants import SETTLEMENT_OVERRIDES_HEADER
 from ..facilitator_client_base import FacilitatorResponseError
 from ..types import (
@@ -178,7 +179,7 @@ def payment_middleware(
         server: Pre-configured x402ResourceServer.
         paywall_config: Optional paywall UI configuration.
         paywall_provider: Optional custom paywall provider.
-        sync_facilitator_on_start: Fetch facilitator support on first request.
+        sync_facilitator_on_start: Fetch facilitator support when the middleware is created.
 
     Returns:
         FastAPI middleware function.
@@ -226,9 +227,19 @@ def payment_middleware(
     if paywall_provider:
         http_server.register_paywall_provider(paywall_provider)
 
-    # Lazy initialization state with async lock for concurrency safety
+    # Initialization state with async lock for concurrency safety
     init_done = False
     init_lock = asyncio.Lock()
+
+    # Initialize if requested - queries facilitator /supported to populate
+    # facilitator clients. Fatal capability / route mismatches exit the process
+    # so a misconfigured server does not stay up until the first paid request.
+    if sync_facilitator_on_start:
+        try:
+            http_server.initialize()
+            init_done = True
+        except Exception as error:
+            handle_background_init_error(error)
 
     async def middleware(
         request: Request,
@@ -269,6 +280,12 @@ def payment_middleware(
             result = await http_server.process_http_request(context, paywall_config)
         except FacilitatorResponseError as error:
             return _facilitator_error_response(error)
+        except Exception:
+            logger.exception("x402: unexpected error while processing an HTTP payment request")
+            return JSONResponse(
+                content={"error": "Internal Server Error"},
+                status_code=500,
+            )
 
         if result.type == "no-payment-required":
             return await call_next(request)
@@ -305,21 +322,43 @@ def payment_middleware(
             try:
                 response = await call_next(request)
             except Exception as error:
+                cancel_settlement = None
                 if dispatcher is not None:
-                    await dispatcher.cancel(
+                    cancel_settlement = await dispatcher.cancel(
                         VerifiedPaymentCancelOptions(reason="handler_threw", error=error)
                     )
-                raise
+                failure_headers = http_server.create_failure_path_settlement_headers(
+                    cancel_settlement,
+                    result.before_handler_settlement,
+                    result.payment_payload,
+                )
+                if not isinstance(failure_headers, dict) or not failure_headers:
+                    raise
+                return JSONResponse(
+                    content={"error": "Internal Server Error"},
+                    status_code=500,
+                    headers=failure_headers,
+                )
 
             # Don't settle on error responses
             if response.status_code >= 400:
+                cancel_settlement = None
                 if dispatcher is not None:
-                    await dispatcher.cancel(
+                    cancel_settlement = await dispatcher.cancel(
                         VerifiedPaymentCancelOptions(
                             reason="handler_failed",
                             response_status=response.status_code,
                         )
                     )
+                failure_headers = http_server.create_failure_path_settlement_headers(
+                    cancel_settlement,
+                    result.before_handler_settlement,
+                    result.payment_payload,
+                    response.headers.get("Cache-Control"),
+                )
+                if isinstance(failure_headers, dict):
+                    for key, value in failure_headers.items():
+                        response.headers[key] = value
                 return response
 
             # Read response body for potential buffering
@@ -347,6 +386,7 @@ def payment_middleware(
                     settlement_overrides=overrides,
                     declared_extensions=result.declared_extensions,
                     transport_context=transport_context,
+                    before_handler_settlement=result.before_handler_settlement,
                 )
 
                 if not settle_result.success:
@@ -449,7 +489,7 @@ def payment_middleware_from_config(
         schemes: Scheme registrations for server-side processing.
         paywall_config: Optional paywall UI configuration.
         paywall_provider: Optional custom paywall provider.
-        sync_facilitator_on_start: Fetch facilitator support on first request.
+        sync_facilitator_on_start: Fetch facilitator support when the middleware is created.
 
     Returns:
         FastAPI middleware function.

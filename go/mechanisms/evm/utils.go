@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"math/big"
 	"strings"
@@ -93,6 +94,68 @@ func WaitForSettleReceipt(
 	}
 	if receipt.Status != TxStatusSuccess {
 		return nil, x402.NewSettleError(revertedReason, payer, network, txHash, "")
+	}
+	return receipt, nil
+}
+
+// WaitForSettleReceiptWithPendingStore wraps WaitForSettleReceipt with the
+// PendingSettlementStore bookkeeping shared by every EVM settle path that
+// supports settlement_pending reconciliation: on a wait failure, record
+// txHash under pendingKey so a subsequent settle attempt for the same
+// payload can reconcile against it instead of re-broadcasting; on success,
+// clear any stale entry. store may be nil and pendingKey may be "" — either
+// disables the bookkeeping while still waiting for the receipt.
+//
+// Mirrors the TypeScript SDK's withPendingSettlementStore and the Python
+// SDK's wait_for_receipt_and_build_response. Used directly by Permit2
+// (exact + upto) and batch-settlement deposit; EIP-3009 wraps this to add a
+// post-receipt Transfer-event check (see awaitEIP3009Settlement in
+// exact/facilitator/eip3009.go), since a confirmed-but-mismatched receipt
+// must clear the pending entry (terminal), not set it.
+func WaitForSettleReceiptWithPendingStore(
+	ctx context.Context,
+	store x402.PendingSettlementStore,
+	pendingKey string,
+	signer receiptWaiter,
+	txHash string,
+	payer string,
+	network x402.Network,
+	invalidHashReason string,
+	revertedReason string,
+) (*TransactionReceipt, error) {
+	// An invalid hash means nothing usable was ever broadcast: clear any stale
+	// entry instead of caching the garbage hash. Checked here (rather than
+	// relying on WaitForSettleReceipt) to distinguish this from a genuine
+	// wait failure below.
+	if !IsValidTxHash(txHash) {
+		if store != nil && pendingKey != "" {
+			_ = store.Delete(ctx, pendingKey)
+		}
+		return nil, InvalidBroadcastHashError(invalidHashReason, payer, network, txHash)
+	}
+
+	receipt, err := WaitForSettleReceipt(ctx, signer, txHash, payer, network, invalidHashReason, revertedReason)
+	if err != nil {
+		// Only a receipt-wait failure (settlement_pending) is safe to cache for
+		// reconciliation. A reverted receipt is terminal and must not be cached —
+		// otherwise it lingers as a false "pending" entry until TTL expiry.
+		var se *x402.SettleError
+		if store != nil && pendingKey != "" && errors.As(err, &se) && se.ErrorReason == ErrSettlementPending {
+			if setErr := store.Set(ctx, pendingKey, txHash); setErr != nil {
+				// Can't guarantee a later retry will find this to reconcile
+				// against — a blind retry could re-verify/re-broadcast and
+				// double-send. Downgrade to the terminal reason, preserving the
+				// transaction hash for manual reconciliation.
+				return nil, x402.NewSettleError(revertedReason, payer, network, txHash,
+					fmt.Sprintf("settlement_pending, but failed to persist for retry: %s", setErr.Error()))
+			}
+		}
+		return nil, err
+	}
+	if store != nil && pendingKey != "" {
+		// Best-effort: a failed delete only leaves a stale entry that expires
+		// via TTL. The receipt is already confirmed and must still be returned.
+		_ = store.Delete(ctx, pendingKey)
 	}
 	return receipt, nil
 }
@@ -229,27 +292,6 @@ func FormatAmount(amount *big.Int, decimals int) string {
 	return quotient.String() + "." + decStr
 }
 
-// GetNetworkConfig returns the configuration for a CAIP-2 network identifier (eip155:CHAIN_ID).
-// For networks with configured defaults, returns the full config.
-// For other valid EIP-155 networks, returns a config with just the chain ID (no default asset).
-func GetNetworkConfig(network string) (*NetworkConfig, error) {
-	if config, ok := NetworkConfigs[network]; ok {
-		return &config, nil
-	}
-
-	if strings.HasPrefix(network, "eip155:") {
-		chainIdStr := strings.TrimPrefix(network, "eip155:")
-		chainId, ok := new(big.Int).SetString(chainIdStr, 10)
-		if ok {
-			return &NetworkConfig{
-				ChainID: chainId,
-			}, nil
-		}
-	}
-
-	return nil, fmt.Errorf("invalid network format: %s (expected eip155:CHAIN_ID)", network)
-}
-
 // GetAssetInfo returns information about an asset on a network.
 // If assetSymbolOrAddress is a valid address, returns info for that specific token.
 // If assetSymbolOrAddress is empty or a symbol, attempts to use the network's default asset.
@@ -310,8 +352,22 @@ func BytesToHex(data []byte) string {
 // ValidateAssetIsContract checks whether the payment asset is a deployed contract.
 // Returns (ErrAssetNotDeployedContract, nil) for an EOA/empty address,
 // ("", nil) for a deployed contract, or ("", err) if eth_getCode itself fails.
-func ValidateAssetIsContract(ctx context.Context, signer FacilitatorEvmSigner, asset string) (string, error) {
-	code, err := signer.GetCode(ctx, NormalizeAddress(asset))
+//
+// network identifies the chain the signer is bound to. It must be accurate, since it scopes the
+// cache that serves positive results; an empty network disables caching for the call. Only
+// StartAssetContractCheck populates that cache, so calling this directly always hits the RPC.
+func ValidateAssetIsContract(
+	ctx context.Context,
+	signer FacilitatorEvmSigner,
+	network string,
+	asset string,
+) (string, error) {
+	normalizedAsset := NormalizeAddress(asset)
+	if globalAssetContractCache.isFresh(assetContractCacheKey{network: network, asset: normalizedAsset}, time.Now()) {
+		return "", nil
+	}
+
+	code, err := signer.GetCode(ctx, normalizedAsset)
 	if err != nil {
 		return "", fmt.Errorf("failed to check whether asset is a contract: %w", err)
 	}

@@ -1,5 +1,7 @@
 package facilitator
 
+import x402 "github.com/x402-foundation/x402/go/v2"
+
 // Facilitator error codes for the SVM `upto` payment-channel scheme.
 const (
 	// Shared protocol-level codes.
@@ -49,6 +51,21 @@ const (
 	ErrReceiverAuthorizer = "invalid_upto_svm_payload_receiver_authorizer"
 	// ErrVoucherSignature is returned when the voucher is not signed by the authorizer.
 	ErrVoucherSignature = "invalid_upto_svm_payload_voucher_signature"
+	// ErrAuthorizerNotConfigured is returned when a claim settle omitted
+	// voucherSignature and this facilitator has no authorizer.
+	ErrAuthorizerNotConfigured = "invalid_upto_svm_authorizer_not_configured"
+	// ErrAuthorizerAddressMismatch is returned when a delegated claim
+	// authorizedSigner / extra.receiverAuthorizer is not this facilitator.
+	ErrAuthorizerAddressMismatch = "invalid_upto_svm_authorizer_address_mismatch"
+	// ErrDelegatedSettleUnauthenticated is returned when a delegated settle
+	// identity is missing, unresolved, or not the deposit-time binding.
+	ErrDelegatedSettleUnauthenticated = "invalid_upto_svm_delegated_settle_unauthenticated"
+	// ErrDelegatedAuthStore is returned when a delegated claim cannot read
+	// the deposit-time identity binding from the store.
+	ErrDelegatedAuthStore = "invalid_upto_svm_delegated_auth_store"
+	// ErrPayloadType is returned when the client supplied type, or a delegated
+	// settle is missing type.
+	ErrPayloadType = "invalid_upto_svm_payload_type"
 
 	// Channel and settlement codes.
 
@@ -66,3 +83,13 @@ const (
 	// ErrPaymentRequirements is returned when the requirements are unusable.
 	ErrPaymentRequirements = "invalid_upto_svm_payment_requirements"
 )
+
+// ErrSettlementPending is the non-terminal settle error reason used when a
+// deposit (open) or claim (settle_and_seal + distribute) transaction was
+// broadcast but ConfirmTransaction couldn't observe its confirmation in time.
+// It always carries the broadcast signature (as SettleError.Transaction) so a
+// caller can reconcile onchain, and mirrors x402.ErrSettlementPending /
+// evm.ErrSettlementPending so x402ResourceServer's generic
+// single-retry-on-settlement_pending logic (see settleWithPendingRetry in
+// server.go) recognizes it uniformly across schemes/networks.
+const ErrSettlementPending = x402.ErrSettlementPending

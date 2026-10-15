@@ -1,9 +1,13 @@
 import { describe, it, expect } from "vitest";
+import { findAssociatedTokenPda } from "@solana-program/token-2022";
 import {
   assertFeePayerIsolated,
   validateComputeBudgetLimits,
   extractTransfersFromInnerInstructions,
+  verifySmartWalletTransaction,
 } from "../../src/exact/facilitator/smartWalletVerification";
+import * as Errors from "../../src/exact/facilitator/errors";
+import { encodeSignedTransaction, placeholderFeePayerSignature } from "./helpers/signedTransaction";
 import {
   appendTransactionMessageInstruction,
   createTransactionMessage,
@@ -74,7 +78,7 @@ describe("assertFeePayerIsolated", () => {
     ]);
 
     await expect(assertFeePayerIsolated(tx as never, feePayer.address)).rejects.toThrow(
-      "smart_wallet_fee_payer_not_isolated",
+      Errors.ErrSmartWalletFeePayerNotIsolated,
     );
   });
 
@@ -99,7 +103,7 @@ describe("assertFeePayerIsolated", () => {
     ]);
 
     await expect(assertFeePayerIsolated(tx as never, feePayer.address)).rejects.toThrow(
-      "smart_wallet_fee_payer_not_isolated",
+      Errors.ErrSmartWalletFeePayerNotIsolated,
     );
   });
 });
@@ -121,6 +125,23 @@ function buildSetComputeUnitPrice(microLamports: bigint): Uint8Array {
 }
 
 describe("validateComputeBudgetLimits", () => {
+  it.each([
+    ["maxComputeUnits", NaN, "smartWalletMaxComputeUnits"],
+    ["maxComputeUnits", Infinity, "smartWalletMaxComputeUnits"],
+    ["maxComputeUnits", 1.5, "smartWalletMaxComputeUnits"],
+    ["maxComputeUnits", 0, "smartWalletMaxComputeUnits"],
+    ["maxPriorityFeeMicroLamports", NaN, "smartWalletMaxPriorityFeeMicroLamports"],
+    ["maxPriorityFeeMicroLamports", Infinity, "smartWalletMaxPriorityFeeMicroLamports"],
+    ["maxPriorityFeeMicroLamports", 1.5, "smartWalletMaxPriorityFeeMicroLamports"],
+    ["maxPriorityFeeMicroLamports", -1, "smartWalletMaxPriorityFeeMicroLamports"],
+  ])("rejects %s = %s for direct callers", (option, value, expectedError) => {
+    // The empty transaction proves limit validation runs before message decoding;
+    // otherwise this would fail with an unrelated decoder error.
+    expect(() => validateComputeBudgetLimits({} as never, { [option]: value } as never)).toThrow(
+      expectedError,
+    );
+  });
+
   it("passes when CU and priority fee are within defaults", async () => {
     const feePayer = await generateKeyPairSigner();
 
@@ -149,7 +170,7 @@ describe("validateComputeBudgetLimits", () => {
     ]);
 
     expect(() => validateComputeBudgetLimits(tx as never)).toThrow(
-      "smart_wallet_compute_units_too_high",
+      Errors.ErrSmartWalletComputeUnitsTooHigh,
     );
   });
 
@@ -164,7 +185,7 @@ describe("validateComputeBudgetLimits", () => {
     ]);
 
     expect(() => validateComputeBudgetLimits(tx as never)).toThrow(
-      "smart_wallet_priority_fee_too_high",
+      Errors.ErrSmartWalletPriorityFeeTooHigh,
     );
   });
 
@@ -195,7 +216,7 @@ describe("validateComputeBudgetLimits", () => {
       validateComputeBudgetLimits(tx as never, {
         maxComputeUnits: 100_000,
       }),
-    ).toThrow("smart_wallet_compute_units_too_high");
+    ).toThrow(Errors.ErrSmartWalletComputeUnitsTooHigh);
   });
 
   it("rejects unknown ComputeBudget instruction type", async () => {
@@ -212,7 +233,7 @@ describe("validateComputeBudgetLimits", () => {
     ]);
 
     expect(() => validateComputeBudgetLimits(tx as never)).toThrow(
-      "smart_wallet_unsupported_compute_budget_instruction",
+      Errors.ErrSmartWalletUnsupportedComputeBudget,
     );
   });
 
@@ -227,8 +248,342 @@ describe("validateComputeBudgetLimits", () => {
     ]);
 
     expect(() => validateComputeBudgetLimits(tx as never)).toThrow(
-      "smart_wallet_malformed_compute_budget",
+      Errors.ErrSmartWalletMalformedComputeBudget,
     );
+  });
+
+  it("rejects a truncated SetComputeUnitLimit", async () => {
+    const feePayer = await generateKeyPairSigner();
+    const tx = await buildTransaction(feePayer.address, [
+      {
+        programAddress: COMPUTE_BUDGET_PROGRAM,
+        data: new Uint8Array([2, 0, 0]),
+      },
+    ]);
+
+    expect(() => validateComputeBudgetLimits(tx as never)).toThrow(
+      Errors.ErrSmartWalletMalformedComputeLimit,
+    );
+  });
+
+  it("rejects a truncated SetComputeUnitPrice", async () => {
+    const feePayer = await generateKeyPairSigner();
+    const tx = await buildTransaction(feePayer.address, [
+      {
+        programAddress: COMPUTE_BUDGET_PROGRAM,
+        data: new Uint8Array([3, 1, 0, 0]),
+      },
+    ]);
+
+    expect(() => validateComputeBudgetLimits(tx as never)).toThrow(
+      Errors.ErrSmartWalletMalformedComputePrice,
+    );
+  });
+});
+
+describe("verifySmartWalletTransaction configuration", () => {
+  it("accepts a top-level TransferChecked that matches the required ATA", async () => {
+    const feePayer = await generateKeyPairSigner();
+    const payTo = await generateKeyPairSigner();
+    const authority = await generateKeyPairSigner();
+    const [destinationAta] = await findAssociatedTokenPda({
+      mint: USDC_MINT as Address,
+      owner: payTo.address,
+      tokenProgram: TOKEN_PROGRAM,
+    });
+    const data = new Uint8Array(10);
+    data[0] = 12;
+    new DataView(data.buffer).setBigUint64(1, 10000n, true);
+    const tx = await buildTransaction(feePayer.address, [
+      {
+        programAddress: COMPUTE_BUDGET_PROGRAM,
+        data: new Uint8Array([2, 32, 78, 0, 0]),
+      },
+      {
+        programAddress: TOKEN_PROGRAM,
+        accounts: [
+          { address: authority.address, role: 1 },
+          { address: USDC_MINT as Address, role: 1 },
+          { address: destinationAta, role: 1 },
+          { address: authority.address, role: 1 },
+        ],
+        data,
+      },
+    ]);
+    const wire = await encodeSignedTransaction(
+      tx.messageBytes,
+      [],
+      placeholderFeePayerSignature(feePayer.address),
+    );
+    const result = await verifySmartWalletTransaction(
+      wire,
+      {
+        scheme: "exact",
+        network: "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+        amount: "10000",
+        asset: USDC_MINT,
+        payTo: payTo.address,
+        maxTimeoutSeconds: 60,
+        extra: { feePayer: feePayer.address },
+      } as never,
+      {
+        simulateTransactionWithInnerInstructions: async () => ({ innerInstructions: [] }),
+      } as never,
+      feePayer.address,
+      [],
+    );
+    expect(result.isValid).toBe(true);
+    expect(result.payer).toBe(authority.address);
+  });
+
+  it("rejects when the fee payer appears in instruction accounts", async () => {
+    const feePayer = await generateKeyPairSigner();
+    const payTo = await generateKeyPairSigner();
+    const tx = await buildTransaction(feePayer.address, [
+      {
+        programAddress: COMPUTE_BUDGET_PROGRAM,
+        accounts: [{ address: feePayer.address, role: 1 }],
+        data: new Uint8Array([2, 32, 78, 0, 0]),
+      },
+    ]);
+    const wire = await encodeSignedTransaction(
+      tx.messageBytes,
+      [],
+      placeholderFeePayerSignature(feePayer.address),
+    );
+    const result = await verifySmartWalletTransaction(
+      wire,
+      {
+        scheme: "exact",
+        network: "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+        amount: "10000",
+        asset: USDC_MINT,
+        payTo: payTo.address,
+        maxTimeoutSeconds: 60,
+        extra: { feePayer: feePayer.address },
+      } as never,
+      {
+        simulateTransactionWithInnerInstructions: async () => ({ innerInstructions: [] }),
+      } as never,
+      feePayer.address,
+      [],
+    );
+    expect(result.isValid).toBe(false);
+    expect(result.invalidReason).toContain(Errors.ErrSmartWalletFeePayerNotIsolated);
+    expect(result.payer).toBe("");
+  });
+
+  it("rejects a smart-wallet transaction whose compute units exceed the cap", async () => {
+    const feePayer = await generateKeyPairSigner();
+    const payTo = await generateKeyPairSigner();
+    const limit = new Uint8Array(5);
+    limit[0] = 2;
+    new DataView(limit.buffer).setUint32(1, 500_000, true);
+    const tx = await buildTransaction(feePayer.address, [
+      {
+        programAddress: COMPUTE_BUDGET_PROGRAM,
+        data: limit,
+      },
+    ]);
+    const wire = await encodeSignedTransaction(
+      tx.messageBytes,
+      [],
+      placeholderFeePayerSignature(feePayer.address),
+    );
+    const result = await verifySmartWalletTransaction(
+      wire,
+      {
+        scheme: "exact",
+        network: "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+        amount: "10000",
+        asset: USDC_MINT,
+        payTo: payTo.address,
+        maxTimeoutSeconds: 60,
+        extra: { feePayer: feePayer.address },
+      } as never,
+      {
+        simulateTransactionWithInnerInstructions: async () => ({ innerInstructions: [] }),
+      } as never,
+      feePayer.address,
+      [],
+    );
+    expect(result.isValid).toBe(false);
+    expect(result.invalidReason).toContain(Errors.ErrSmartWalletComputeUnitsTooHigh);
+  });
+
+  it("rejects when inner-instruction simulation throws", async () => {
+    const feePayer = await generateKeyPairSigner();
+    const payTo = await generateKeyPairSigner();
+    const tx = await buildTransaction(feePayer.address, [
+      {
+        programAddress: COMPUTE_BUDGET_PROGRAM,
+        data: new Uint8Array([2, 32, 78, 0, 0]),
+      },
+    ]);
+    const wire = await encodeSignedTransaction(
+      tx.messageBytes,
+      [],
+      placeholderFeePayerSignature(feePayer.address),
+    );
+    const result = await verifySmartWalletTransaction(
+      wire,
+      {
+        scheme: "exact",
+        network: "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+        amount: "10000",
+        asset: USDC_MINT,
+        payTo: payTo.address,
+        maxTimeoutSeconds: 60,
+        extra: { feePayer: feePayer.address },
+      } as never,
+      {
+        simulateTransactionWithInnerInstructions: async () => {
+          throw new Error("rpc simulate failed");
+        },
+      } as never,
+      feePayer.address,
+      [],
+    );
+    expect(result.isValid).toBe(false);
+    expect(result.invalidReason).toContain(Errors.ErrSmartWalletSimulationFailed);
+    expect(result.invalidReason).toContain("rpc simulate failed");
+  });
+
+  it("rejects when simulation contains no TransferChecked", async () => {
+    const feePayer = await generateKeyPairSigner();
+    const payTo = await generateKeyPairSigner();
+    const tx = await buildTransaction(feePayer.address, [
+      {
+        programAddress: COMPUTE_BUDGET_PROGRAM,
+        data: new Uint8Array([2, 32, 78, 0, 0]),
+      },
+    ]);
+    const wire = await encodeSignedTransaction(
+      tx.messageBytes,
+      [],
+      placeholderFeePayerSignature(feePayer.address),
+    );
+    const result = await verifySmartWalletTransaction(
+      wire,
+      {
+        scheme: "exact",
+        network: "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+        amount: "10000",
+        asset: USDC_MINT,
+        payTo: payTo.address,
+        maxTimeoutSeconds: 60,
+        extra: { feePayer: feePayer.address },
+      } as never,
+      {
+        simulateTransactionWithInnerInstructions: async () => ({ innerInstructions: [] }),
+      } as never,
+      feePayer.address,
+      [],
+    );
+    expect(result.isValid).toBe(false);
+    expect(result.invalidReason).toBe(Errors.ErrSmartWalletNoTransferInSimulation);
+  });
+
+  it("rejects a simulated transfer that does not match the required mint", async () => {
+    const feePayer = await generateKeyPairSigner();
+    const payTo = await generateKeyPairSigner();
+    const tx = await buildTransaction(feePayer.address, [
+      {
+        programAddress: COMPUTE_BUDGET_PROGRAM,
+        data: new Uint8Array([2, 32, 78, 0, 0]),
+      },
+    ]);
+    const wire = await encodeSignedTransaction(
+      tx.messageBytes,
+      [],
+      placeholderFeePayerSignature(feePayer.address),
+    );
+    const result = await verifySmartWalletTransaction(
+      wire,
+      {
+        scheme: "exact",
+        network: "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+        amount: "10000",
+        asset: USDC_MINT,
+        payTo: payTo.address,
+        maxTimeoutSeconds: 60,
+        extra: { feePayer: feePayer.address },
+      } as never,
+      {
+        simulateTransactionWithInnerInstructions: async () => ({
+          innerInstructions: [
+            {
+              index: 0,
+              instructions: [
+                {
+                  programId: TOKEN_PROGRAM as string,
+                  parsed: {
+                    type: "transferChecked",
+                    info: {
+                      mint: "So11111111111111111111111111111111111111112",
+                      destination: DEST_ATA,
+                      authority: AUTHORITY,
+                      tokenAmount: { amount: "10000" },
+                    },
+                  },
+                },
+              ],
+            },
+          ],
+        }),
+      } as never,
+      feePayer.address,
+      [],
+    );
+    expect(result.isValid).toBe(false);
+    expect(result.invalidReason).toBe(Errors.ErrSmartWalletTransferMismatch);
+    expect(result.payer).toBe(AUTHORITY);
+  });
+
+  it("rejects when neither token program can derive the destination ATA", async () => {
+    const feePayer = await generateKeyPairSigner();
+    const tx = await buildTransaction(feePayer.address, [
+      {
+        programAddress: COMPUTE_BUDGET_PROGRAM,
+        data: new Uint8Array([2, 32, 78, 0, 0]),
+      },
+    ]);
+    const wire = await encodeSignedTransaction(
+      tx.messageBytes,
+      [],
+      placeholderFeePayerSignature(feePayer.address),
+    );
+    const result = await verifySmartWalletTransaction(
+      wire,
+      {
+        scheme: "exact",
+        network: "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+        amount: "10000",
+        asset: USDC_MINT,
+        payTo: "not-a-solana-address",
+        maxTimeoutSeconds: 60,
+        extra: { feePayer: feePayer.address },
+      } as never,
+      {
+        simulateTransactionWithInnerInstructions: async () => ({ innerInstructions: [] }),
+      } as never,
+      feePayer.address,
+      [],
+    );
+    expect(result.isValid).toBe(false);
+    expect(result.invalidReason).toBe(Errors.ErrSmartWalletCannotDeriveATA);
+  });
+
+  it.each([
+    ["maxComputeUnits", NaN, "smartWalletMaxComputeUnits"],
+    ["maxPriorityFeeMicroLamports", NaN, "smartWalletMaxPriorityFeeMicroLamports"],
+  ])("propagates %s configuration errors", async (option, value, expectedError) => {
+    await expect(
+      verifySmartWalletTransaction("invalid transaction", {} as never, {} as never, "", [], {
+        enabled: true,
+        [option]: value,
+      } as never),
+    ).rejects.toThrow(expectedError);
   });
 });
 
@@ -407,6 +762,59 @@ describe("extractTransfersFromInnerInstructions", () => {
     expect(result[0].amount).toBe(BigInt(50000));
     expect(result[1].amount).toBe(BigInt(25000));
   });
+
+  it("uses parsed amount and owner when tokenAmount/authority are omitted", () => {
+    const result = extractTransfersFromInnerInstructions(
+      [
+        {
+          index: 0,
+          instructions: [
+            {
+              programId: TOKEN_PROGRAM as string,
+              parsed: {
+                type: "transferChecked",
+                info: {
+                  mint: USDC_MINT,
+                  destination: DEST_ATA,
+                  owner: AUTHORITY,
+                  amount: "777",
+                },
+              },
+            } as Record<string, unknown>,
+          ],
+        },
+      ],
+      [],
+    );
+    expect(result).toEqual([
+      {
+        programId: TOKEN_PROGRAM,
+        amount: 777n,
+        mint: USDC_MINT,
+        destination: DEST_ATA,
+        authority: AUTHORITY,
+      },
+    ]);
+  });
+
+  it("skips compiled transfers that cannot be decoded or are incomplete", () => {
+    const accountKeys = [USDC_MINT, DEST_ATA, AUTHORITY, TOKEN_PROGRAM as string];
+    const result = extractTransfersFromInnerInstructions(
+      [
+        {
+          index: 0,
+          instructions: [
+            { programIdIndex: 3, accounts: [0, 1, 2], data: "not-base58!!!" },
+            { programIdIndex: 3, accounts: [0, 1, 2, 3], data: "2" }, // disc != 12
+            { programIdIndex: 3, accounts: [0], data: "11111111" },
+            { programIdIndex: 9, accounts: [0, 1, 2, 3], data: "11111111" },
+          ],
+        },
+      ],
+      accountKeys,
+    );
+    expect(result).toEqual([]);
+  });
 });
 
 describe("verifyPostSettlement", () => {
@@ -474,6 +882,89 @@ describe("verifyPostSettlement", () => {
     expect(result.method).toBe("innerInstructions");
     // Note: verified may be false if ATA derivation doesn't match mock DEST_ATA.
     // This test primarily validates the code path executes without error.
+  });
+
+  it("verifies when a known destination ATA matches an inner TransferChecked", async () => {
+    const { verifyPostSettlement } = await import(
+      "../../src/exact/facilitator/smartWalletVerification"
+    );
+
+    const mockSigner = {
+      getAddresses: () => [],
+      getSigner: () => {
+        throw new Error("No signer");
+      },
+      signTransaction: async () => "",
+      simulateTransaction: async () => {},
+      sendTransaction: async () => "",
+      confirmTransaction: async () => {},
+      getConfirmedTransactionInnerInstructions: async () => ({
+        innerInstructions: [
+          {
+            index: 0,
+            instructions: [
+              {
+                programId: "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+                parsed: {
+                  type: "transferChecked",
+                  info: {
+                    mint: USDC_MINT,
+                    destination: DEST_ATA,
+                    authority: AUTHORITY,
+                    tokenAmount: { amount: "10000" },
+                  },
+                },
+              },
+            ],
+          },
+        ],
+      }),
+    };
+
+    const result = await verifyPostSettlement(
+      mockSigner as never,
+      "fakeSig123",
+      "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+      mockRequirements as never,
+      [],
+      null,
+      null,
+      DEST_ATA,
+    );
+    expect(result).toEqual({ verified: true, method: "innerInstructions" });
+  });
+
+  it("falls through to balance-delta when getTransaction throws", async () => {
+    const { verifyPostSettlement } = await import(
+      "../../src/exact/facilitator/smartWalletVerification"
+    );
+
+    const mockSigner = {
+      getAddresses: () => [],
+      getSigner: () => {
+        throw new Error("No signer");
+      },
+      signTransaction: async () => "",
+      simulateTransaction: async () => {},
+      sendTransaction: async () => "",
+      confirmTransaction: async () => {},
+      getConfirmedTransactionInnerInstructions: async () => {
+        throw new Error("indexing lag");
+      },
+      getTokenAccountBalance: async () => 20_000n,
+    };
+
+    const result = await verifyPostSettlement(
+      mockSigner as never,
+      "fakeSig123",
+      "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+      mockRequirements as never,
+      [],
+      5_000n,
+      "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+      DEST_ATA,
+    );
+    expect(result).toEqual({ verified: true, method: "balanceDelta" });
   });
 
   it("catches TOCTOU when inner instructions show no matching transfer", async () => {
@@ -754,9 +1245,389 @@ describe("verifyPostSettlement", () => {
     // Should succeed on the first ATA check (Token-2022, the hinted program)
     expect(callCount).toBe(1);
   });
+
+  it("uses knownDestinationAta for balance-delta fallback after indexing lag", async () => {
+    const { verifyPostSettlement } = await import(
+      "../../src/exact/facilitator/smartWalletVerification"
+    );
+    const mockSigner = {
+      getAddresses: () => [],
+      signTransaction: async () => "",
+      simulateTransaction: async () => {},
+      sendTransaction: async () => "",
+      confirmTransaction: async () => {},
+      getConfirmedTransactionInnerInstructions: async () => null,
+      getTokenAccountBalance: async (ata: string) => {
+        expect(ata).toBe("KnownDestATA111111111111111111111111");
+        return BigInt(20000);
+      },
+    };
+
+    const result = await verifyPostSettlement(
+      mockSigner as never,
+      "fakeSig123",
+      "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+      mockRequirements as never,
+      [],
+      BigInt(10000),
+      null,
+      "KnownDestATA111111111111111111111111",
+    );
+
+    expect(result).toEqual({ verified: true, method: "balanceDelta" });
+  });
+
+  it("rejects knownDestinationAta when the balance did not increase", async () => {
+    const { verifyPostSettlement } = await import(
+      "../../src/exact/facilitator/smartWalletVerification"
+    );
+    const mockSigner = {
+      getAddresses: () => [],
+      signTransaction: async () => "",
+      simulateTransaction: async () => {},
+      sendTransaction: async () => "",
+      confirmTransaction: async () => {},
+      getConfirmedTransactionInnerInstructions: async () => null,
+      getTokenAccountBalance: async () => BigInt(10000),
+    };
+
+    const result = await verifyPostSettlement(
+      mockSigner as never,
+      "fakeSig123",
+      "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+      mockRequirements as never,
+      [],
+      BigInt(10000),
+      null,
+      "KnownDestATA111111111111111111111111",
+    );
+
+    expect(result).toEqual({ verified: false, method: "balanceDelta" });
+  });
+
+  it("returns unverified when the knownDestinationAta balance check throws", async () => {
+    const { verifyPostSettlement } = await import(
+      "../../src/exact/facilitator/smartWalletVerification"
+    );
+    const mockSigner = {
+      getAddresses: () => [],
+      signTransaction: async () => "",
+      simulateTransaction: async () => {},
+      sendTransaction: async () => "",
+      confirmTransaction: async () => {},
+      getConfirmedTransactionInnerInstructions: async () => null,
+      getTokenAccountBalance: async () => {
+        throw new Error("ata missing");
+      },
+    };
+
+    const result = await verifyPostSettlement(
+      mockSigner as never,
+      "fakeSig123",
+      "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+      mockRequirements as never,
+      [],
+      BigInt(10000),
+      null,
+      "KnownDestATA111111111111111111111111",
+    );
+
+    expect(result).toEqual({ verified: false, method: "unverified" });
+  });
+
+  it("falls through to balance-delta when inner-instruction amounts are not numeric", async () => {
+    const { verifyPostSettlement } = await import(
+      "../../src/exact/facilitator/smartWalletVerification"
+    );
+    const mockSigner = {
+      getAddresses: () => [],
+      signTransaction: async () => "",
+      simulateTransaction: async () => {},
+      sendTransaction: async () => "",
+      confirmTransaction: async () => {},
+      getConfirmedTransactionInnerInstructions: async () => ({
+        innerInstructions: [
+          {
+            index: 0,
+            instructions: [
+              {
+                programId: "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+                parsed: {
+                  type: "transferChecked",
+                  info: {
+                    mint: USDC_MINT,
+                    destination: DEST_ATA,
+                    authority: AUTHORITY,
+                    tokenAmount: { amount: "not-a-number" },
+                  },
+                },
+              },
+            ],
+          },
+        ],
+      }),
+      getTokenAccountBalance: async () => 20_000n,
+    };
+
+    const result = await verifyPostSettlement(
+      mockSigner as never,
+      "fakeSig123",
+      "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+      mockRequirements as never,
+      [],
+      5_000n,
+      "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+      DEST_ATA,
+    );
+    expect(result).toEqual({ verified: true, method: "balanceDelta" });
+  });
+
+  it("skips ATA derivation failures and rejects when no destination matches", async () => {
+    const { verifyPostSettlement } = await import(
+      "../../src/exact/facilitator/smartWalletVerification"
+    );
+    const mockSigner = {
+      getAddresses: () => [],
+      signTransaction: async () => "",
+      simulateTransaction: async () => {},
+      sendTransaction: async () => "",
+      confirmTransaction: async () => {},
+      getConfirmedTransactionInnerInstructions: async () => ({
+        innerInstructions: [
+          {
+            index: 0,
+            instructions: [
+              {
+                programId: "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+                parsed: {
+                  type: "transferChecked",
+                  info: {
+                    mint: USDC_MINT,
+                    destination: DEST_ATA,
+                    authority: AUTHORITY,
+                    tokenAmount: { amount: "10000" },
+                  },
+                },
+              },
+            ],
+          },
+        ],
+      }),
+    };
+
+    const result = await verifyPostSettlement(
+      mockSigner as never,
+      "fakeSig123",
+      "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+      { ...mockRequirements, payTo: "not-a-solana-address" } as never,
+      [],
+      null,
+    );
+    expect(result).toEqual({ verified: false, method: "innerInstructions" });
+  });
+
+  it("rejects an inner transfer below the required amount", async () => {
+    const { verifyPostSettlement } = await import(
+      "../../src/exact/facilitator/smartWalletVerification"
+    );
+    const mockSigner = {
+      getAddresses: () => [],
+      signTransaction: async () => "",
+      simulateTransaction: async () => {},
+      sendTransaction: async () => "",
+      confirmTransaction: async () => {},
+      getConfirmedTransactionInnerInstructions: async () => ({
+        innerInstructions: [
+          {
+            index: 0,
+            instructions: [
+              {
+                programId: "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+                parsed: {
+                  type: "transferChecked",
+                  info: {
+                    mint: USDC_MINT,
+                    destination: DEST_ATA,
+                    authority: AUTHORITY,
+                    tokenAmount: { amount: "1" },
+                  },
+                },
+              },
+            ],
+          },
+        ],
+      }),
+    };
+
+    const result = await verifyPostSettlement(
+      mockSigner as never,
+      "fakeSig123",
+      "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+      mockRequirements as never,
+      [],
+      null,
+      null,
+      DEST_ATA,
+    );
+    expect(result).toEqual({ verified: false, method: "innerInstructions" });
+  });
+
+  it("rejects an inner transfer whose authority is a facilitator signer", async () => {
+    const { verifyPostSettlement } = await import(
+      "../../src/exact/facilitator/smartWalletVerification"
+    );
+    const mockSigner = {
+      getAddresses: () => [],
+      signTransaction: async () => "",
+      simulateTransaction: async () => {},
+      sendTransaction: async () => "",
+      confirmTransaction: async () => {},
+      getConfirmedTransactionInnerInstructions: async () => ({
+        innerInstructions: [
+          {
+            index: 0,
+            instructions: [
+              {
+                programId: "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+                parsed: {
+                  type: "transferChecked",
+                  info: {
+                    mint: USDC_MINT,
+                    destination: DEST_ATA,
+                    authority: AUTHORITY,
+                    tokenAmount: { amount: "10000" },
+                  },
+                },
+              },
+            ],
+          },
+        ],
+      }),
+    };
+
+    const result = await verifyPostSettlement(
+      mockSigner as never,
+      "fakeSig123",
+      "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+      mockRequirements as never,
+      [AUTHORITY],
+      null,
+      null,
+      DEST_ATA,
+    );
+    expect(result).toEqual({ verified: false, method: "innerInstructions" });
+  });
+
+  it("tries Token-2022 after a hinted SPL Token ATA shows no delta", async () => {
+    const { verifyPostSettlement } = await import(
+      "../../src/exact/facilitator/smartWalletVerification"
+    );
+    let callCount = 0;
+    const mockSigner = {
+      getAddresses: () => [],
+      signTransaction: async () => "",
+      simulateTransaction: async () => {},
+      sendTransaction: async () => "",
+      confirmTransaction: async () => {},
+      getConfirmedTransactionInnerInstructions: async () => null,
+      getTokenAccountBalance: async () => {
+        callCount += 1;
+        if (callCount === 1) return BigInt(10000);
+        return BigInt(20000);
+      },
+    };
+
+    const result = await verifyPostSettlement(
+      mockSigner as never,
+      "fakeSig123",
+      "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+      mockRequirements as never,
+      [],
+      BigInt(10000),
+      "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+    );
+    expect(result).toEqual({ verified: true, method: "balanceDelta" });
+    expect(callCount).toBe(2);
+  });
 });
 
 describe("ExactSvmScheme constructor enforcement", () => {
+  it.each([
+    ["smartWalletMaxComputeUnits", NaN],
+    ["smartWalletMaxComputeUnits", Infinity],
+    ["smartWalletMaxComputeUnits", 1.5],
+    ["smartWalletMaxComputeUnits", 0],
+    ["smartWalletMaxPriorityFeeMicroLamports", NaN],
+    ["smartWalletMaxPriorityFeeMicroLamports", Infinity],
+    ["smartWalletMaxPriorityFeeMicroLamports", 1.5],
+    ["smartWalletMaxPriorityFeeMicroLamports", -1],
+  ])("throws when %s is %s", async (option, value) => {
+    const { ExactSvmScheme } = await import("../../src/exact/facilitator/scheme");
+    const completeSigner = {
+      getAddresses: () => [],
+      signTransaction: async () => "",
+      simulateTransaction: async () => {},
+      sendTransaction: async () => "",
+      confirmTransaction: async () => {},
+      simulateTransactionWithInnerInstructions: async () => ({ innerInstructions: null }),
+      getConfirmedTransactionInnerInstructions: async () => null,
+      getTokenAccountBalance: async () => null,
+      fetchAddressLookupTables: async () => ({}),
+    };
+
+    expect(
+      () =>
+        new ExactSvmScheme(completeSigner as never, undefined, {
+          enableSmartWalletVerification: true,
+          [option]: value as number,
+        }),
+    ).toThrow(option);
+  });
+
+  it("accepts the minimum smart wallet limits", async () => {
+    const { ExactSvmScheme } = await import("../../src/exact/facilitator/scheme");
+    const completeSigner = {
+      getAddresses: () => [],
+      signTransaction: async () => "",
+      simulateTransaction: async () => {},
+      sendTransaction: async () => "",
+      confirmTransaction: async () => {},
+      simulateTransactionWithInnerInstructions: async () => ({ innerInstructions: null }),
+      getConfirmedTransactionInnerInstructions: async () => null,
+      getTokenAccountBalance: async () => null,
+      fetchAddressLookupTables: async () => ({}),
+    };
+
+    expect(
+      () =>
+        new ExactSvmScheme(completeSigner as never, undefined, {
+          enableSmartWalletVerification: true,
+          smartWalletMaxComputeUnits: 1,
+          smartWalletMaxPriorityFeeMicroLamports: 0,
+        }),
+    ).not.toThrow();
+  });
+
+  it("ignores dormant smart wallet limits when verification is disabled", async () => {
+    const { ExactSvmScheme } = await import("../../src/exact/facilitator/scheme");
+    const minimalSigner = {
+      getAddresses: () => [],
+      signTransaction: async () => "",
+      simulateTransaction: async () => {},
+      sendTransaction: async () => "",
+      confirmTransaction: async () => {},
+    };
+
+    expect(
+      () =>
+        new ExactSvmScheme(minimalSigner as never, undefined, {
+          enableSmartWalletVerification: false,
+          smartWalletMaxComputeUnits: NaN,
+          smartWalletMaxPriorityFeeMicroLamports: NaN,
+        }),
+    ).not.toThrow();
+  });
+
   it("throws when signer missing required methods for smart wallet verification", async () => {
     const { ExactSvmScheme } = await import("../../src/exact/facilitator/scheme");
 
@@ -776,7 +1647,7 @@ describe("ExactSvmScheme constructor enforcement", () => {
         new ExactSvmScheme(incompleteSigner as never, undefined, {
           enableSmartWalletVerification: true,
         }),
-    ).toThrow("enableSmartWalletVerification requires");
+    ).toThrow("ExactSvmScheme requires simulateTransactionWithInnerInstructions on the signer");
   });
 
   it("throws when signer has the other methods but lacks fetchAddressLookupTables", async () => {
@@ -803,7 +1674,7 @@ describe("ExactSvmScheme constructor enforcement", () => {
         new ExactSvmScheme(signerMissingAlt as never, undefined, {
           enableSmartWalletVerification: true,
         }),
-    ).toThrow("enableSmartWalletVerification requires fetchAddressLookupTables");
+    ).toThrow("ExactSvmScheme requires fetchAddressLookupTables on the signer");
   });
 
   it("succeeds when signer has all required methods", async () => {
@@ -923,7 +1794,7 @@ describe("assertFeePayerIsolated ALT handling", () => {
         signerWithoutALT as never,
         "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
       ),
-    ).rejects.toThrow("smart_wallet_alt_resolution_not_available");
+    ).rejects.toThrow(Errors.ErrSmartWalletAltResolutionUnavailable);
   });
 
   it("catches fee payer hidden in ALT-resolved accounts", async () => {
@@ -982,7 +1853,7 @@ describe("assertFeePayerIsolated ALT handling", () => {
         signerWithALT as never,
         "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
       ),
-    ).rejects.toThrow("smart_wallet_fee_payer_not_isolated");
+    ).rejects.toThrow(Errors.ErrSmartWalletFeePayerNotIsolated);
   });
 
   it("propagates ALT resolution failure instead of treating it as no ALTs", async () => {
@@ -1033,7 +1904,7 @@ describe("assertFeePayerIsolated ALT handling", () => {
       sendTransaction: async () => "",
       confirmTransaction: async () => {},
       fetchAddressLookupTables: async () => {
-        throw new Error("smart_wallet_alt_resolution_failed: rpc unavailable");
+        throw new Error(`${Errors.ErrSmartWalletAltResolutionFailed}: rpc unavailable`);
       },
     };
 
@@ -1044,6 +1915,6 @@ describe("assertFeePayerIsolated ALT handling", () => {
         signerWithFailingALT as never,
         "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
       ),
-    ).rejects.toThrow("smart_wallet_alt_resolution_failed");
+    ).rejects.toThrow(Errors.ErrSmartWalletAltResolutionFailed);
   });
 });

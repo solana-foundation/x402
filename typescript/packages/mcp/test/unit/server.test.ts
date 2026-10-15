@@ -1103,6 +1103,46 @@ describe("createPaymentWrapper", () => {
     });
   });
 
+  describe("resource metadata", () => {
+    it("should forward discovery fields into PaymentRequired resource info", async () => {
+      const paid = createPaymentWrapper(
+        mockResourceServer as unknown as Parameters<typeof createPaymentWrapper>[0],
+        {
+          accepts: [mockPaymentRequirements],
+          resource: {
+            url: "mcp://tool/discoverable",
+            description: "Discoverable tool",
+            mimeType: "application/json",
+            serviceName: "weather-service",
+            tags: ["weather", "paid"],
+            iconUrl: "https://example.com/icon.png",
+          },
+        },
+      );
+
+      const handler = vi.fn();
+      const result = await paid(handler)({ city: "NYC" }, {});
+
+      expect(result.isError).toBe(true);
+      expect(handler).not.toHaveBeenCalled();
+      expect(mockResourceServer.createPaymentRequiredResponse).toHaveBeenCalledWith(
+        [mockPaymentRequirements],
+        {
+          url: "mcp://tool/discoverable",
+          description: "Discoverable tool",
+          mimeType: "application/json",
+          serviceName: "weather-service",
+          tags: ["weather", "paid"],
+          iconUrl: "https://example.com/icon.png",
+        },
+        "Payment required to access this tool",
+        undefined,
+        expect.any(Object),
+        undefined,
+      );
+    });
+  });
+
   describe("extensions", () => {
     it("should include extensions in 402 response when configured", async () => {
       const extensions = {
@@ -1202,6 +1242,50 @@ describe("createPaymentWrapper", () => {
       expect(handler).toHaveBeenCalled(); // Handler executed
       expect(result.isError).toBe(true); // But error returned due to settlement failure
       expect(result.structuredContent).toBeDefined();
+    });
+
+    it("should withhold tool output when settlement returns success false", async () => {
+      mockResourceServer.settlePayment.mockResolvedValueOnce({
+        success: false,
+        errorReason: "AuthorizationAlreadyUsed",
+        transaction: "",
+        network: "eip155:84532",
+      });
+
+      const settlementHook = vi.fn();
+      const paid = createPaymentWrapper(
+        mockResourceServer as unknown as Parameters<typeof createPaymentWrapper>[0],
+        {
+          accepts: [mockPaymentRequirements],
+          hooks: {
+            onAfterSettlement: settlementHook,
+          },
+        },
+      );
+
+      const handler = vi.fn().mockResolvedValue({
+        content: [{ type: "text", text: "should-not-be-returned" }],
+      });
+
+      const wrappedHandler = paid(handler);
+      const result = await wrappedHandler(
+        { test: "arg" },
+        { _meta: { "x402/payment": mockPaymentPayload } },
+      );
+
+      expect(handler).toHaveBeenCalled();
+      expect(result.isError).toBe(true);
+      expect(JSON.stringify(result.content)).not.toContain("should-not-be-returned");
+      expect(JSON.stringify(result.structuredContent)).not.toContain("should-not-be-returned");
+      expect(mockResourceServer.createPaymentRequiredResponse).toHaveBeenCalledWith(
+        [mockPaymentRequirements],
+        expect.any(Object),
+        "Payment settlement failed: AuthorizationAlreadyUsed",
+        undefined,
+        expect.any(Object),
+        undefined,
+      );
+      expect(settlementHook).not.toHaveBeenCalled();
     });
   });
 

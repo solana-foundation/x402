@@ -82,7 +82,8 @@ The 402 response contains pricing terms and the server's channel parameters. The
     "receiverAuthorizer": "0xReceiverAuthorizerAddress",
     "withdrawDelay": 900,
     "name": "USDC",
-    "version": "2"
+    "version": "2",
+    "minDeposit": "1000000"
   }
 }
 ```
@@ -94,8 +95,11 @@ The 402 response contains pricing terms and the server's channel parameters. The
 | `extra.assetTransferMethod` | `string` | optional | `"eip3009"` (default) or `"permit2"`                   |
 | `extra.name`                | `string` | yes      | EIP-712 domain name of the token contract              |
 | `extra.version`             | `string` | yes      | EIP-712 domain version of the token contract           |
+| `extra.minDeposit`          | `string` | optional | Atomic deposit target. When present, MUST be a positive integer `>= amount`. |
 | `extra.channelState`        | `object` | optional | Corrective-only server channel snapshot for cumulative amount resynchronization |
 | `extra.voucherState`        | `object` | optional | Corrective-only signed voucher proof for cumulative amount resynchronization |
+
+Clients SHOULD use a conforming `extra.minDeposit` as the deposit target, and SHOULD enforce a local maximum deposit so a 402 cannot lock unbounded escrow. Servers SHOULD NOT reject a deposit solely because `deposit.amount` is below this field. A server that applies a local minimum-deposit policy MAY reject and MUST return `invalid_batch_settlement_evm_deposit_below_min_deposit`. The facilitator MUST NOT enforce `minDeposit`.
 
 ---
 
@@ -525,14 +529,17 @@ The server must claim all outstanding vouchers before the withdraw delay elapses
 
 ### Steady State
 
-Before signing the next voucher, the client must verify from the payment response:
+PAYMENT-RESPONSE extra is untrusted. The client updates local state
+from its own previous state plus `extra.chargedAmount` (missing is `0`).
+It MUST NOT copy `extra.channelState` into that local state.
 
-1. `extra.chargedAmount <= PaymentRequirements.amount`
-2. `extra.channelState.chargedCumulativeAmount == previous + extra.chargedAmount`
-3. `extra.channelState.balance` is consistent with the client's expectation
-4. `extra.channelState.channelId` matches
+The client applies that update only when `chargedAmount <=
+PaymentRequirements.amount` and, if present,
+`channelState.chargedCumulativeAmount` equals `previous + chargedAmount`.
+Otherwise it MUST leave local state unchanged.
 
-If any check fails, the client must not sign further vouchers and should initiate withdrawal.
+The next voucher is signed from that local state. A skipped apply is
+not a new charge; desync is recovered via Corrective 402.
 
 ### Recovery After State Loss
 
@@ -597,6 +604,7 @@ The recovery baseline is:
 | `invalid_batch_settlement_evm_cumulative_amount_mismatch`               | Corrective 402: client's cumulative voucher ceiling does not match the server's tracked `chargedCumulativeAmount` |
 | `invalid_batch_settlement_evm_cumulative_below_claimed`                  | Voucher `maxClaimableAmount` violates monotonicity vs onchain `totalClaimed` (non-refund: must be greater than `totalClaimed`; refund: must not be strictly below `totalClaimed`; deposit verify: must not be strictly below `totalClaimed`) |
 | `invalid_batch_settlement_evm_cumulative_exceeds_balance`                | Voucher `maxClaimableAmount` exceeds effective onchain balance               |
+| `invalid_batch_settlement_evm_deposit_below_min_deposit`                 | Server rejected a deposit below its local `extra.minDeposit` policy          |
 | `invalid_batch_settlement_evm_deposit_payload`                           | Deposit payload is malformed                                                 |
 | `invalid_batch_settlement_evm_deposit_simulation_failed`                 | Deposit simulation failed                                                    |
 | `invalid_batch_settlement_evm_deposit_transaction_failed`                | Onchain deposit transaction failed                                           |

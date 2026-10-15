@@ -1,7 +1,9 @@
-import { createHash } from "node:crypto";
+import { sha256 } from "@noble/hashes/sha256";
+import { ErrInvalidPayloadTransaction } from "./exact/facilitator/errors";
 import {
   isAddress,
   getBase58Encoder,
+  getBase64Decoder,
   getBase64Encoder,
   getTransactionDecoder,
   getCompiledTransactionMessageDecoder,
@@ -20,7 +22,8 @@ import {
 } from "@solana/kit";
 import { TOKEN_PROGRAM_ADDRESS } from "@solana-program/token";
 import { TOKEN_2022_PROGRAM_ADDRESS } from "@solana-program/token-2022";
-import type { Network, PaymentRequirements } from "@x402/core/types";
+import type { PendingSettlementStore } from "@x402/core/facilitator";
+import type { Network, PaymentRequirements, SettleResponse } from "@x402/core/types";
 import {
   SVM_ADDRESS_REGEX,
   DEVNET_RPC_URL,
@@ -33,6 +36,7 @@ import {
 } from "./constants";
 import { DEFAULT_ASSETS, findDefaultAsset, getDefaultAsset } from "./defaultAssets";
 import type { ExactSvmPayloadV1 } from "./types";
+import { SLOT_COMMITMENT } from "./upto/shared";
 
 export { normalizeNetwork } from "./constants";
 
@@ -61,7 +65,7 @@ export function validateSvmAddress(address: string): boolean {
  * @returns Base64-encoded SHA-256 hash of the transaction message bytes
  */
 export function transactionMessageHash(transaction: Transaction): string {
-  return createHash("sha256").update(Buffer.from(transaction.messageBytes)).digest("base64");
+  return getBase64Decoder().decode(sha256(Uint8Array.from(transaction.messageBytes)));
 }
 
 /**
@@ -78,7 +82,7 @@ export function decodeTransactionFromPayload(svmPayload: ExactSvmPayloadV1): Tra
     return transactionDecoder.decode(transactionBytes);
   } catch (error) {
     console.error("Error decoding transaction:", error);
-    throw new Error("invalid_exact_svm_payload_transaction");
+    throw new Error(ErrInvalidPayloadTransaction);
   }
 }
 
@@ -197,9 +201,9 @@ export async function resolveBlockhash(
  *
  * Prefers a server-provided slot carried in the 402 challenge
  * (`extra.recentSlot`) so the client needn't make its own RPC round-trip. Falls
- * back to `rpc.getSlot()` when the challenge omits it or contains a malformed
- * value. Default RPC commitment (`finalized`) keeps `openSlot <= clock.slot`
- * true when the open lands.
+ * back to `rpc.getSlot({ commitment: SLOT_COMMITMENT })` when the challenge
+ * omits it or contains a malformed value. Finalized commitment keeps
+ * `openSlot <= clock.slot` true when the open lands, matching the facilitator.
  *
  * @param rpc - RPC client used for the fallback fetch
  * @param requirements - The payment requirements (challenge) being paid
@@ -234,7 +238,7 @@ export async function resolveOpenSlot(
     }
   }
 
-  return await rpc.getSlot().send();
+  return await rpc.getSlot({ commitment: SLOT_COMMITMENT }).send();
 }
 
 /**
@@ -310,6 +314,84 @@ export function getStablecoinTokenProgram(currency: string, network: Network): s
   } catch {
     return TOKEN_PROGRAM_ADDRESS.toString();
   }
+}
+
+/**
+ * Thrown by a {@link PendingSettlementStore}-aware confirmation wait (e.g.
+ * `FacilitatorSvmSigner.confirmTransaction`) when the transaction reached the
+ * chain and failed there — a definite onchain rejection, not a
+ * confirmation-wait timeout whose outcome is still unknown. Callers must
+ * treat this as terminal: release any dedup/pending-settlement lock and
+ * report a failure instead of `settlement_pending`. Any other confirmation
+ * error (timeout or otherwise) is treated conservatively as non-terminal,
+ * since a fresh broadcast while the original might still land risks a
+ * double-spend.
+ */
+export class TransactionOnchainFailureError extends Error {
+  /**
+   * Create the error for a transaction that reached the chain and failed there.
+   *
+   * @param message - Description of the onchain failure, e.g. the decoded transaction error
+   */
+  constructor(message: string) {
+    super(message);
+    this.name = "TransactionOnchainFailureError";
+  }
+}
+
+/**
+ * Persists `signature` under `key` in `store` so a subsequent settle attempt
+ * for the same payload can reconcile against it instead of re-broadcasting,
+ * then returns the `settlement_pending` response carrying `error`'s message.
+ *
+ * If the store write itself fails, a later retry has no record to reconcile
+ * against — returning `settlement_pending` regardless would let it blindly
+ * re-verify/re-broadcast and risk a double-send. In that case this instead
+ * returns a terminal failure (`terminalReason`), preserving `signature` for
+ * manual reconciliation.
+ *
+ * @param store - The pending-settlement store to update
+ * @param key - Deterministic key for this payload (e.g. a signature or channel id)
+ * @param signature - The broadcast signature to persist and report
+ * @param payer - The payer address
+ * @param network - Network the transaction was broadcast to
+ * @param pendingReason - Error reason to report when the store write succeeds
+ * @param terminalReason - Error reason to report when the store write fails
+ * @param error - The confirmation-wait error that triggered this call
+ * @returns The settlement_pending or terminal SettleResponse
+ */
+export async function recordPendingOrTerminal(
+  store: PendingSettlementStore,
+  key: string,
+  signature: string,
+  payer: string,
+  network: Network,
+  pendingReason: string,
+  terminalReason: string,
+  error: unknown,
+): Promise<SettleResponse> {
+  try {
+    await store.set(key, signature);
+  } catch (storeError) {
+    return {
+      success: false,
+      errorReason: terminalReason,
+      errorMessage: `settlement_pending, but failed to persist for retry: ${
+        storeError instanceof Error ? storeError.message : String(storeError)
+      }`,
+      transaction: signature,
+      network,
+      payer,
+    };
+  }
+  return {
+    success: false,
+    errorReason: pendingReason,
+    errorMessage: error instanceof Error ? error.message : String(error),
+    transaction: signature,
+    network,
+    payer,
+  };
 }
 
 // Re-export from core for backward compatibility

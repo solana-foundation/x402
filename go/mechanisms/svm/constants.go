@@ -30,12 +30,9 @@ const (
 	// MaxMemoBytes is the maximum byte length for seller-defined memo data (extra.memo)
 	MaxMemoBytes = 256
 
-	// LighthouseProgramAddress is the Phantom/Solflare Lighthouse program address
-	// Phantom and Solflare wallets inject Lighthouse instructions for user protection on mainnet transactions.
-	// - Phantom adds 1 Lighthouse instruction (4th instruction)
-	// - Solflare adds 2 Lighthouse instructions (4th and 5th instructions)
-	// We allow these as optional instructions to support these wallets.
-	// See: https://github.com/x402-foundation/x402/issues/828
+	// LighthouseProgramAddress is the wallet-protection program some Solana wallets
+	// inject into signed transactions. Path 1 accepts up to 3 Lighthouse instructions
+	// plus an optional memo, in any order after ComputeLimit + ComputePrice + TransferChecked.
 	LighthouseProgramAddress = "L2TExMFKdjpN9kozasaurPirfHy9P8sbXoAN1qA3S95"
 
 	// MemoProgramAddress is the SPL Memo program address
@@ -44,10 +41,21 @@ const (
 	// DefaultCommitment is the default commitment level for transactions
 	DefaultCommitment = rpc.CommitmentConfirmed
 
-	// MaxConfirmAttempts is the maximum number of confirmation attempts
-	MaxConfirmAttempts = 30
+	// ConfirmInitialRetryDelay is the delay for the first ConfirmInitialAttempts
+	// confirmation polls. Solana slots are ~400ms; a 250ms poll catches a
+	// confirmation in the same slot window instead of waiting a full second.
+	ConfirmInitialRetryDelay = 250 * time.Millisecond
 
-	// ConfirmRetryDelay is the base delay between confirmation attempts
+	// ConfirmInitialAttempts is how many confirmation polls use ConfirmInitialRetryDelay
+	// before falling back to ConfirmRetryDelay. 8×250ms + 28×1s preserves the
+	// ~30s budget of the previous 30×1s loop.
+	ConfirmInitialAttempts = 8
+
+	// MaxConfirmAttempts is the maximum number of confirmation attempts
+	MaxConfirmAttempts = 36
+
+	// ConfirmRetryDelay is the delay between confirmation attempts after the
+	// initial fast-poll window.
 	ConfirmRetryDelay = 1 * time.Second
 
 	// SettlementTTL is how long a transaction is held in the duplicate settlement cache.
@@ -81,6 +89,16 @@ const (
 	PYUSDTestnetAddress = "CXk2AMBfi3TwaEL2468s6zP8xq9NxTXjp9gjMgzeUynM" // Same as devnet
 
 	CASHMainnetAddress = "CASHx9KJUStyftLFWGvEVf59SGeG9sh5FfcnZMVPCASH"
+
+	// Default RPC endpoints for Solana networks.
+	MainnetRPCURL = "https://api.mainnet-beta.solana.com"
+	DevnetRPCURL  = "https://api.devnet.solana.com"
+	TestnetRPCURL = "https://api.testnet.solana.com"
+
+	// Default WebSocket endpoints for Solana networks.
+	MainnetWSURL = "wss://api.mainnet-beta.solana.com"
+	DevnetWSURL  = "wss://api.devnet.solana.com"
+	TestnetWSURL = "wss://api.testnet.solana.com"
 
 	// TokenProgramAddress and Token2022ProgramAddress are the SPL token programs,
 	// identical on every Solana network.
@@ -137,39 +155,12 @@ const (
 )
 
 var (
-	// NetworkConfigs maps CAIP-2 identifiers to network configurations
-	// See DEFAULT_ASSETS.md for guidelines on adding new networks
+	// NetworkConfigs maps CAIP-2 network identifiers to transport endpoints.
+	// Default assets live in DefaultAssets, not here.
 	NetworkConfigs = map[string]NetworkConfig{
-		SolanaMainnetCAIP2: {
-			Name:   "Solana Mainnet",
-			CAIP2:  SolanaMainnetCAIP2,
-			RPCURL: "https://api.mainnet-beta.solana.com",
-			DefaultAsset: AssetInfo{
-				Address:  USDCMainnetAddress,
-				Symbol:   "USDC",
-				Decimals: DefaultDecimals,
-			},
-		},
-		SolanaDevnetCAIP2: {
-			Name:   "Solana Devnet",
-			CAIP2:  SolanaDevnetCAIP2,
-			RPCURL: "https://api.devnet.solana.com",
-			DefaultAsset: AssetInfo{
-				Address:  USDCDevnetAddress,
-				Symbol:   "USDC",
-				Decimals: DefaultDecimals,
-			},
-		},
-		SolanaTestnetCAIP2: {
-			Name:   "Solana Testnet",
-			CAIP2:  SolanaTestnetCAIP2,
-			RPCURL: "https://api.testnet.solana.com",
-			DefaultAsset: AssetInfo{
-				Address:  USDCTestnetAddress,
-				Symbol:   "USDC",
-				Decimals: DefaultDecimals,
-			},
-		},
+		SolanaMainnetCAIP2: {RPCURL: MainnetRPCURL, WSURL: MainnetWSURL},
+		SolanaDevnetCAIP2:  {RPCURL: DevnetRPCURL, WSURL: DevnetWSURL},
+		SolanaTestnetCAIP2: {RPCURL: TestnetRPCURL, WSURL: TestnetWSURL},
 	}
 
 	// V1ToV2NetworkMap maps V1 network names to CAIP-2 identifiers

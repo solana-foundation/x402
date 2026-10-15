@@ -14,6 +14,68 @@ import (
 	"github.com/x402-foundation/x402/go/v2/mechanisms/svm/paymentchannels"
 )
 
+// Pins the exact schedule, so a change back to `backoffStep << (attempt-1)` fails here.
+func TestChannelReadPolicyBackoffIsLinear(t *testing.T) {
+	policy := channelReadPolicy{}.resolve()
+
+	assert.Equal(t, DefaultChannelReadMaxAttempts, policy.maxAttempts)
+	assert.Equal(t, DefaultChannelReadBackoffStep, policy.backoffStep)
+
+	var (
+		delays []time.Duration
+		total  time.Duration
+	)
+	for attempt := 1; attempt < policy.maxAttempts; attempt++ {
+		delay := policy.delayAfterAttempt(attempt)
+		delays = append(delays, delay)
+		total += delay
+	}
+
+	assert.Equal(t, []time.Duration{
+		200 * time.Millisecond,
+		400 * time.Millisecond,
+		600 * time.Millisecond,
+		800 * time.Millisecond,
+		1000 * time.Millisecond,
+	}, delays)
+	assert.Equal(t, 3*time.Second, total)
+	assert.Equal(t, time.Second, delays[len(delays)-1], "longest single wait")
+}
+
+// Config overrides must reach the retry loop rather than it using the defaults unconditionally.
+func TestChannelReadPolicyHonoursSchemeConfig(t *testing.T) {
+	attempts := 8
+	step := 50 * time.Millisecond
+	scheme := &UptoSvmScheme{config: Config{
+		ChannelReadMaxAttempts: &attempts,
+		ChannelReadBackoffStep: &step,
+	}}
+
+	policy := scheme.resolveChannelReadPolicy().resolve()
+	assert.Equal(t, attempts, policy.maxAttempts)
+	assert.Equal(t, step, policy.backoffStep)
+	assert.Equal(t, 400*time.Millisecond, policy.delayAfterAttempt(8))
+}
+
+// A channel that never becomes visible must be read exactly maxAttempts times.
+func TestFetchAndVerifyOpenChannelStopsAtConfiguredAttemptCount(t *testing.T) {
+	signer := newMockSigner(t, 1)
+	fixture := newPaymentFixture(t, signer)
+	rpcStub := newStubRPC(t)
+	signer.attachRPC(rpc.New(rpcStub.url))
+
+	_, err := fetchAndVerifyOpenChannel(
+		context.Background(),
+		signer,
+		testNetwork,
+		fixture.channelID,
+		expectedFrom(fixture),
+		channelReadPolicy{maxAttempts: 3, backoffStep: time.Millisecond},
+	)
+	require.Error(t, err)
+	assert.Len(t, rpcStub.commitments["getAccountInfo"], 3)
+}
+
 // expectedFrom derives the binding the facilitator checks for a fixture channel.
 func expectedFrom(fixture *paymentFixture) expectedOpenChannel {
 	return expectedOpenChannel{
@@ -32,14 +94,17 @@ func TestFetchAndVerifyOpenChannelRetriesMissingAccount(t *testing.T) {
 	signer := newMockSigner(t, 1)
 	fixture := newPaymentFixture(t, signer)
 	rpcStub := newStubRPC(t)
+	signer.attachRPC(rpc.New(rpcStub.url))
 	rpcStub.setAccount(fixture.channelID.String(), fixture.openChannel().encode(t))
 	rpcStub.hideAccountForReads(fixture.channelID.String(), 1)
 
 	verified, err := fetchAndVerifyOpenChannel(
 		context.Background(),
-		rpc.New(rpcStub.url),
+		signer,
+		testNetwork,
 		fixture.channelID,
 		expectedFrom(fixture),
+		channelReadPolicy{},
 	)
 	require.NoError(t, err)
 	assert.Equal(t, fixture.channelID, verified.ChannelID)
@@ -50,14 +115,17 @@ func TestFetchAndVerifyOpenChannelStopsRetryingWhenContextEnds(t *testing.T) {
 	signer := newMockSigner(t, 1)
 	fixture := newPaymentFixture(t, signer)
 	rpcStub := newStubRPC(t)
+	signer.attachRPC(rpc.New(rpcStub.url))
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
 	defer cancel()
 
 	_, err := fetchAndVerifyOpenChannel(
 		ctx,
-		rpc.New(rpcStub.url),
+		signer,
+		testNetwork,
 		fixture.channelID,
 		expectedFrom(fixture),
+		channelReadPolicy{},
 	)
 	require.ErrorIs(t, err, context.DeadlineExceeded)
 	assert.Len(t, rpcStub.commitments["getAccountInfo"], 1)

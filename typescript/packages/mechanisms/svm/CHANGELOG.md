@@ -1,5 +1,32 @@
 # @x402/svm Changelog
 
+## 2.25.0
+
+### Minor Changes
+
+- [299b9bc](https://github.com/x402-foundation/x402/commit/299b9bc): Add an optional facilitator-delegated receiver-authorizer mode to SVM `upto`. The facilitator may advertise `receiverAuthorizer` in `/supported`; a server that omits `receiverAuthorizerSigner` delegates voucher signing, and the facilitator signs after correlating the claim settle to the same authenticated caller that opened the channel. ([#3346](https://github.com/x402-foundation/x402/pull/3346)) - Thanks [@phdargen](https://github.com/phdargen)!
+- Updated dependencies [1bc2ae8](https://github.com/x402-foundation/x402/commit/1bc2ae8)
+- Updated dependencies [299b9bc](https://github.com/x402-foundation/x402/commit/299b9bc)
+- Updated dependencies [bbcb974](https://github.com/x402-foundation/x402/commit/bbcb974)
+  - @x402/core@2.25.0
+
+### Patch Changes
+
+- [fed6a04](https://github.com/x402-foundation/x402/commit/fed6a04): Replace `node:crypto`/`Buffer` usage in `transactionMessageHash`, `getChannelDistributionHash`, and payment-channel account discovery with `@noble/hashes/sha256` and `@solana/kit`'s base64 codec. These SHA-256 call sites were only ever needed by facilitator-side code, but lived in modules also imported by `exact/client`/`upto/client`, pulling Node's `crypto` module (and `Buffer`) into browser bundles of any consumer that imports the SVM client and forcing a `crypto`/`buffer` polyfill (e.g. `vite-plugin-node-polyfills`). `@noble/hashes` is a pure-JS, dependency-free SHA-256 implementation that produces byte-identical digests and needs no platform crypto API or polyfill on any target (browser, Node, React Native). ([#3335](https://github.com/x402-foundation/x402/pull/3335)) - Thanks [@CarsonRoscoe](https://github.com/CarsonRoscoe)!
+
+## 2.24.0
+
+### Minor Changes
+
+- [bb46ffc](https://github.com/x402-foundation/x402/commit/bb46ffc): Declare `upfront` payment flow support on SVM `exact` server schemes. `authorization` remains the default; servers opt in per route via `accepts.extra.paymentFlow`. ([#3240](https://github.com/x402-foundation/x402/pull/3240)) - Thanks [@phdargen](https://github.com/phdargen)!
+- [01b0a68](https://github.com/x402-foundation/x402/commit/01b0a68): Verify SVM exact payments without a fee-payer signing round trip: required signatures are checked locally, `simulateTransaction` always runs with `sigVerify` off, and `sendTransaction` skips preflight. Settle checks the duplicate cache before verification, decodes the transaction once (including address lookup tables), and smart-wallet settle fetches a single pre-balance. Confirmation polling starts at 250ms. ([#3263](https://github.com/x402-foundation/x402/pull/3263)) - Thanks [@phdargen](https://github.com/phdargen)!
+- [acaa904](https://github.com/x402-foundation/x402/commit/acaa904): Route SVM `upto` facilitator RPC through `toFacilitatorSvmSigner` instead of scheme config: claim settlement simulates before `skipPreflight` send, deposit composite sim uses `replaceRecentBlockhash` without an extra blockhash fetch, and claim overlaps channel read with blockhash prefetch. `UptoSvmFacilitatorConfig.rpc` / `rpcUrl` are removed — pass a paced RPC client or `{ defaultRpcUrl }` to the signer factory (#3183). ([#3274](https://github.com/x402-foundation/x402/pull/3274)) - Thanks [@phdargen](https://github.com/phdargen)!
+
+### Patch Changes
+
+- [ec0f71e](https://github.com/x402-foundation/x402/commit/ec0f71e): Reject invalid smart-wallet compute-unit and priority-fee limits when smart-wallet verification is enabled or its exported verification helpers are called, preventing non-finite or fractional configuration values from silently disabling fee protections or causing misleading payment failures. Export `assertSmartWalletLimits` and `SmartWalletLimits` for pre-validation. Dormant limits remain ignored while smart-wallet verification is disabled. ([#3122](https://github.com/x402-foundation/x402/pull/3122)) - Thanks [@notorious-d-e-v](https://github.com/notorious-d-e-v)!
+  - @x402/core@2.24.0
+
 ## 2.23.0
 
 ### Minor Changes

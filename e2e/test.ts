@@ -6,7 +6,7 @@ import { createWalletClient, createPublicClient, http, parseEther, formatEther, 
 import { privateKeyToAccount } from 'viem/accounts';
 import { base, baseSepolia } from 'viem/chains';
 import { TestDiscovery } from './src/discovery';
-import { ClientConfig, ScenarioResult, ServerConfig, TestScenario, endpointAssetTransferMethod, endpointPaymentScheme, endpointUsesBatchSettlement } from './src/types';
+import { ClientConfig, ScenarioResult, ServerConfig, TestScenario, endpointAssetTransferMethod, endpointPaymentFlow, endpointPaymentScheme, endpointUsesBatchSettlement } from './src/types';
 import { config as loggerConfig, log, verboseLog, errorLog, close as closeLogger, createComboLogger } from './src/logger';
 import { handleDiscoveryValidation, shouldRunDiscoveryValidation, type TestedDiscoveryScenario } from './extensions/bazaar';
 import { parseArgs, printHelp } from './src/cli/args';
@@ -86,7 +86,6 @@ async function approvePermit2Approval(evm: NetworkConfig, tokenAddress?: string)
     const child = spawn('tsx', args, {
       cwd: process.cwd(),
       stdio: 'pipe',
-      shell: true,
       env: { ...process.env, EVM_NETWORK: evm.caip2, EVM_RPC_URL: evm.rpcUrl },
     });
 
@@ -137,7 +136,6 @@ async function revokePermit2Approval(evm: NetworkConfig, tokenAddress?: string):
     const child = spawn('tsx', args, {
       cwd: process.cwd(),
       stdio: 'pipe',
-      shell: true,
       env: { ...process.env, EVM_NETWORK: evm.caip2, EVM_RPC_URL: evm.rpcUrl },
     });
 
@@ -172,18 +170,67 @@ async function revokePermit2Approval(evm: NetworkConfig, tokenAddress?: string):
   });
 }
 
+/** True when a client declares Swig setup env (svm-smart-wallet overlay). */
+function clientRequiresSwigSetup(client: { config: { environment?: { required?: string[] } } }): boolean {
+  return (client.config.environment?.required ?? []).includes('SWIG_ACCOUNT_ADDRESS');
+}
+
+type SwigSetupResult = {
+  ok?: boolean;
+  swigAccountAddress?: string;
+  created?: boolean;
+  swigIdBase58?: string;
+};
+
+function applySwigSetupResult(result: SwigSetupResult, logCreation: boolean): boolean {
+  if (!result.ok || !result.swigAccountAddress) {
+    return false;
+  }
+
+  process.env.SWIG_ACCOUNT_ADDRESS = result.swigAccountAddress;
+  if (result.swigIdBase58) {
+    process.env.SWIG_ID_BASE58 = result.swigIdBase58;
+  }
+
+  if (logCreation && result.created) {
+    log(`  ✅ New Swig smart wallet: SWIG_ACCOUNT_ADDRESS=${result.swigAccountAddress}`);
+    if (result.swigIdBase58) {
+      log(`     SWIG_ID_BASE58=${result.swigIdBase58}`);
+    }
+  } else {
+    verboseLog(`  ✅ Swig setup complete: ${result.swigAccountAddress}`);
+  }
+
+  return true;
+}
+
+function parseSwigSetupOutput(stdout: string): SwigSetupResult | undefined {
+  const lines = stdout.trim().split('\n');
+  for (let i = lines.length - 1; i >= 0; i--) {
+    try {
+      const parsed = JSON.parse(lines[i]!) as SwigSetupResult;
+      if (parsed.ok && parsed.swigAccountAddress) {
+        return parsed;
+      }
+    } catch {
+      // not JSON — keep scanning
+    }
+  }
+  return undefined;
+}
+
 /**
  * Prepare Swig smart-wallet state for svm-smart-wallet e2e client tests.
- * Called before each endpoint; creates/funds via scripts/swig-setup.ts when balance is low.
+ * Creates/funds via scripts/swig-setup.ts when SWIG_ACCOUNT_ADDRESS is unset or
+ * USDC balance is low; reuses SWIG_ACCOUNT_ADDRESS from env when already set.
  */
-async function setupSwigWallet(svmRpcUrl: string): Promise<boolean> {
+async function setupSwigWallet(svmRpcUrl: string, logCreation = false): Promise<boolean> {
   return new Promise((resolve) => {
     verboseLog('  🔧 Running Swig wallet setup...');
 
     const child = spawn('tsx', ['scripts/swig-setup.ts'], {
       cwd: process.cwd(),
       stdio: 'pipe',
-      shell: true,
       env: {
         ...process.env,
         SVM_RPC_URL: svmRpcUrl,
@@ -196,7 +243,16 @@ async function setupSwigWallet(svmRpcUrl: string): Promise<boolean> {
     child.stdout?.on('data', (data) => {
       const text = data.toString();
       stdout += text;
-      verboseLog(text.trim());
+      if (logCreation) {
+        for (const line of text.split('\n')) {
+          const trimmed = line.trim();
+          if (trimmed) {
+            log(trimmed);
+          }
+        }
+      } else {
+        verboseLog(text.trim());
+      }
     });
 
     child.stderr?.on('data', (data) => {
@@ -214,19 +270,10 @@ async function setupSwigWallet(svmRpcUrl: string): Promise<boolean> {
         return;
       }
 
-      const lines = stdout.trim().split('\n');
-      for (let i = lines.length - 1; i >= 0; i--) {
-        try {
-          const parsed = JSON.parse(lines[i]!) as { ok?: boolean; swigAccountAddress?: string };
-          if (parsed.ok && parsed.swigAccountAddress) {
-            process.env.SWIG_ACCOUNT_ADDRESS = parsed.swigAccountAddress;
-            verboseLog(`  ✅ Swig setup complete: ${parsed.swigAccountAddress}`);
-            resolve(true);
-            return;
-          }
-        } catch {
-          // not JSON — keep scanning
-        }
+      const parsed = parseSwigSetupOutput(stdout);
+      if (parsed && applySwigSetupResult(parsed, logCreation)) {
+        resolve(true);
+        return;
       }
 
       if (process.env.SWIG_ACCOUNT_ADDRESS) {
@@ -298,6 +345,10 @@ function getScenarioResourceKeys(
   scenario: TestScenario,
   ctx: EvmResourceKeyContext,
 ): string[] {
+  // Serialize Cardano scenarios in --parallel mode: shared wallet UTXO contention.
+  if (scenario.protocolFamily === 'cardano') {
+    return ['cardano:client-wallet'];
+  }
   if (scenario.protocolFamily !== 'evm') {
     return [];
   }
@@ -983,60 +1034,71 @@ async function runTest() {
     }
   }
 
-  const hasSwigSmartWalletScenarios = filteredScenarios.some(
-    s => s.client.name === 'typescript/http/svm-smart-wallet',
-  );
+  const hasSwigSmartWalletScenarios = filteredScenarios.some(s => clientRequiresSwigSetup(s.client));
 
   if (hasSwigSmartWalletScenarios) {
-    log('🔧 Swig smart-wallet scenarios detected — swig-setup runs before each endpoint when balance is low');
+    log('🔧 Swig smart-wallet scenarios detected — swig-setup creates/funds when needed (see e2e/.env)');
     log('');
   }
 
-  // Collect unique facilitators and servers
+  // Collect unique facilitators, servers, and clients
   const uniqueFacilitators = new Map<string, any>();
   const uniqueServers = new Map<string, any>();
+  const uniqueClients = new Map<string, any>();
 
   filteredScenarios.forEach(scenario => {
     if (scenario.facilitator) {
       uniqueFacilitators.set(scenario.facilitator.name, scenario.facilitator);
     }
     uniqueServers.set(scenario.server.name, scenario.server);
+    uniqueClients.set(scenario.client.name, scenario.client);
   });
 
-  // Validate environment variables for all selected facilitators
-  log('\n🔍 Validating facilitator environment variables...\n');
-  const missingEnvVars: { facilitatorName: string; missingVars: string[] }[] = [];
+  // Validate facilitator and client env against catalog-declared requirements.
+  log('\n🔍 Validating facilitator and client environment variables...\n');
+  const missingEnvVars: { componentName: string; missingVars: string[] }[] = [];
 
-  for (const [facilitatorName, facilitator] of uniqueFacilitators) {
-    const requiredVars = facilitator.config.environment?.required || [];
-    const missing: string[] = [];
+  const componentsToValidate: Map<string, any>[] = [uniqueFacilitators, uniqueClients];
 
-    for (const envVar of requiredVars) {
-      // Skip env keys the harness assigns itself (e.g. PORT), never operator-supplied
-      if (FACILITATOR_ENV_PREFLIGHT_ALLOWLIST.has(envVar)) {
-        continue;
+  for (const components of componentsToValidate) {
+    for (const [componentName, component] of components) {
+      const requiredVars = component.config.environment?.required || [];
+      const missing: string[] = [];
+
+      for (const envVar of requiredVars) {
+        // Skip env keys the harness assigns itself (e.g. PORT), never operator-supplied
+        if (FACILITATOR_ENV_PREFLIGHT_ALLOWLIST.has(envVar)) {
+          continue;
+        }
+        // Swig smart-wallet: swig-setup creates/persists these before each scenario.
+        if (
+          clientRequiresSwigSetup(component) &&
+          (envVar === 'SWIG_ACCOUNT_ADDRESS' || envVar === 'SWIG_ID_BASE58')
+        ) {
+          continue;
+        }
+        // Skip credentials for families not in this run (catalog marks all wallet
+        // keys required per family; only selected families need them present).
+        const family = protocolFamilyForCredentialKey(envVar);
+        if (family && !selectedProtocolFamilies.has(family)) {
+          continue;
+        }
+
+        if (!process.env[envVar]) {
+          missing.push(envVar);
+        }
       }
-      // Skip credentials for families not in this run (catalog marks all wallet
-      // keys required per family; only selected families need them present).
-      const family = protocolFamilyForCredentialKey(envVar);
-      if (family && !selectedProtocolFamilies.has(family)) {
-        continue;
-      }
 
-      if (!process.env[envVar]) {
-        missing.push(envVar);
+      if (missing.length > 0) {
+        missingEnvVars.push({ componentName, missingVars: missing });
       }
-    }
-
-    if (missing.length > 0) {
-      missingEnvVars.push({ facilitatorName, missingVars: missing });
     }
   }
 
   if (missingEnvVars.length > 0) {
-    errorLog('❌ Missing required environment variables for selected facilitators:\n');
-    for (const { facilitatorName, missingVars } of missingEnvVars) {
-      errorLog(`   ${facilitatorName}:`);
+    errorLog('❌ Missing required environment variables for selected facilitators/clients:\n');
+    for (const { componentName, missingVars } of missingEnvVars) {
+      errorLog(`   ${componentName}:`);
       missingVars.forEach(varName => errorLog(` - ${varName}`));
     }
     errorLog('\n💡 Please set the required environment variables and try again.\n');
@@ -1044,6 +1106,16 @@ async function runTest() {
   }
 
   log('  ✅ All required environment variables are present\n');
+
+  if (hasSwigSmartWalletScenarios) {
+    log('🔧 Bootstrapping Swig smart wallet (create if unset, fund if low)...\n');
+    const swigReady = await setupSwigWallet(networks.svm.rpcUrl, true);
+    if (!swigReady) {
+      errorLog('❌ Swig wallet bootstrap failed — fund CLIENT_SVM_PRIVATE_KEY with devnet SOL and USDC');
+      process.exit(1);
+    }
+    log('');
+  }
 
   // Clean up any processes on test ports from previous runs
   try {
@@ -1061,12 +1133,61 @@ async function runTest() {
     endpoint: string;
     facilitator: string;
     protocolFamily: string;
+    scheme: string;
+    assetTransferMethod: string;
+    paymentFlow: string;
+    transport: string;
+    version: string;
     passed: boolean;
     error?: string;
     transaction?: string;
     depositTransaction?: string;
     refundTransaction?: string;
     network?: string;
+  }
+
+  function scenarioDimensions(
+    scenario: TestScenario,
+  ): Pick<DetailedTestResult, 'scheme' | 'assetTransferMethod' | 'paymentFlow' | 'transport' | 'version'> {
+    return {
+      scheme: endpointPaymentScheme(scenario.endpoint),
+      assetTransferMethod: endpointAssetTransferMethod(scenario.endpoint) ?? 'n/a',
+      paymentFlow: endpointPaymentFlow(scenario.endpoint),
+      transport: scenario.server.config.transport || 'http',
+      version: String(scenario.server.config.x402Version ?? 1),
+    };
+  }
+
+  function buildBreakdown(
+    results: DetailedTestResult[],
+    key: keyof DetailedTestResult,
+  ): Record<string, { passed: number; failed: number }> {
+    return results.reduce((acc, test) => {
+      const k = String(test[key]);
+      if (!acc[k]) acc[k] = { passed: 0, failed: 0 };
+      if (test.passed) acc[k].passed++;
+      else acc[k].failed++;
+      return acc;
+    }, {} as Record<string, { passed: number; failed: number }>);
+  }
+
+  function logBreakdown(
+    title: string,
+    breakdown: Record<string, { passed: number; failed: number }>,
+    padEnd = 15,
+    style: 'rate' | 'total' = 'rate',
+  ): void {
+    log(`📊 ${title}:`);
+    Object.entries(breakdown).forEach(([name, stats]) => {
+      const total = stats.passed + stats.failed;
+      if (style === 'total') {
+        log(` ${name.toUpperCase()}: ✅ ${stats.passed} / ❌ ${stats.failed} / 📈 ${total} total`);
+        return;
+      }
+      const passRate = total > 0 ? Math.round((stats.passed / total) * 100) : 0;
+      log(` ${name.padEnd(padEnd)} ✅ ${stats.passed} / ❌ ${stats.failed} (${passRate}%)`);
+    });
+    log('');
   }
 
   let testResults: DetailedTestResult[] = [];
@@ -1262,6 +1383,7 @@ async function runTest() {
             endpoint: scenario.endpoint.path,
             facilitator: scenario.facilitator?.name || 'none',
             protocolFamily: scenario.protocolFamily,
+            ...scenarioDimensions(scenario),
             passed: !fullError,
             error: fullError,
             transaction: refundTransaction || depositTransaction,
@@ -1302,6 +1424,7 @@ async function runTest() {
             endpoint: scenario.endpoint.path,
             facilitator: scenario.facilitator?.name || 'none',
             protocolFamily: scenario.protocolFamily,
+            ...scenarioDimensions(scenario),
             passed: false,
             error: initialError,
             depositTransaction: getBatchStep(initialResult, 'deposit')?.payment_response?.transaction,
@@ -1342,6 +1465,7 @@ async function runTest() {
             endpoint: scenario.endpoint.path,
             facilitator: scenario.facilitator?.name || 'none',
             protocolFamily: scenario.protocolFamily,
+            ...scenarioDimensions(scenario),
             passed: false,
             error: recoveryError,
             transaction: refundTransaction || depositTransaction,
@@ -1366,6 +1490,7 @@ async function runTest() {
           endpoint: scenario.endpoint.path,
           facilitator: scenario.facilitator?.name || 'none',
           protocolFamily: scenario.protocolFamily,
+          ...scenarioDimensions(scenario),
           passed: true,
           transaction: refundTransaction || depositTransaction,
           depositTransaction,
@@ -1386,6 +1511,7 @@ async function runTest() {
         endpoint: scenario.endpoint.path,
         facilitator: scenario.facilitator?.name || 'none',
         protocolFamily: scenario.protocolFamily,
+        ...scenarioDimensions(scenario),
         passed: result.success,
         error: result.error,
         transaction: result.payment_response?.transaction,
@@ -1415,6 +1541,7 @@ async function runTest() {
         endpoint: scenario.endpoint.path,
         facilitator: scenario.facilitator?.name || 'none',
         protocolFamily: scenario.protocolFamily,
+        ...scenarioDimensions(scenario),
         passed: false,
         error: errorMsg,
       };
@@ -1472,9 +1599,8 @@ async function runTest() {
       mockFacilitatorUrl,
     };
 
-    const started = await startServer(serverProxy, serverConfig, { transport: server.config.transport });
-    if (!started) {
-      cLog.log(`❌ Failed to start server ${serverName}`);
+    const serverStartFailures = (error: string) => {
+      cLog.log(`❌ Failed to start server ${serverName}${error ? `: ${error}` : ''}`);
       return scenarios.map(scenario => ({
         testNumber: nextTestNumber(),
         client: scenario.client.name,
@@ -1482,9 +1608,20 @@ async function runTest() {
         endpoint: scenario.endpoint.path,
         facilitator: scenario.facilitator?.name || 'none',
         protocolFamily: scenario.protocolFamily,
+        ...scenarioDimensions(scenario),
         passed: false,
         error: 'Server failed to start',
       }));
+    };
+
+    let started = false;
+    try {
+      started = await startServer(serverProxy, serverConfig, { transport: server.config.transport });
+    } catch (error) {
+      return serverStartFailures(error instanceof Error ? error.message : String(error));
+    }
+    if (!started) {
+      return serverStartFailures('');
     }
     cLog.log(`  ✅ Server ${serverName} ready`);
 
@@ -1508,12 +1645,16 @@ async function runTest() {
             endpoint: scenario.endpoint.path,
             facilitator: scenario.facilitator?.name || 'none',
             protocolFamily: scenario.protocolFamily,
+            ...scenarioDimensions(scenario),
             passed: false,
             error,
           });
 
-          if (scenario.client.name === 'typescript/http/svm-smart-wallet') {
-            await setupSwigWallet(networks.svm.rpcUrl);
+          if (clientRequiresSwigSetup(scenario.client)) {
+            const swigReady = await setupSwigWallet(networks.svm.rpcUrl);
+            if (!swigReady) {
+              return setupFailure('Swig wallet setup failed');
+            }
           }
 
           if (scenario.endpoint.schemeOptions?.permit2Direct === true) {
@@ -1766,99 +1907,45 @@ async function runTest() {
     log('');
   }
 
-  // Breakdown by facilitator
-  const facilitatorBreakdown = testResults.reduce((acc, test) => {
-    const key = test.facilitator;
-    if (!acc[key]) acc[key] = { passed: 0, failed: 0 };
-    if (test.passed) acc[key].passed++;
-    else acc[key].failed++;
-    return acc;
-  }, {} as Record<string, { passed: number; failed: number }>);
+  logBreakdown('Breakdown by Facilitator', buildBreakdown(testResults, 'facilitator'));
+  logBreakdown('Breakdown by Server', buildBreakdown(testResults, 'server'), 20);
+  logBreakdown('Breakdown by Client', buildBreakdown(testResults, 'client'), 20);
+  logBreakdown('Breakdown by Scheme', buildBreakdown(testResults, 'scheme'));
+  logBreakdown('Breakdown by Asset Transfer Method', buildBreakdown(testResults, 'assetTransferMethod'), 20);
+  logBreakdown('Breakdown by Transport', buildBreakdown(testResults, 'transport'));
+  logBreakdown('Breakdown by Version', buildBreakdown(testResults, 'version'));
 
-  log('📊 Breakdown by Facilitator:');
-  Object.entries(facilitatorBreakdown).forEach(([facilitator, stats]) => {
-    const total = stats.passed + stats.failed;
-    const passRate = total > 0 ? Math.round((stats.passed / total) * 100) : 0;
-    log(` ${facilitator.padEnd(15)} ✅ ${stats.passed} / ❌ ${stats.failed} (${passRate}%)`);
-  });
-  log('');
+  const paymentFlowBreakdown = buildBreakdown(testResults, 'paymentFlow');
+  if (Object.keys(paymentFlowBreakdown).length > 1) {
+    logBreakdown('Breakdown by Payment Flow', paymentFlowBreakdown);
+  }
 
-  // Breakdown by server
-  const serverBreakdown = testResults.reduce((acc, test) => {
-    const key = test.server;
-    if (!acc[key]) acc[key] = { passed: 0, failed: 0 };
-    if (test.passed) acc[key].passed++;
-    else acc[key].failed++;
-    return acc;
-  }, {} as Record<string, { passed: number; failed: number }>);
-
-  log('📊 Breakdown by Server:');
-  Object.entries(serverBreakdown).forEach(([server, stats]) => {
-    const total = stats.passed + stats.failed;
-    const passRate = total > 0 ? Math.round((stats.passed / total) * 100) : 0;
-    log(` ${server.padEnd(20)} ✅ ${stats.passed} / ❌ ${stats.failed} (${passRate}%)`);
-  });
-  log('');
-
-  // Breakdown by client
-  const clientBreakdown = testResults.reduce((acc, test) => {
-    const key = test.client;
-    if (!acc[key]) acc[key] = { passed: 0, failed: 0 };
-    if (test.passed) acc[key].passed++;
-    else acc[key].failed++;
-    return acc;
-  }, {} as Record<string, { passed: number; failed: number }>);
-
-  log('📊 Breakdown by Client:');
-  Object.entries(clientBreakdown).forEach(([client, stats]) => {
-    const total = stats.passed + stats.failed;
-    const passRate = total > 0 ? Math.round((stats.passed / total) * 100) : 0;
-    log(`   ${client.padEnd(20)} ✅ ${stats.passed} / ❌ ${stats.failed} (${passRate}%)`);
-  });
-  log('');
-
-  // Protocol family breakdown
-  const protocolBreakdown = testResults.reduce((acc, test) => {
-    const key = test.protocolFamily;
-    if (!acc[key]) acc[key] = { passed: 0, failed: 0 };
-    if (test.passed) acc[key].passed++;
-    else acc[key].failed++;
-    return acc;
-  }, {} as Record<string, { passed: number; failed: number }>);
-
+  const protocolBreakdown = buildBreakdown(testResults, 'protocolFamily');
   if (Object.keys(protocolBreakdown).length > 1) {
-    log('📊 Protocol Family Breakdown:');
-    Object.entries(protocolBreakdown).forEach(([protocol, stats]) => {
-      const total = stats.passed + stats.failed;
-      log(` ${protocol.toUpperCase()}: ✅ ${stats.passed} / ❌ ${stats.failed} / 📈 ${total} total`);
-    });
-    log('');
+    logBreakdown('Protocol Family Breakdown', protocolBreakdown, 15, 'total');
   }
 
   // Write structured JSON output if requested
   if (parsedArgs.outputJson) {
-    const breakdown = (results: DetailedTestResult[], key: keyof DetailedTestResult) =>
-      results.reduce((acc, test) => {
-        const k = String(test[key]);
-        if (!acc[k]) acc[k] = { passed: 0, failed: 0 };
-        if (test.passed) acc[k].passed++;
-        else acc[k].failed++;
-        return acc;
-      }, {} as Record<string, { passed: number; failed: number }>);
-
     const jsonOutput = {
       summary: {
         total: passed + failed,
         passed,
         failed,
         networkMode,
+        durationMinutes: Number(((Date.now() - startTime) / 60_000).toFixed(2)),
       },
       results: testResults,
       breakdowns: {
-        byFacilitator: breakdown(testResults, 'facilitator'),
-        byServer: breakdown(testResults, 'server'),
-        byClient: breakdown(testResults, 'client'),
-        byProtocolFamily: breakdown(testResults, 'protocolFamily'),
+        byFacilitator: buildBreakdown(testResults, 'facilitator'),
+        byServer: buildBreakdown(testResults, 'server'),
+        byClient: buildBreakdown(testResults, 'client'),
+        byScheme: buildBreakdown(testResults, 'scheme'),
+        byAssetTransferMethod: buildBreakdown(testResults, 'assetTransferMethod'),
+        byTransport: buildBreakdown(testResults, 'transport'),
+        byVersion: buildBreakdown(testResults, 'version'),
+        byPaymentFlow: buildBreakdown(testResults, 'paymentFlow'),
+        byProtocolFamily: buildBreakdown(testResults, 'protocolFamily'),
       },
     };
 

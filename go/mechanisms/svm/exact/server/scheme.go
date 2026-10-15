@@ -60,7 +60,7 @@ func (s *ExactSvmScheme) DynamicExtraFields() []string {
 func (s *ExactSvmScheme) PaymentFlows() map[string]x402.PaymentFlowConfig {
 	return map[string]x402.PaymentFlowConfig{
 		x402.SDKDefaultAssetTransferMethod: {
-			Supported: []x402.PaymentFlowName{x402.PaymentFlowAuthorization},
+			Supported: []x402.PaymentFlowName{x402.PaymentFlowAuthorization, x402.PaymentFlowUpfront},
 			Default:   x402.PaymentFlowAuthorization,
 		},
 	}
@@ -114,8 +114,7 @@ func (s *ExactSvmScheme) RegisterMoneyParser(parser x402.MoneyParser) *ExactSvmS
 func (s *ExactSvmScheme) ParsePrice(price x402.Price, network x402.Network) (x402.AssetAmount, error) {
 	networkStr := string(network)
 
-	// Get network config to determine the default asset
-	config, err := svm.GetNetworkConfig(networkStr)
+	defaultAsset, err := svm.GetDefaultAsset(networkStr, "")
 	if err != nil {
 		return x402.AssetAmount{}, err
 	}
@@ -128,7 +127,7 @@ func (s *ExactSvmScheme) ParsePrice(price x402.Price, network x402.Network) (x40
 				return x402.AssetAmount{}, errors.New(ErrAmountMustBeString)
 			}
 
-			asset := config.DefaultAsset.Address
+			asset := defaultAsset.Asset
 			if assetVal, hasAsset := priceMap["asset"]; hasAsset {
 				if assetStr, ok := assetVal.(string); ok {
 					asset = assetStr
@@ -205,21 +204,23 @@ func (s *ExactSvmScheme) EnhancePaymentRequirements(
 
 	// Get network config
 	networkStr := string(requirements.Network)
-	config, err := svm.GetNetworkConfig(networkStr)
-	if err != nil {
+	if _, err := svm.NormalizeNetwork(networkStr); err != nil {
 		return requirements, err
 	}
 
 	// Get asset info
 	var assetInfo *svm.AssetInfo
+	var err error
 	if requirements.Asset != "" {
 		assetInfo, err = svm.GetAssetInfo(networkStr, requirements.Asset)
 		if err != nil {
 			return requirements, err
 		}
 	} else {
-		// Use default asset if not specified
-		assetInfo = &config.DefaultAsset
+		assetInfo, err = svm.GetAssetInfo(networkStr, "")
+		if err != nil {
+			return requirements, err
+		}
 		requirements.Asset = assetInfo.Address
 	}
 

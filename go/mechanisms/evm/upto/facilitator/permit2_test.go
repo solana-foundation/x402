@@ -31,6 +31,9 @@ type mockFacilitatorSigner struct {
 	verifyError        error
 	receiptResult      *evm.TransactionReceipt
 	receiptError       error
+	// writeContractCalls counts WriteContract invocations, so pending-settlement
+	// reconciliation tests can assert the fast path never re-broadcasts.
+	writeContractCalls int
 }
 
 func newMockSigner(addresses ...string) *mockFacilitatorSigner {
@@ -60,6 +63,7 @@ func (m *mockFacilitatorSigner) VerifyTypedData(ctx context.Context, address str
 }
 
 func (m *mockFacilitatorSigner) WriteContract(ctx context.Context, address string, abi []byte, functionName string, dataSuffix []byte, args ...interface{}) (string, error) {
+	m.writeContractCalls++
 	if m.writeContractError != nil {
 		return "", m.writeContractError
 	}
@@ -174,6 +178,10 @@ func buildValidRequirements() types.PaymentRequirements {
 
 func TestVerifyUptoPermit2_AssetIsEOA(t *testing.T) {
 	// When GetCode for the asset returns empty bytes, verify must reject with asset_not_deployed_contract.
+	// Other tests share testTokenAddr but model it as deployed, and positive asset checks are cached
+	// process-wide, so drop those entries to force a real GetCode here.
+	evm.ResetAssetContractCache()
+
 	signer := newMockSigner()
 	signer.getCodeByAddress = map[string][]byte{
 		strings.ToLower(testTokenAddr): {}, // token = EOA
@@ -185,6 +193,8 @@ func TestVerifyUptoPermit2_AssetIsEOA(t *testing.T) {
 
 func TestVerifyUptoPermit2_AssetGetCodeRPCError(t *testing.T) {
 	// An RPC error on GetCode must propagate as an internal error, not a 400.
+	evm.ResetAssetContractCache()
+
 	signer := newMockSigner()
 	signer.getCodeError = fmt.Errorf("rpc: connection refused")
 	p := buildValidUptoPayload(testFacilitatorAddr)
@@ -451,7 +461,7 @@ func TestSettleUptoPermit2_ZeroSettlement(t *testing.T) {
 	req := buildValidRequirements()
 	req.Amount = "0" // settle zero — no on-chain tx
 
-	resp, err := SettleUptoPermit2(context.Background(), signer, payload, req, p, nil, false)
+	resp, err := SettleUptoPermit2(context.Background(), signer, payload, req, p, nil, false, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -474,7 +484,7 @@ func TestSettleUptoPermit2_ExceedsPermittedAmount(t *testing.T) {
 	req := buildValidRequirements()
 	req.Amount = "99999" // more than permitted "1000"
 
-	_, err := SettleUptoPermit2(context.Background(), signer, payload, req, p, nil, false)
+	_, err := SettleUptoPermit2(context.Background(), signer, payload, req, p, nil, false, nil)
 	assertSettleError(t, err, ErrUptoSettlementExceedsAmount)
 }
 
@@ -487,6 +497,7 @@ func TestSettleUptoPermit2_FullAmount(t *testing.T) {
 		buildValidUptoPayload(testFacilitatorAddr),
 		nil,
 		false,
+		nil,
 	)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -504,7 +515,7 @@ func TestSettleUptoPermit2_PartialAmount(t *testing.T) {
 	req := buildValidRequirements()
 	req.Amount = "500" // 500 of 1000 permitted
 
-	resp, err := SettleUptoPermit2(context.Background(), signer, buildValidPayload(testFacilitatorAddr), req, buildValidUptoPayload(testFacilitatorAddr), nil, false)
+	resp, err := SettleUptoPermit2(context.Background(), signer, buildValidPayload(testFacilitatorAddr), req, buildValidUptoPayload(testFacilitatorAddr), nil, false, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -521,7 +532,7 @@ func TestSettleUptoPermit2_InvalidSettlementAmount(t *testing.T) {
 	req := buildValidRequirements()
 	req.Amount = "not-a-number"
 
-	_, err := SettleUptoPermit2(context.Background(), signer, buildValidPayload(testFacilitatorAddr), req, buildValidUptoPayload(testFacilitatorAddr), nil, false)
+	_, err := SettleUptoPermit2(context.Background(), signer, buildValidPayload(testFacilitatorAddr), req, buildValidUptoPayload(testFacilitatorAddr), nil, false, nil)
 	if err == nil {
 		t.Fatal("expected error on invalid settlement amount")
 	}
@@ -531,7 +542,7 @@ func TestSettleUptoPermit2_WriteContractFails(t *testing.T) {
 	signer := newMockSigner()
 	signer.writeContractError = errors.New("out of gas")
 
-	_, err := SettleUptoPermit2(context.Background(), signer, buildValidPayload(testFacilitatorAddr), buildValidRequirements(), buildValidUptoPayload(testFacilitatorAddr), nil, false)
+	_, err := SettleUptoPermit2(context.Background(), signer, buildValidPayload(testFacilitatorAddr), buildValidRequirements(), buildValidUptoPayload(testFacilitatorAddr), nil, false, nil)
 	if err == nil {
 		t.Fatal("expected error on WriteContract failure")
 	}
@@ -541,7 +552,7 @@ func TestSettleUptoPermit2_ReceiptStatusFailed(t *testing.T) {
 	signer := newMockSigner()
 	signer.receiptResult = &evm.TransactionReceipt{Status: evm.TxStatusFailed, TxHash: "0xfail"}
 
-	_, err := SettleUptoPermit2(context.Background(), signer, buildValidPayload(testFacilitatorAddr), buildValidRequirements(), buildValidUptoPayload(testFacilitatorAddr), nil, false)
+	_, err := SettleUptoPermit2(context.Background(), signer, buildValidPayload(testFacilitatorAddr), buildValidRequirements(), buildValidUptoPayload(testFacilitatorAddr), nil, false, nil)
 	assertSettleError(t, err, ErrUptoTransactionFailed)
 }
 
@@ -549,7 +560,7 @@ func TestSettleUptoPermit2_ReceiptError(t *testing.T) {
 	signer := newMockSigner()
 	signer.receiptError = errors.New("timeout")
 
-	resp, err := SettleUptoPermit2(context.Background(), signer, buildValidPayload(testFacilitatorAddr), buildValidRequirements(), buildValidUptoPayload(testFacilitatorAddr), nil, false)
+	resp, err := SettleUptoPermit2(context.Background(), signer, buildValidPayload(testFacilitatorAddr), buildValidRequirements(), buildValidUptoPayload(testFacilitatorAddr), nil, false, nil)
 	if err == nil {
 		t.Fatalf("expected settlement_pending error, got success: %+v", resp)
 	}
@@ -561,6 +572,115 @@ func TestSettleUptoPermit2_ReceiptError(t *testing.T) {
 	}
 	if se.Transaction == "" {
 		t.Errorf("expected non-empty transaction hash preserved on settlement_pending")
+	}
+}
+
+// ─── SettleUptoPermit2 — PendingSettlementStore fast path ───────────────────
+//
+// Mirrors the TS/Python upto pending-settlement test suites: a receipt-wait
+// failure must populate the injected store keyed by the Permit2 signature,
+// and a subsequent settle for the identical payload must hit that entry,
+// skip verify/broadcast entirely, and reconcile against the already-
+// broadcast transaction — using the SAME settlement-override amount, since
+// the resource server's single retry resends the identical
+// payload/requirements bytes (see settleWithPendingRetry in go/server.go).
+
+func TestSettleUptoPermit2_PendingSettlementStore_CacheMissSuccessLeavesNoEntry(t *testing.T) {
+	signer := newMockSigner()
+	store := x402.NewInMemoryPendingSettlementStore()
+	p := buildValidUptoPayload(testFacilitatorAddr)
+
+	resp, err := SettleUptoPermit2(context.Background(), signer, buildValidPayload(testFacilitatorAddr), buildValidRequirements(), p, nil, false, store)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !resp.Success {
+		t.Fatalf("expected success, got %s", resp.ErrorReason)
+	}
+
+	if _, ok, _ := store.Get(context.Background(), p.Signature); ok {
+		t.Error("successful settlement must not leave a pending entry")
+	}
+}
+
+func TestSettleUptoPermit2_PendingSettlementStore_CacheMissReceiptFailurePopulatesStore(t *testing.T) {
+	signer := newMockSigner()
+	signer.receiptError = errors.New("timeout")
+	store := x402.NewInMemoryPendingSettlementStore()
+	p := buildValidUptoPayload(testFacilitatorAddr)
+
+	_, err := SettleUptoPermit2(context.Background(), signer, buildValidPayload(testFacilitatorAddr), buildValidRequirements(), p, nil, false, store)
+	assertSettleError(t, err, ErrSettlementPending)
+
+	txHash, ok, _ := store.Get(context.Background(), p.Signature)
+	if !ok {
+		t.Fatal("receipt-wait failure must populate the pending-settlement store")
+	}
+	if txHash != signer.writeContractTx {
+		t.Errorf("expected stored tx hash %q, got %q", signer.writeContractTx, txHash)
+	}
+}
+
+func TestSettleUptoPermit2_PendingSettlementStore_CacheHitReconcilesWithoutRebroadcast(t *testing.T) {
+	signer := newMockSigner() // receipt wait now succeeds
+	store := x402.NewInMemoryPendingSettlementStore()
+	p := buildValidUptoPayload(testFacilitatorAddr)
+	priorTxHash := "0xabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcd"
+	if err := store.Set(context.Background(), p.Signature, priorTxHash); err != nil {
+		t.Fatalf("store.Set: %v", err)
+	}
+
+	resp, err := SettleUptoPermit2(context.Background(), signer, buildValidPayload(testFacilitatorAddr), buildValidRequirements(), p, nil, false, store)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !resp.Success || resp.Transaction != priorTxHash {
+		t.Fatalf("expected reconciled success with tx %q, got success=%v tx=%q reason=%s",
+			priorTxHash, resp.Success, resp.Transaction, resp.ErrorReason)
+	}
+	if resp.Amount != testAmount {
+		t.Errorf("reconciled response must report the settled Amount like the normal broadcast path does, got %q want %q",
+			resp.Amount, testAmount)
+	}
+	if signer.writeContractCalls != 0 {
+		t.Errorf("reconciliation fast path must never re-broadcast, got %d WriteContract calls", signer.writeContractCalls)
+	}
+
+	if _, ok, _ := store.Get(context.Background(), p.Signature); ok {
+		t.Error("successful reconciliation must clear the pending entry")
+	}
+}
+
+func TestSettleUptoPermit2_PendingSettlementStore_CacheHitStillPendingReturnsAgainWithoutRebroadcast(t *testing.T) {
+	signer := newMockSigner()
+	signer.receiptError = errors.New("still pending")
+	store := x402.NewInMemoryPendingSettlementStore()
+	p := buildValidUptoPayload(testFacilitatorAddr)
+	priorTxHash := "0xabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcd"
+	if err := store.Set(context.Background(), p.Signature, priorTxHash); err != nil {
+		t.Fatalf("store.Set: %v", err)
+	}
+
+	_, err := SettleUptoPermit2(context.Background(), signer, buildValidPayload(testFacilitatorAddr), buildValidRequirements(), p, nil, false, store)
+	assertSettleError(t, err, ErrSettlementPending)
+	if signer.writeContractCalls != 0 {
+		t.Errorf("reconciliation fast path must never re-broadcast, got %d WriteContract calls", signer.writeContractCalls)
+	}
+
+	txHash, ok, _ := store.Get(context.Background(), p.Signature)
+	if !ok || txHash != priorTxHash {
+		t.Errorf("expected pending entry to persist with tx %q, got ok=%v tx=%q", priorTxHash, ok, txHash)
+	}
+}
+
+func TestSettleUptoPermit2_PendingSettlementStore_NilStoreDisablesFastPath(t *testing.T) {
+	signer := newMockSigner()
+	resp, err := SettleUptoPermit2(context.Background(), signer, buildValidPayload(testFacilitatorAddr), buildValidRequirements(), buildValidUptoPayload(testFacilitatorAddr), nil, false, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !resp.Success {
+		t.Errorf("expected success, got %s", resp.ErrorReason)
 	}
 }
 
@@ -607,7 +727,7 @@ func erc20ApprovalSettleCtx(sendTxHashes []string, receiptErr error) (*x402.Faci
 func TestSettleUptoPermit2_ERC20ApprovalIncompleteHashesFailTerminally(t *testing.T) {
 	facilCtx, payload := erc20ApprovalSettleCtx([]string{"0xapproval"}, nil)
 
-	_, err := SettleUptoPermit2(context.Background(), newMockSigner(), payload, buildValidRequirements(), buildValidUptoPayload(testFacilitatorAddr), facilCtx, false)
+	_, err := SettleUptoPermit2(context.Background(), newMockSigner(), payload, buildValidRequirements(), buildValidUptoPayload(testFacilitatorAddr), facilCtx, false, nil)
 	if err == nil {
 		t.Fatal("expected error when extension signer returns incomplete transaction hashes")
 	}
@@ -629,7 +749,7 @@ func TestSettleUptoPermit2_InvalidBroadcastHashIsTerminal(t *testing.T) {
 	signer.writeContractTx = "0xnothash"
 	signer.receiptError = errors.New("timeout")
 
-	_, err := SettleUptoPermit2(context.Background(), signer, buildValidPayload(testFacilitatorAddr), buildValidRequirements(), buildValidUptoPayload(testFacilitatorAddr), nil, false)
+	_, err := SettleUptoPermit2(context.Background(), signer, buildValidPayload(testFacilitatorAddr), buildValidRequirements(), buildValidUptoPayload(testFacilitatorAddr), nil, false, nil)
 	if err == nil {
 		t.Fatal("expected error when the signer returns an invalid transaction hash")
 	}
@@ -648,7 +768,7 @@ func TestSettleUptoPermit2_ERC20ApprovalAtomicBundleSingleHashSucceeds(t *testin
 	bundleHash := "0x" + strings.Repeat("ef", 32)
 	facilCtx, payload := erc20ApprovalSettleCtx([]string{bundleHash}, nil)
 
-	resp, err := SettleUptoPermit2(context.Background(), newMockSigner(), payload, buildValidRequirements(), buildValidUptoPayload(testFacilitatorAddr), facilCtx, false)
+	resp, err := SettleUptoPermit2(context.Background(), newMockSigner(), payload, buildValidRequirements(), buildValidUptoPayload(testFacilitatorAddr), facilCtx, false, nil)
 	if err != nil {
 		t.Fatalf("expected success with a single bundled hash, got error: %v", err)
 	}
@@ -664,7 +784,7 @@ func TestSettleUptoPermit2_ERC20ApprovalExtensionReceiptWaitFailureReturnsSettle
 		errors.New("rpc: timeout waiting for receipt"),
 	)
 
-	resp, err := SettleUptoPermit2(context.Background(), newMockSigner(), payload, buildValidRequirements(), buildValidUptoPayload(testFacilitatorAddr), facilCtx, false)
+	resp, err := SettleUptoPermit2(context.Background(), newMockSigner(), payload, buildValidRequirements(), buildValidUptoPayload(testFacilitatorAddr), facilCtx, false, nil)
 	if err == nil {
 		t.Fatalf("expected settlement_pending error, got success: %+v", resp)
 	}
@@ -684,7 +804,7 @@ func TestSettleUptoPermit2_VerifyFails_EOAPayer(t *testing.T) {
 	signer := newMockSigner()
 	signer.getCodeResult = []byte{} // EOA
 
-	_, err := SettleUptoPermit2(context.Background(), signer, buildValidPayload(testFacilitatorAddr), buildValidRequirements(), buildValidUptoPayload(testFacilitatorAddr), nil, false)
+	_, err := SettleUptoPermit2(context.Background(), signer, buildValidPayload(testFacilitatorAddr), buildValidRequirements(), buildValidUptoPayload(testFacilitatorAddr), nil, false, nil)
 	if err == nil {
 		t.Fatal("expected error when verify fails during settle")
 	}
@@ -713,7 +833,7 @@ func TestSettleUptoPermit2_WithEIP2612_ZeroSettlement(t *testing.T) {
 	req := buildValidRequirements()
 	req.Amount = "0"
 
-	resp, err := SettleUptoPermit2(context.Background(), signer, payload, req, p, nil, false)
+	resp, err := SettleUptoPermit2(context.Background(), signer, payload, req, p, nil, false, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

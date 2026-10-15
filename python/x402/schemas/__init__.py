@@ -33,6 +33,7 @@ from .config import (
 
 # Error types
 from .errors import (
+    FacilitatorCapabilityError,
     NoMatchingRequirementsError,
     PaymentAbortedError,
     PaymentError,
@@ -65,6 +66,7 @@ from .helpers import (
 from .hooks import (
     AbortProtectedRequestResult,
     AbortResult,
+    CompletedSettlement,
     GrantAccessResult,
     PaymentCancellationDispatcher,
     PaymentCreatedContext,
@@ -82,6 +84,7 @@ from .hooks import (
     ServerPaymentRequiredContext,
     SettleContext,
     SettleFailureContext,
+    SettlePhase,
     SettleResultContext,
     SkipHandlerDirective,
     SkipHandlerResult,
@@ -187,6 +190,8 @@ __all__ = [
     "VerifiedPaymentCancelOptions",
     "VerifiedPaymentCanceledContext",
     "VerifiedPaymentCancellationReason",
+    "SettlePhase",
+    "CompletedSettlement",
     "PaymentCancellationDispatcher",
     "GrantAccessResult",
     "AbortProtectedRequestResult",
@@ -212,4 +217,5 @@ __all__ = [
     "SchemeNotFoundError",
     "NoMatchingRequirementsError",
     "PaymentAbortedError",
+    "FacilitatorCapabilityError",
 ]
