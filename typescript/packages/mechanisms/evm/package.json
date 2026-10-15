@@ -1,12 +1,12 @@
 {
   "name": "@x402/evm",
-  "version": "2.25.0",
+  "version": "2.28.0",
   "main": "./dist/cjs/index.js",
   "module": "./dist/esm/index.js",
   "types": "./dist/cjs/index.d.ts",
   "scripts": {
     "start": "tsx --env-file=.env index.ts",
-    "build": "tsup",
+    "build": "tsup && node ../../../scripts/mirror-cjs-dts.mjs",
     "test": "vitest run --coverage",
     "test:integration": "vitest run --config vitest.integration.config.ts",
     "setup:smart-accounts": "tsx scripts/setup-smart-accounts.ts",
@@ -221,6 +221,26 @@
       "require": {
         "types": "./dist/cjs/auth-capture/client/index.d.ts",
         "default": "./dist/cjs/auth-capture/client/index.js"
+      }
+    },
+    "./auth-capture/server": {
+      "import": {
+        "types": "./dist/esm/auth-capture/server/index.d.mts",
+        "default": "./dist/esm/auth-capture/server/index.mjs"
+      },
+      "require": {
+        "types": "./dist/cjs/auth-capture/server/index.d.ts",
+        "default": "./dist/cjs/auth-capture/server/index.js"
+      }
+    },
+    "./auth-capture/facilitator": {
+      "import": {
+        "types": "./dist/esm/auth-capture/facilitator/index.d.mts",
+        "default": "./dist/esm/auth-capture/facilitator/index.mjs"
+      },
+      "require": {
+        "types": "./dist/cjs/auth-capture/facilitator/index.d.ts",
+        "default": "./dist/cjs/auth-capture/facilitator/index.js"
       }
     }
   },

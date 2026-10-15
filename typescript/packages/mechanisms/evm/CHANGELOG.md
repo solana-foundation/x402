@@ -1,5 +1,41 @@
 # @x402/evm Changelog
 
+## 2.28.0
+
+### Minor Changes
+
+- [dd89698](https://github.com/x402-foundation/x402/commit/dd89698): Add Arc mainnet (chain ID 5042) and Arc Testnet (chain ID 5042002) with native USDC as the default stablecoin ([#3590](https://github.com/x402-foundation/x402/pull/3590)) - Thanks [@NotMcAfee](https://github.com/NotMcAfee)!
+
+### Patch Changes
+
+- [a9955ae](https://github.com/x402-foundation/x402/commit/a9955ae): Add Monad testnet USDC (`0x534b2f3A21130d7a60830c2Df862319e593943A3`, EIP-3009) as the default asset for `eip155:10143` so `"$0.10"` dollar-string pricing resolves on Monad testnet. Register v1 network name `monad-testnet`. ([#3570](https://github.com/x402-foundation/x402/pull/3570)) - Thanks [@phdargen](https://github.com/phdargen) and [@cursoragent](https://github.com/cursoragent)!
+  - @x402/core@2.28.0
+
+## 2.27.0
+
+### Minor Changes
+
+- Updated dependencies [5d3a2b2](https://github.com/x402-foundation/x402/commit/5d3a2b2)
+  - @x402/core@2.27.0
+
+### Patch Changes
+
+- [59f1347](https://github.com/x402-foundation/x402/commit/59f1347): `getEvmChainId` now requires a bare decimal CAIP-2 reference (`eip155:<digits>`). It used to call `parseInt`, which stops at the first non-digit, so `eip155:0x2105` resolved to chain ID `0` and `eip155:8453abc` to `8453` instead of being rejected — and that chain ID is signed into the EIP-712 domain for Permit2, EIP-3009 and batch-settlement. Chain IDs beyond `Number.MAX_SAFE_INTEGER` are now rejected instead of silently rounded. The Go and Python SDKs already reject all of these. ([#3521](https://github.com/x402-foundation/x402/pull/3521)) - Thanks [@HereForTheTechNFT](https://github.com/HereForTheTechNFT)!
+
+## 2.26.0
+
+### Minor Changes
+
+- [c10d3bb](https://github.com/x402-foundation/x402/commit/c10d3bb): EVM facilitators now cache a positive asset-contract check for 15 minutes instead of issuing a fresh eth_getCode on the payment token for every payment. Only positive results are cached, so a token observed mid-deployment still recovers on the next request. The cache is keyed by network and asset so entries cannot collide across chains. ([#3363](https://github.com/x402-foundation/x402/pull/3363)) - Thanks [@PhilBot402](https://github.com/PhilBot402) and [@phdargen](https://github.com/phdargen)!
+- [76fe973](https://github.com/x402-foundation/x402/commit/76fe973): Pass the resolved atomic `spendControls` cap to every scheme on `PaymentPayloadContext.maxAmountPerPayment` (omitted when uncapped) so capital-locking schemes can reuse client policy without re-resolving it. Batch-settlement EVM servers always announce `extra.minDeposit` (default `10 × amount`, optional per-route override via `accepts.extra.minDeposit`). Clients size deposits from the hint when valid, clamped to that cap × `depositMultiplier` when a spend cap is set. Uncapped payments (`spendControls: false` or no per-asset cap) also leave deposits uncapped. Older 402s fall back to `depositMultiplier` for sizing. Servers may opt in to SDK enforcement via `enforceMinDeposit: true` (default off; facilitator never enforces). Export `invalid_batch_settlement_evm_deposit_below_min_deposit` for custom server enforcement. ([#3372](https://github.com/x402-foundation/x402/pull/3372)) - Thanks [@phdargen](https://github.com/phdargen) and [@cursoragent](https://github.com/cursoragent)!
+- Updated dependencies [76fe973](https://github.com/x402-foundation/x402/commit/76fe973)
+  - @x402/core@2.26.0
+
+### Patch Changes
+
+- [4fb5d07](https://github.com/x402-foundation/x402/commit/4fb5d07): Add Celo mainnet USDT (`0x48065fbBE25f71C9282ddf5e1cD6D6A887483D5e`) and USAT (`0xD2ab3C9A02DBBAB236BfEC45D1d755DF4267F771`), both EIP-3009, as default assets for `eip155:42220`, so `"$0.10 USDT"` and `"$0.10 USAT"` resolve on Celo. Bare `"$0.10"` still resolves to USDC. ([#3457](https://github.com/x402-foundation/x402/pull/3457)) - Thanks [@GigaHierz](https://github.com/GigaHierz)!
+- [20e525c](https://github.com/x402-foundation/x402/commit/20e525c): EVM exact settle's ERC-6492 branch now reads payer deployment from the verify it already awaited rather than issuing a second eth_getCode. Both reads happen within one settle call and before any deploy transaction, so this is not the post-deploy re-read that races RPC state propagation. ([#3365](https://github.com/x402-foundation/x402/pull/3365)) - Thanks [@PhilBot402](https://github.com/PhilBot402) and [@phdargen](https://github.com/phdargen)!
+
 ## 2.25.0
 
 ### Minor Changes
