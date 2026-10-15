@@ -402,7 +402,7 @@ In the example the client pays `1050000` base units in total: `50000` to the spl
 | `splits[].memo` | string | OPTIONAL | Human-readable label for off-chain reconciliation, ≤ 566 bytes. Informational only; it is **not** emitted as an on-chain Memo instruction. The single on-chain Memo remains governed by `extra.memo` (§3.1). |
 | `splits[].ataCreationRequired` | boolean | OPTIONAL | Default `false`. Authorizes fee-payer-funded creation of this recipient's ATA (§5.4). Meaningful only for SPL / Token-2022 assets. |
 
-Every split shares the top-level `asset`; a split MUST NOT name a different mint. Split `payTo` values SHOULD be distinct from one another and from the primary `payTo`; when they are not, each leg is still matched to its own distinct transfer instruction (§5.3).
+Every split shares the top-level `asset`; a split MUST NOT name a different mint. Split `payTo` values MUST be distinct from one another and from the primary `payTo`.
 
 ### 5.2 Amount Semantics (MUST)
 
