@@ -61,7 +61,7 @@ While implementation details vary by network, facilitators MUST enforce security
 
 ### SVM
 
-- Fee payer safety: the fee payer MUST NOT appear as an account in sensitive instructions or be the transfer authority/source. The sole bounded exception is fee-payer-funded ATA creation for authorized split recipients (see Multi-Payee Splits below).
+- Fee payer safety: the fee payer MUST NOT appear as an account in sensitive instructions or be the transfer authority/source. The sole bounded exception is fee-payer-funded ATA creation for recipients the Resource Server marks `ataCreationRequired`, and only when the facilitator advertises that it sponsors ATA creation (see Multi-Payee Splits below).
 - Destination correctness: the receiver MUST match the `payTo` derived destination for the specified `asset`.
 - Amount exactness: the transferred amount MUST equal `maxAmountRequired`. When splits are present, the amount is distributed across legs and the merchant receives the remainder (see Multi-Payee Splits below).
 
@@ -101,6 +101,7 @@ The extension is network-agnostic in shape but network-specific in encoding and 
 - The primary recipient (`payTo`) receives the remainder: `amount − Σ splits[].amount`. This remainder MUST be greater than zero; requirements that consume the entire amount with splits MUST be rejected.
 - Each payment leg (primary plus each split) MUST be settled to its declared recipient for its declared amount, and a verifier MUST match each leg to a distinct on-chain transfer.
 - Clients MUST verify that `splits` contains only recipients and amounts they agreed to before authorizing payment; a malicious server could otherwise inject splits to divert funds.
+- Split support is an advertised facilitator capability, not an unadvertised local policy. A facilitator MUST announce the maximum number of splits it accepts (and any related sponsorship, such as recipient account creation) in the `extra` of the matching `kinds[]` entry of its `/supported` response; absent advertisement means no support. Resource servers MUST NOT issue requirements exceeding what the selected facilitator advertises.
 
 When `extra.splits` is absent or empty, the scheme behaves as a single-payee `exact` payment. Networks that do not implement the extension MUST reject requirements that carry a non-empty `splits` array rather than silently ignoring it (which would misdirect the merchant's expected distribution).
 
