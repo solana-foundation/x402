@@ -9,7 +9,7 @@
   },
   "dependencies": {
     "@hono/node-server": "^1.14.0",
-    "@modelcontextprotocol/sdk": "^1.15.1",
+    "@modelcontextprotocol/sdk": "^1.32.0",
     "@x402/aptos": "workspace:*",
     "@x402/avm": "workspace:*",
     "@x402/cardano": "workspace:*",
