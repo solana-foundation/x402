@@ -268,7 +268,7 @@ Sponsors SHOULD maintain an allowlist of programs permitted to reach simulation-
 | Metaplex Core | `CoREENxT6tW1HoK8ypY1SxRMZTcVPm7R94rH4PZNhX7d` |
 | Lighthouse (Phantom assertions) | `L2TExMFKdjpN9kozasaurPirfHy9P8sbXoAN1qA3S95` |
 
-The ComputeBudget and SPL Memo programs are **category-exempt** — they are not wallet programs and are permitted independently of the allowlist (ComputeBudget is bounded by §2.2.1; Memo is enforced in §3.2). Any other top-level program not on the allowlist SHOULD be rejected (`smart_wallet_program_not_allowed`). Operators MAY override the allowlist.
+The ComputeBudget and SPL Memo programs are **category-exempt** — they are not wallet programs and are permitted independently of the allowlist (ComputeBudget is bounded by §2.2.1; Memo is enforced in §3.2). The Associated Token Account program (`ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL`) is exempt on the same basis, but only for `CreateIdempotent` instructions that satisfy §5.4. Any other top-level program not on the allowlist SHOULD be rejected (`smart_wallet_program_not_allowed`). Operators MAY override the allowlist.
 
 #### 2.2.3 Simulation-Based Rejection (SHOULD)
 
@@ -300,7 +300,7 @@ When `enableSmartWalletVerification` is enabled, the signer MUST implement the s
 
 ### 3.1 Path 1 — Static Layout Verification (standard wallets)
 
-The fast path for standard wallets. The decompiled transaction MUST contain 3 to 7 instructions in this order:
+The fast path for standard wallets. For a single-payee charge (no `extra.splits` and no ATA creation), the decompiled transaction MUST contain 3 to 7 instructions in this order:
 
 1. Compute Budget: Set Compute Unit Limit
 2. Compute Budget: Set Compute Unit Price
@@ -316,13 +316,13 @@ The fast path for standard wallets. The decompiled transaction MUST contain 3 to
 - If `extra.memo` is present, the facilitator MUST verify that exactly one Memo instruction exists and that its data matches `extra.memo` encoded as UTF-8.
 - Fee payer isolation, compute budget validity (compute unit price ≤ 5 lamports/CU on this path), destination ATA derivation, and exact amount match are enforced as before.
 
-When `extra.splits` is present, the static layout generalizes to include one `TransferChecked` per payment leg plus optional idempotent ATA-creation instructions for recipients marked `ataCreationRequired`; see §5.7.
+When `extra.splits` is present or any recipient is marked `ataCreationRequired`, the 3–7 instruction cap does not apply as written. It generalizes to `3 + N + K` to `7 + N + K` instructions, where `N` is the number of splits and `K` the number of `CreateIdempotent` instructions (at most one per marked recipient), in the layout defined in §5.7. Split charges from standard wallets are expected to verify on Path 1: a charge whose instruction count is within these bounds MUST NOT be rejected, or sent to Path 2, because of its count.
 
 ### 3.2 Path 2 — Simulation-Based Smart Wallet Verification
 
 Smart wallet programs wrap the transfer inside their own instruction (e.g. Squads `vaultTransactionExecute`, Swig `SignV2`), so Path 1 sees an unknown program at the transfer position and rejects it. Path 2 verifies the **outcome** instead of the instruction format:
 
-1. **Fee payer isolation** (§2.1.1): the fee payer MUST NOT appear in any instruction's accounts or as a program ID, after ALT resolution (§2.1.2).
+1. **Fee payer isolation** (§2.1.1): the fee payer MUST NOT appear in any instruction's accounts or as a program ID, after ALT resolution (§2.1.2). The only exception is the bounded one in §2.1.1 / §5.4: when the Sponsor advertises `ataCreationSponsored`, the fee payer MAY appear as the funding `payer` of a top-level `CreateIdempotent` instruction for the ATA of a recipient marked `ataCreationRequired`. The fee payer MUST NOT appear in any other instruction, including inside a smart-wallet wrapper.
 2. **Compute budget caps** (§2.2.1): operator-configurable CU and priority-fee caps.
 3. **Program allowlist** (§2.2.2): the wrapping program MUST be on the allowlist.
 4. **Memo enforcement**: if `extra.memo` is present, exactly one top-level Memo instruction MUST match it (mirrors Path 1, so a seller-required memo cannot be bypassed by routing through a smart wallet).
@@ -464,6 +464,8 @@ Split support is not an unadvertised local policy. A Sponsor announces it in the
 | `maxSplits` | number | Maximum number of `extra.splits` entries the Sponsor accepts, `0`–`8`. **Absent ⇒ `0`**: the Sponsor does not accept splits and MUST reject requirements carrying a non-empty `splits` array. |
 | `ataCreationSponsored` | boolean | Whether the `feePayer` funds ATA creation for recipients marked `ataCreationRequired` (§5.4). **Absent ⇒ `false`**. |
 
+These keys sit in `kinds[].extra`, next to `feePayer`, rather than in a discriminator-style `capabilities` map. They are not variants of the payload a client may choose between. `maxSplits` is a numeric bound and `ataCreationSponsored` is a commitment of the Sponsor's own funds, and both MUST fail closed: a Sponsor that predates this extension advertises neither key, and that MUST be read as no support. A capabilities map where absence means full support would read the same silence as unlimited splits and sponsored rent.
+
 A Resource Server MUST NOT issue requirements with more splits than the selected Sponsor advertises, and MUST NOT mark recipients `ataCreationRequired` for a Sponsor that does not advertise `ataCreationSponsored`. Clients MUST NOT assume split support that the Sponsor has not advertised.
 
 A Sponsor that signs a split transaction as `feePayer` MUST, in addition to the baseline in §2.1:
@@ -484,16 +486,18 @@ Before signing, the client MUST verify that `extra.splits` — when present — 
 - Independently compute the primary remainder (`amount − Σ splits[].amount`) and confirm it is the amount reaching the merchant.
 - Reject requirements whose split recipients or amounts it did not agree to, and reject any `ataCreationRequired: true` it is unwilling to fund.
 
-### 5.7 Static Layout with Splits (Reference)
+### 5.7 Static Layout with Splits (MUST)
 
-Path 1 (§3.1) generalizes for splits. The decompiled transaction consists of, in order:
+Path 1 (§3.1) generalizes for splits and for ATA creation. With `N` splits and `K` `CreateIdempotent` instructions (`0 ≤ K ≤` the number of recipients marked `ataCreationRequired: true`), the decompiled transaction MUST contain `3 + N + K` to `7 + N + K` instructions in this order:
 
 1. Compute Budget: Set Compute Unit Limit
 2. Compute Budget: Set Compute Unit Price
-3. Zero or more `AssociatedTokenProgram: CreateIdempotent` instructions — at most one per recipient (primary or split) marked `ataCreationRequired: true`, omitted when the ATA already exists (§5.4)
+3. `K` `AssociatedTokenProgram: CreateIdempotent` instructions, at most one per marked recipient (primary or split), each omitted when that ATA already exists (§5.4)
 4. One `TransferChecked` for the primary payment (the remainder)
-5. One `TransferChecked` per split
-6. (Optional) the same wallet-injected Lighthouse / SPL Memo instructions permitted in §3.1
+5. `N` `TransferChecked` instructions, one per split, in the order of `extra.splits`
+6. Up to four optional instructions: the same wallet-injected Lighthouse / SPL Memo instructions permitted in §3.1
+
+The optional tail keeps the four slots of §3.1, so Phantom and Solflare injections stay on the fast path no matter how many legs the charge has. A verifier matches the transfers positionally: the first `TransferChecked` after the `K` creates is the primary leg, and the next `N` are `extra.splits[0]` through `extra.splits[N - 1]`. A transaction that departs from this layout is a recoverable layout failure (§3.3) and MAY still verify on Path 2. The compute unit limit naturally grows with `N` and `K`, and remains subject to §2.2.1.
 
 The exactly-one-Memo rule for `extra.memo` (§3.1) is unchanged: a single on-chain Memo governs the whole charge, not one per leg. Smart-wallet (Path 2, §3.2) charges verify the same `N + 1`-leg outcome across the CPI trace, and post-settlement verification (§3.4) confirms every leg landed on-chain, not simulation alone.
 
