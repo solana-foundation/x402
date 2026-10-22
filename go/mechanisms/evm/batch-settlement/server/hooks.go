@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"math/big"
 	"strings"
 	"time"
@@ -57,24 +58,6 @@ func verificationStateUnavailableAfter() *x402.AfterVerifyResult {
 	}
 }
 
-func inferMissingLocalChargedAmount(signedMaxClaimable, price string, isPaidPayload bool) string {
-	if !isPaidPayload {
-		return signedMaxClaimable
-	}
-	signed, ok := new(big.Int).SetString(signedMaxClaimable, 10)
-	if !ok {
-		signed = big.NewInt(0)
-	}
-	amount, ok := new(big.Int).SetString(price, 10)
-	if !ok {
-		amount = big.NewInt(0)
-	}
-	if signed.Cmp(amount) < 0 {
-		return "0"
-	}
-	return new(big.Int).Sub(signed, amount).String()
-}
-
 // BeforeVerifyHook binds the claimed channelId and reads a channel snapshot.
 // This phase performs no storage mutation. Reservation + persist happen in
 // AfterVerifyHook after successful verification.
@@ -92,13 +75,34 @@ func (s *BatchSettlementEvmScheme) BeforeVerifyHook() x402.BeforeVerifyHook {
 			return nil, nil
 		}
 
+		if s.enforceMinDeposit && batchsettlement.IsDepositPayload(payload) {
+			hintReq := types.PaymentRequirements{
+				Amount:  ctx.Requirements.GetAmount(),
+				Asset:   ctx.Requirements.GetAsset(),
+				Network: ctx.Requirements.GetNetwork(),
+				Extra:   ctx.Requirements.GetExtra(),
+			}
+			minDepositStr, hintErr := s.ResolveMinDepositHint(hintReq)
+			if hintErr != nil {
+				return nil, hintErr
+			}
+			minDeposit, ok := new(big.Int).SetString(minDepositStr, 10)
+			depositAmount := depositAmountFromPayload(payload)
+			if ok && minDeposit != nil && depositAmount != nil && depositAmount.Cmp(minDeposit) < 0 {
+				return &x402.BeforeHookResult{
+					Abort:   true,
+					Reason:  batchsettlement.ErrDepositBelowMinDeposit,
+					Message: "Deposit amount is below the server minimum",
+				}, nil
+			}
+		}
+
 		voucherFields, _ := payload["voucher"].(map[string]interface{})
 		if voucherFields == nil {
 			return nil, nil
 		}
 		rawChannelId, _ := voucherFields["channelId"].(string)
 		signedMaxStr, _ := voucherFields["maxClaimableAmount"].(string)
-		signature, _ := voucherFields["signature"].(string)
 
 		cfgMap, _ := payload["channelConfig"].(map[string]interface{})
 		cfg, cfgErr := batchsettlement.ChannelConfigFromMap(cfgMap)
@@ -131,44 +135,35 @@ func (s *BatchSettlementEvmScheme) BeforeVerifyHook() x402.BeforeVerifyHook {
 			return verificationStateUnavailable(), nil //nolint:nilerr // map storage failures to fail-closed abort
 		}
 
-		chargedCumulativeAmount := inferMissingLocalChargedAmount(signedMaxStr, ctx.Requirements.GetAmount(), isPaid)
+		// With no local record the baseline is the facilitator-verified onchain
+		// totalClaimed, which is only known in AfterVerify; the cumulative check runs there.
 		if channelSnapshot != nil {
-			chargedCumulativeAmount = channelSnapshot.ChargedCumulativeAmount
-		}
-
-		prevCharged, _ := new(big.Int).SetString(chargedCumulativeAmount, 10)
-		if prevCharged == nil {
-			prevCharged = big.NewInt(0)
-		}
-		reqAmount, _ := new(big.Int).SetString(ctx.Requirements.GetAmount(), 10)
-		if reqAmount == nil {
-			reqAmount = big.NewInt(0)
-		}
-		signedMax, _ := new(big.Int).SetString(signedMaxStr, 10)
-		if signedMax == nil {
-			signedMax = big.NewInt(0)
-		}
-
-		var expectedMax *big.Int
-		if isZeroCharge {
-			expectedMax = new(big.Int).Set(prevCharged)
-		} else {
-			expectedMax = new(big.Int).Add(prevCharged, reqAmount)
-		}
-
-		if signedMax.Cmp(expectedMax) != 0 {
-			snapshot := channelSnapshot
-			if snapshot == nil {
-				snapshot = buildProvisionalChannelFromPayload(
-					channelId, signedMaxStr, signature, payload, prevCharged.String(), now,
-				)
+			prevCharged, _ := new(big.Int).SetString(channelSnapshot.ChargedCumulativeAmount, 10)
+			if prevCharged == nil {
+				prevCharged = big.NewInt(0)
 			}
-			s.RememberChannelSnapshot(ctx.Payload, snapshot)
-			return &x402.BeforeHookResult{
-				Abort:   true,
-				Reason:  batchsettlement.ErrCumulativeAmountMismatch,
-				Message: "Client voucher base does not match server state",
-			}, nil
+			reqAmount, _ := new(big.Int).SetString(ctx.Requirements.GetAmount(), 10)
+			if reqAmount == nil {
+				reqAmount = big.NewInt(0)
+			}
+			signedMax, _ := new(big.Int).SetString(signedMaxStr, 10)
+			if signedMax == nil {
+				signedMax = big.NewInt(0)
+			}
+
+			expectedMax := new(big.Int).Set(prevCharged)
+			if !isZeroCharge {
+				expectedMax.Add(expectedMax, reqAmount)
+			}
+
+			if signedMax.Cmp(expectedMax) != 0 {
+				s.RememberChannelSnapshot(ctx.Payload, channelSnapshot)
+				return &x402.BeforeHookResult{
+					Abort:   true,
+					Reason:  batchsettlement.ErrCumulativeAmountMismatch,
+					Message: "Client voucher base does not match server state",
+				}, nil
+			}
 		}
 
 		s.MergeRequestContext(ctx.Payload, BatchSettlementRequestContext{
@@ -411,7 +406,10 @@ func (s *BatchSettlementEvmScheme) AfterVerifyHook() x402.AfterVerifyHook {
 
 		ex := ctx.Result.Extra
 		balance := mapStringField(ex, "balance", "0")
-		totalClaimed := mapStringField(ex, "totalClaimed", "0")
+		totalClaimed, ok := mapUintStringField(ex, "totalClaimed")
+		if !ok {
+			return verificationStateUnavailableAfter(), nil
+		}
 		withdrawRequestedAt := mapIntField(ex, "withdrawRequestedAt", 0)
 		refundNonce := mapIntField(ex, "refundNonce", 0)
 
@@ -441,7 +439,9 @@ func (s *BatchSettlementEvmScheme) AfterVerifyHook() x402.AfterVerifyHook {
 				return current
 			}
 
-			base := inferMissingLocalChargedAmount(signedMaxClaimable, ctx.Requirements.GetAmount(), !isRefundVoucher)
+			// With no local record the baseline is the facilitator-verified onchain
+			// totalClaimed, never a value derived from the payer-signed voucher.
+			base := totalClaimed
 			if current != nil {
 				base = current.ChargedCumulativeAmount
 			}
@@ -468,9 +468,14 @@ func (s *BatchSettlementEvmScheme) AfterVerifyHook() x402.AfterVerifyHook {
 				if current != nil {
 					outcomeStaleChannel = current
 				} else {
-					outcomeStaleChannel = buildProvisionalChannelFromPayload(
+					provisional := buildProvisionalChannelFromPayload(
 						normalizedId, signedMaxClaimable, signature, payload, base, now,
 					)
+					provisional.Balance = balance
+					provisional.TotalClaimed = totalClaimed
+					provisional.WithdrawRequestedAt = withdrawRequestedAt
+					provisional.RefundNonce = refundNonce
+					outcomeStaleChannel = provisional
 				}
 				return current
 			}
@@ -1095,6 +1100,36 @@ func mapStringField(m map[string]interface{}, key string, defaultVal string) str
 	return defaultVal
 }
 
+// maxSafeJSONInteger is the largest integer a JSON number carries losslessly (2^53 - 1). It bounds
+// the numeric fallback in mapUintStringField so every SDK applies the same rule.
+const maxSafeJSONInteger = float64(1<<53 - 1)
+
+// mapUintStringField extracts a non-negative integer field as a decimal string.
+// Canonical rule shared across SDKs: a plain decimal string with no leading zeros ("0" is the only
+// string starting with 0), or a JSON number that is a non-negative safe integer.
+// Unlike mapStringField it has no default: absent or malformed values report ok=false.
+func mapUintStringField(m map[string]interface{}, key string) (string, bool) {
+	if m == nil {
+		return "", false
+	}
+	switch v := m[key].(type) {
+	case string:
+		n, ok := new(big.Int).SetString(v, 10)
+		if !ok || n.Sign() < 0 || n.String() != v {
+			return "", false
+		}
+		return v, true
+	case float64:
+		// JSON numbers are bounded to the safe-integer range (2^53 - 1) so the uint64
+		// conversion below can neither overflow nor lose precision; NaN fails the Trunc check.
+		if v < 0 || v > maxSafeJSONInteger || v != math.Trunc(v) {
+			return "", false
+		}
+		return new(big.Int).SetUint64(uint64(v)).String(), true
+	}
+	return "", false
+}
+
 // mapIntField extracts an int field from a map with a default.
 func mapIntField(m map[string]interface{}, key string, defaultVal int) int {
 	if m == nil {
@@ -1112,4 +1147,23 @@ func mapIntField(m map[string]interface{}, key string, defaultVal int) int {
 		}
 	}
 	return defaultVal
+}
+
+func depositAmountFromPayload(payload map[string]interface{}) *big.Int {
+	if payload == nil {
+		return nil
+	}
+	dep, ok := payload["deposit"].(map[string]interface{})
+	if !ok {
+		return nil
+	}
+	s, ok := dep["amount"].(string)
+	if !ok {
+		return nil
+	}
+	n, ok := new(big.Int).SetString(s, 10)
+	if !ok {
+		return nil
+	}
+	return n
 }

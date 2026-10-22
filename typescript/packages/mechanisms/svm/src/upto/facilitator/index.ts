@@ -12,27 +12,22 @@ export {
   ERR_UNEXPECTED_VOUCHER,
   UptoSvmScheme,
 } from "./scheme";
-export type {
-  UptoChannelStorageErrorContext,
-  UptoDelegatedSettleContext,
-  UptoSvmFacilitatorConfig,
-} from "./scheme";
+export type { UptoDelegatedSettleContext, UptoSvmFacilitatorConfig } from "./scheme";
 export { ErrSettlementPending } from "../../exact/facilitator/errors";
 export {
-  ChannelOpenConfirmationError,
+  ChannelBroadcastConfirmationError as ChannelOpenConfirmationError,
   DEFAULT_CHANNEL_READ_BACKOFF_STEP_MS,
   DEFAULT_CHANNEL_READ_MAX_ATTEMPTS,
+  ChannelSimulationError as SettlementSimulationError,
   SettlementConfirmationTimeoutError,
-  SettlementSimulationError,
-} from "./channel";
-export type { UptoSvmSigner } from "./channel";
-export { InMemoryUptoChannelStorage } from "./channelStorage";
-export type { UptoChannelRecord, UptoChannelStorage } from "./channelStorage";
-export {
-  InMemoryUptoDelegatedAuthStore,
-  UptoDelegatedAuthIdentityConflictError,
-} from "./delegatedAuthStore";
-export type { UptoDelegatedAuthBinding, UptoDelegatedAuthStore } from "./delegatedAuthStore";
+} from "../../payment-channels/facilitator";
+export type { PaymentChannelSvmSigner as UptoSvmSigner } from "../../payment-channels/facilitator";
+export { InMemoryPaymentChannelStorage } from "../../payment-channels/storage";
+export type {
+  PaymentChannelOpenWrite,
+  PaymentChannelRecord,
+  PaymentChannelStorage,
+} from "../../payment-channels/storage";
 export {
   DEFAULT_ABANDON_GRACE_SECS,
   DEFAULT_MAX_CLOSES_PER_RUN,

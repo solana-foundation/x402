@@ -72,6 +72,7 @@ from .interfaces import (
     PaymentFlowConfig,
     PaymentFlowName,
     PaymentFlowPhases,
+    PaymentPayloadContext,
     ResolvedPaymentFlow,
     SchemeNetworkClient,
     SchemeNetworkClientV1,
@@ -172,7 +173,7 @@ from .server import (
     x402ResourceServerSync,
 )
 
-__version__ = "2.22.0"
+__version__ = "2.25.0"
 
 __all__ = [
     # Version
@@ -209,6 +210,7 @@ __all__ = [
     "SchemeNetworkServer",
     "SchemeNetworkFacilitator",
     "SchemeNetworkFacilitatorV1",
+    "PaymentPayloadContext",
     "PaymentFlowName",
     "PaymentFlowPhases",
     "PaymentFlowConfig",
