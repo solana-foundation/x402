@@ -1326,7 +1326,10 @@ scheme.
   budgeted zero and cannot execute), it MUST NOT contain Compute Budget program
   instructions, and its `priorityFee` is a total in lamports, evaluated against
   a per-compute-unit cap as `priorityFee * 1000000 <= maxPriorityFeeMicroLamports *
-  computeUnitLimit`.
+  computeUnitLimit`. Here `maxPriorityFeeMicroLamports` is the maximum
+  compute-unit price that applies to `SetComputeUnitPrice` in a legacy or
+  version-0 transaction: `5000000` microlamports per compute unit, or a
+  stricter local sponsor policy.
 
 ##### Message and signer rules
 

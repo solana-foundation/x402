@@ -225,7 +225,11 @@ scheme.
   budgeted zero and cannot execute), it MUST NOT contain Compute Budget program
   instructions, and its `priorityFee` is a total in lamports, evaluated against
   a per-compute-unit cap as `priorityFee * 1000000 <= maxPriorityFeeMicroLamports *
-  computeUnitLimit`.
+  computeUnitLimit`. Here `maxPriorityFeeMicroLamports` is the sponsor's
+  maximum compute unit price in microlamports per compute unit, the same bound
+  it applies to `SetComputeUnitPrice` in a legacy or version-0 transaction
+  (§2.2.1). On the static fast path (§3.1) it is 5,000,000 microlamports
+  (5 lamports/CU).
 
 ## 2. Sponsor Acceptance Policy (Reference)
 
@@ -277,7 +281,7 @@ Reference defaults (operator-configurable):
 | Limit | Default |
 |---|---|
 | Max compute units | `400,000` |
-| Max priority fee | `50,000` microlamports |
+| Max priority fee (`maxPriorityFeeMicroLamports`) | `50,000` microlamports / CU |
 
 (The static fast path of the reference implementation applies a tighter cap of ≤ 5 lamports / CU for standard wallets; see §3.1.)
 
@@ -356,7 +360,7 @@ A version-1 transaction MUST contain 1 to 5 instructions in this order:
 5. (Optional) Memo program instruction
 
 - Allowed optional programs: Lighthouse (`L2TExMFKdjpN9kozasaurPirfHy9P8sbXoAN1qA3S95`) and SPL Memo (`MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr`).
-- Phantom wallet injects up to 3 Lighthouse instructions; Solflare injects 2. These are wallet-injected user protection mechanisms and MUST be allowed. The cap of 7 instructions keeps these wallets on the fast path without needing Path 2.
+- Phantom wallet injects up to 3 Lighthouse instructions; Solflare injects 2. These are wallet-injected user protection mechanisms and MUST be allowed. For legacy and version-0 transactions, the cap of 7 instructions keeps these wallets on the fast path without needing Path 2. A version-1 transaction has no Compute Budget instructions, so its cap is 5 and that cap still applies.
 - The Memo instruction ensures transaction uniqueness across concurrent payments with identical parameters. Clients MUST include a Memo instruction containing either the value of `extra.memo` (when present) or a random nonce (at least 16 bytes, hex-encoded for UTF-8 compliance).
 - If `extra.memo` is present, the facilitator MUST verify that exactly one Memo instruction exists and that its data matches `extra.memo` encoded as UTF-8.
 - Fee payer isolation, destination ATA derivation, and exact amount match are
