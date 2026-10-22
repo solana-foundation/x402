@@ -12,6 +12,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
 
+	x402 "github.com/x402-foundation/x402/go/v2"
 	"github.com/x402-foundation/x402/go/v2/mechanisms/evm"
 	evmclient "github.com/x402-foundation/x402/go/v2/mechanisms/evm/exact/client"
 	evmfacilitator "github.com/x402-foundation/x402/go/v2/mechanisms/evm/exact/facilitator"
@@ -238,7 +239,7 @@ func TestCreatePaymentPayloadEIP3009(t *testing.T) {
 			},
 		}
 
-		payload, err := client.CreatePaymentPayload(ctx, requirements)
+		payload, err := client.CreatePaymentPayload(ctx, requirements, x402.PaymentPayloadContext{})
 		if err != nil {
 			t.Fatalf("Failed to create payload: %v", err)
 		}
@@ -285,7 +286,7 @@ func TestCreatePaymentPayloadEIP3009(t *testing.T) {
 			PayTo:   "0x9876543210987654321098765432109876543210",
 		}
 
-		_, err := client.CreatePaymentPayload(ctx, requirements)
+		_, err := client.CreatePaymentPayload(ctx, requirements, x402.PaymentPayloadContext{})
 		if err == nil {
 			t.Error("Expected error for invalid network")
 		}
@@ -305,7 +306,7 @@ func TestCreatePaymentPayloadEIP3009(t *testing.T) {
 			},
 		}
 
-		payload, err := client.CreatePaymentPayload(ctx, requirements)
+		payload, err := client.CreatePaymentPayload(ctx, requirements, x402.PaymentPayloadContext{})
 		if err != nil {
 			t.Fatalf("Failed to create payload for arbitrary network: %v", err)
 		}
@@ -335,7 +336,7 @@ func TestCreatePaymentPayloadPermit2(t *testing.T) {
 			},
 		}
 
-		payload, err := client.CreatePaymentPayload(ctx, requirements)
+		payload, err := client.CreatePaymentPayload(ctx, requirements, x402.PaymentPayloadContext{})
 		if err != nil {
 			t.Fatalf("Failed to create payload: %v", err)
 		}
@@ -386,7 +387,7 @@ func TestCreatePaymentPayloadPermit2(t *testing.T) {
 			MaxTimeoutSeconds: 300,
 		}
 
-		payloadEIP3009, _ := client.CreatePaymentPayload(ctx, reqEIP3009)
+		payloadEIP3009, _ := client.CreatePaymentPayload(ctx, reqEIP3009, x402.PaymentPayloadContext{})
 		if !evm.IsEIP3009Payload(payloadEIP3009.Payload) {
 			t.Error("Expected EIP-3009 when assetTransferMethod not specified")
 		}
@@ -404,7 +405,7 @@ func TestCreatePaymentPayloadPermit2(t *testing.T) {
 			},
 		}
 
-		payloadExplicitEIP3009, _ := client.CreatePaymentPayload(ctx, reqExplicitEIP3009)
+		payloadExplicitEIP3009, _ := client.CreatePaymentPayload(ctx, reqExplicitEIP3009, x402.PaymentPayloadContext{})
 		if !evm.IsEIP3009Payload(payloadExplicitEIP3009.Payload) {
 			t.Error("Expected EIP-3009 when assetTransferMethod is eip3009")
 		}
@@ -422,7 +423,7 @@ func TestCreatePaymentPayloadPermit2(t *testing.T) {
 			},
 		}
 
-		payloadPermit2, _ := client.CreatePaymentPayload(ctx, reqPermit2)
+		payloadPermit2, _ := client.CreatePaymentPayload(ctx, reqPermit2, x402.PaymentPayloadContext{})
 		if !evm.IsPermit2Payload(payloadPermit2.Payload) {
 			t.Error("Expected Permit2 when assetTransferMethod is permit2")
 		}
@@ -894,6 +895,11 @@ func TestAssetContractValidation(t *testing.T) {
 	}
 
 	t.Run("EIP-3009: rejects EOA asset", func(t *testing.T) {
+		// eoaAsset is the Base Sepolia USDC address that other tests model as deployed, and
+		// positive asset checks are cached process-wide, so drop those entries to force a real
+		// GetCode here.
+		evm.ResetAssetContractCache()
+
 		signer := makeEIP3009SignerWithEOAAsset()
 		scheme := evmfacilitator.NewExactEvmScheme(signer, nil)
 
@@ -907,6 +913,8 @@ func TestAssetContractValidation(t *testing.T) {
 	})
 
 	t.Run("EIP-3009: GetCode RPC failure propagates as internal error", func(t *testing.T) {
+		evm.ResetAssetContractCache()
+
 		signer := makeEIP3009SignerWithEOAAsset()
 		signer.getCodeError = fmt.Errorf("rpc: connection refused")
 		// getCodeError overrides codeByAddress in the mock, so both payer and asset
@@ -924,6 +932,8 @@ func TestAssetContractValidation(t *testing.T) {
 	})
 
 	t.Run("Permit2 exact: rejects EOA asset", func(t *testing.T) {
+		evm.ResetAssetContractCache()
+
 		permit2Payload, _ := signedPermit2TestData(t)
 		signer := &mockFacilitatorSigner{
 			verifyTypedDataResult: true,
@@ -1374,10 +1384,10 @@ func TestExactEvmFacilitatorScheme(t *testing.T) {
 // EIP-2612 Gas Sponsoring Tests
 // =========================================================================
 
-// TestCreatePaymentPayloadWithExtensions_EIP2612 tests that the client creates
+// TestCreatePaymentPayload_EIP2612 tests that the client creates
 // EIP-2612 extension data when the server advertises the extension and
 // Permit2 allowance is insufficient.
-func TestCreatePaymentPayloadWithExtensions_EIP2612(t *testing.T) {
+func TestCreatePaymentPayload_EIP2612(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("Creates EIP-2612 extension when server advertises and allowance is 0", func(t *testing.T) {
@@ -1406,7 +1416,7 @@ func TestCreatePaymentPayloadWithExtensions_EIP2612(t *testing.T) {
 			},
 		}
 
-		payload, err := client.CreatePaymentPayloadWithExtensions(ctx, requirements, extensions)
+		payload, err := client.CreatePaymentPayload(ctx, requirements, x402.PaymentPayloadContext{Extensions: extensions})
 		if err != nil {
 			t.Fatalf("Failed to create payload: %v", err)
 		}
@@ -1440,7 +1450,7 @@ func TestCreatePaymentPayloadWithExtensions_EIP2612(t *testing.T) {
 		}
 
 		// No extensions advertised
-		payload, err := client.CreatePaymentPayloadWithExtensions(ctx, requirements, nil)
+		payload, err := client.CreatePaymentPayload(ctx, requirements, x402.PaymentPayloadContext{})
 		if err != nil {
 			t.Fatalf("Failed to create payload: %v", err)
 		}
@@ -1475,7 +1485,7 @@ func TestCreatePaymentPayloadWithExtensions_EIP2612(t *testing.T) {
 			},
 		}
 
-		payload, err := client.CreatePaymentPayloadWithExtensions(ctx, requirements, extensions)
+		payload, err := client.CreatePaymentPayload(ctx, requirements, x402.PaymentPayloadContext{Extensions: extensions})
 		if err != nil {
 			t.Fatalf("Failed to create payload: %v", err)
 		}

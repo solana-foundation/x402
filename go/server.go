@@ -8,7 +8,6 @@ import (
 	"log"
 	"math/big"
 	"regexp"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -29,13 +28,19 @@ var (
 func ResolveSettlementOverrideAmount(rawAmount string, requirements types.PaymentRequirements, decimals int) (string, error) {
 	if m := percentRegex.FindStringSubmatch(rawAmount); m != nil {
 		parts := strings.SplitN(m[1], ".", 2)
-		intPart, _ := strconv.ParseInt(parts[0], 10, 64)
-		decPart := int64(0)
+		integerPart, ok := new(big.Int).SetString(parts[0], 10)
+		if !ok {
+			return "", fmt.Errorf("invalid percent amount: %s", rawAmount)
+		}
+		fractionalPart := new(big.Int)
 		if len(parts) == 2 {
 			padded := (parts[1] + "00")[:2]
-			decPart, _ = strconv.ParseInt(padded, 10, 64)
+			if _, ok := fractionalPart.SetString(padded, 10); !ok {
+				return "", fmt.Errorf("invalid percent amount: %s", rawAmount)
+			}
 		}
-		scaledPercent := big.NewInt(intPart*100 + decPart)
+		scaledPercent := new(big.Int).Mul(integerPart, big.NewInt(100))
+		scaledPercent.Add(scaledPercent, fractionalPart)
 		base, ok := new(big.Int).SetString(requirements.Amount, 10)
 		if !ok {
 			return "", fmt.Errorf("invalid requirements amount: %s", requirements.Amount)
@@ -242,7 +247,7 @@ func (s *x402ResourceServer) Initialize(ctx context.Context) error {
 // it supports. Only schemes the facilitator actually supports are validated, and
 // only schemes implementing FacilitatorSupportValidator participate.
 func (s *x402ResourceServer) validateFacilitatorCapabilities(_ context.Context) error {
-	var problems []error
+	var problems []string
 
 	for network, schemeMap := range s.schemes {
 		for scheme, server := range schemeMap {
@@ -257,7 +262,7 @@ func (s *x402ResourceServer) validateFacilitatorCapabilities(_ context.Context) 
 			}
 
 			if err := validator.ValidateFacilitatorSupport(network, supportedKind, extensions); err != nil {
-				problems = append(problems, fmt.Errorf("%s on %s: %w", scheme, network, err))
+				problems = append(problems, fmt.Sprintf("%s on %s: %s", scheme, network, err.Error()))
 			}
 		}
 	}
@@ -265,7 +270,7 @@ func (s *x402ResourceServer) validateFacilitatorCapabilities(_ context.Context) 
 	if len(problems) == 0 {
 		return nil
 	}
-	return fmt.Errorf("x402 facilitator capability errors: %w", errors.Join(problems...))
+	return NewFacilitatorCapabilityError(problems)
 }
 
 // findSupportedKind scans the cached facilitator responses for the V2 kind matching
@@ -903,6 +908,53 @@ func asStringAnyMap(v interface{}) (map[string]interface{}, bool) {
 	return nil, false
 }
 
+// normalizeJSONValue converts typed Go values to their generic wire shape.
+func normalizeJSONValue(v interface{}) interface{} {
+	encoded, err := json.Marshal(v)
+	if err != nil {
+		return v
+	}
+	var decoded interface{}
+	if err := json.Unmarshal(encoded, &decoded); err != nil {
+		return v
+	}
+	return decoded
+}
+
+// extensionInfo returns the normalized info envelope when present, otherwise
+// the normalized extension value itself.
+func extensionInfo(v interface{}) interface{} {
+	normalized := normalizeJSONValue(v)
+	if extension, ok := asStringAnyMap(normalized); ok {
+		if info, has := extension["info"]; has {
+			return info
+		}
+	}
+	return normalized
+}
+
+// serverOwnedInfoFieldsMatch reports whether every server-owned field supplied
+// by the client was independently declared by the resource server with the same
+// value. Undeclared extensions are treated as having no server-owned fields.
+func serverOwnedInfoFieldsMatch(advertised, echoed interface{}, fields map[string]struct{}) bool {
+	echoedMap, ok := asStringAnyMap(echoed)
+	if !ok {
+		return true
+	}
+	advertisedMap, _ := asStringAnyMap(advertised)
+	for field := range fields {
+		echoedValue, present := echoedMap[field]
+		if !present {
+			continue
+		}
+		advertisedValue, declared := advertisedMap[field]
+		if !declared || !DeepEqual(advertisedValue, echoedValue) {
+			return false
+		}
+	}
+	return true
+}
+
 // ExtensionValidationResult is returned by ValidateExtensions. Valid is true
 // when the client either omitted extensions or echoed every server-advertised
 // field; otherwise InvalidReason/ExtensionKey describe the mismatch.
@@ -915,7 +967,8 @@ type ExtensionValidationResult struct {
 // ValidateExtensions checks that the client-echoed extension info preserves the
 // server-advertised subset for every key the server declared. Clients may add
 // fields and may omit extension keys entirely, but may not drop or change a
-// server-advertised value.
+// server-advertised value. Fields listed in serverOwnedInfoFields may not be
+// added without a matching declaration.
 func (s *x402ResourceServer) ValidateExtensions(
 	serverExtensions map[string]interface{},
 	payload types.PaymentPayload,
@@ -923,7 +976,7 @@ func (s *x402ResourceServer) ValidateExtensions(
 	if payload.X402Version != 2 {
 		return ExtensionValidationResult{Valid: true}
 	}
-	if len(serverExtensions) == 0 || len(payload.Extensions) == 0 {
+	if len(payload.Extensions) == 0 {
 		return ExtensionValidationResult{Valid: true}
 	}
 
@@ -941,40 +994,24 @@ func (s *x402ResourceServer) ValidateExtensions(
 		field              string
 	}
 
-	// normalize converts a server-declared value (which may be a typed struct)
-	// into the generic JSON shape the echoed payload already uses.
-	// Falls back to the original value when it is not JSON-encodable.
-	normalize := func(v interface{}) interface{} {
-		encoded, err := json.Marshal(v)
-		if err != nil {
-			return v
-		}
-		var decoded interface{}
-		if err := json.Unmarshal(encoded, &decoded); err != nil {
-			return v
-		}
-		return decoded
-	}
-
 	for key, echoedValue := range payload.Extensions {
 		serverValue, declared := serverExtensions[key]
+		advertisedInfo := extensionInfo(serverValue)
+		echoedInfo := extensionInfo(echoedValue)
+		fields := serverOwnedInfoFields[key]
 		if !declared {
+			if len(fields) > 0 && !serverOwnedInfoFieldsMatch(advertisedInfo, echoedInfo, fields) {
+				return ExtensionValidationResult{
+					Valid:         false,
+					InvalidReason: "extension_echo_mismatch",
+					ExtensionKey:  key,
+				}
+			}
 			continue
 		}
 
-		// Compare the `info` envelope when present, otherwise the flat value.
-		advertised := normalize(serverValue)
-		if m, ok := advertised.(map[string]interface{}); ok {
-			if info, has := m["info"]; has {
-				advertised = info
-			}
-		}
-		echoed := echoedValue
-		if m, ok := echoedValue.(map[string]interface{}); ok {
-			if info, has := m["info"]; has {
-				echoed = info
-			}
-		}
+		advertised := advertisedInfo
+		echoed := echoedInfo
 
 		// Exclude fields the extension regenerates per response (e.g. nonces)
 		// so a fresh server value is not flagged against the client's echo.
@@ -1036,7 +1073,7 @@ func (s *x402ResourceServer) ValidateExtensions(
 			}
 		}
 
-		if mismatch {
+		if mismatch || (len(fields) > 0 && !serverOwnedInfoFieldsMatch(advertisedInfo, echoedInfo, fields)) {
 			return ExtensionValidationResult{
 				Valid:         false,
 				InvalidReason: "extension_echo_mismatch",
@@ -1069,6 +1106,14 @@ var additiveArrayInfoFields = map[string]map[string]bool{
 // from go/extensions/buildercode/types.go and must be kept in sync by hand.
 var additiveArrayMaxLengths = map[string]map[string]int{
 	"builder-code": {"s": 10},
+}
+
+// serverOwnedInfoFields lists extension info fields, keyed by extension key,
+// that clients may echo only when the resource server independently declared
+// the same value. Core cannot import extension packages, so these identifiers
+// are duplicated here alongside additiveArrayInfoFields.
+var serverOwnedInfoFields = map[string]map[string]struct{}{
+	"builder-code": {"a": {}},
 }
 
 // dynamicInfoFields returns the dynamic `info` field names declared by the

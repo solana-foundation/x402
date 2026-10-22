@@ -70,12 +70,16 @@ func refundPayload(channelId, maxClaimable, sig string) map[string]interface{} {
 }
 
 func depositPayloadFor(channelId, maxClaimable, sig string) map[string]interface{} {
+	return depositPayloadWithAmount(channelId, maxClaimable, sig, "1000")
+}
+
+func depositPayloadWithAmount(channelId, maxClaimable, sig, amount string) map[string]interface{} {
 	cfg := testConfig()
 	return map[string]interface{}{
 		"type":          "deposit",
 		"channelConfig": batchsettlement.ChannelConfigToMap(cfg),
 		"deposit": map[string]interface{}{
-			"amount":        "1000",
+			"amount":        amount,
 			"authorization": map[string]interface{}{},
 		},
 		"voucher": map[string]interface{}{
@@ -179,6 +183,88 @@ func TestBeforeVerifyHook_NoSessionNonRefundPasses(t *testing.T) {
 	res := runBeforeVerify(t, s, &stubPayload{data: voucherPayload(id, "10", "0xsig")})
 	if res != nil {
 		t.Fatalf("expected pass-through, got %+v", res)
+	}
+}
+
+func TestBeforeVerifyHook_DoesNotRejectDepositBelowMinWhenEnforcementDisabled(t *testing.T) {
+	s := NewBatchSettlementEvmScheme("0xreceiver", nil)
+	id := testChannelId(t)
+	reqs := stubRequirements{
+		scheme:  batchsettlement.SchemeBatched,
+		network: "eip155:8453",
+		amount:  "1000",
+		extra:   map[string]interface{}{"minDeposit": "10000"},
+	}
+	res, err := s.BeforeVerifyHook()(x402.VerifyContext{
+		Payload:      &stubPayload{data: depositPayloadWithAmount(id, "1000", "0xsig", "5000")},
+		Requirements: reqs,
+	})
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if res != nil {
+		t.Fatalf("expected pass-through, got %+v", res)
+	}
+}
+
+func TestBeforeVerifyHook_RejectsDepositBelowMinWhenEnforcementEnabled(t *testing.T) {
+	storage := NewInMemoryChannelStorage()
+	s := NewBatchSettlementEvmScheme("0xreceiver", &BatchSettlementEvmSchemeServerConfig{
+		Storage:           storage,
+		EnforceMinDeposit: true,
+	})
+	id := testChannelId(t)
+	reqs := stubRequirements{
+		scheme:  batchsettlement.SchemeBatched,
+		network: "eip155:8453",
+		amount:  "1000",
+		extra:   map[string]interface{}{"minDeposit": "10000"},
+	}
+
+	below, err := s.BeforeVerifyHook()(x402.VerifyContext{
+		Payload:      &stubPayload{data: depositPayloadWithAmount(id, "1000", "0xsig", "5000")},
+		Requirements: reqs,
+	})
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if below == nil || !below.Abort || below.Reason != batchsettlement.ErrDepositBelowMinDeposit {
+		t.Fatalf("below min: got %+v", below)
+	}
+
+	atMin, err := s.BeforeVerifyHook()(x402.VerifyContext{
+		Payload:      &stubPayload{data: depositPayloadWithAmount(id, "1000", "0xsig", "10000")},
+		Requirements: reqs,
+	})
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if atMin != nil {
+		t.Fatalf("at min expected pass-through, got %+v", atMin)
+	}
+}
+
+func TestBeforeVerifyHook_EnforcesDefault10xMinDepositWhenOmitted(t *testing.T) {
+	storage := NewInMemoryChannelStorage()
+	s := NewBatchSettlementEvmScheme("0xreceiver", &BatchSettlementEvmSchemeServerConfig{
+		Storage:           storage,
+		EnforceMinDeposit: true,
+	})
+	id := testChannelId(t)
+	reqs := stubRequirements{
+		scheme:  batchsettlement.SchemeBatched,
+		network: "eip155:8453",
+		amount:  "1000",
+	}
+	res, err := s.BeforeVerifyHook()(x402.VerifyContext{
+		Payload:      &stubPayload{data: depositPayloadWithAmount(id, "1000", "0xsig", "5000")},
+		Requirements: reqs,
+	})
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if res == nil || !res.Abort || res.Reason != batchsettlement.ErrDepositBelowMinDeposit {
+		t.Fatalf("got %+v", res)
 	}
 }
 
@@ -427,15 +513,101 @@ func TestAfterVerifyHook_VoucherStoresSession(t *testing.T) {
 	if got == nil || got.Balance != "1000" || got.SignedMaxClaimable != "10" {
 		t.Fatalf("session = %+v", got)
 	}
+	if got.ChargedCumulativeAmount != "0" {
+		t.Fatalf("expected baseline from onchain totalClaimed=0, got charged=%s", got.ChargedCumulativeAmount)
+	}
 	if got.PendingRequest == nil {
 		t.Fatal("expected pending reservation after AfterVerify")
+	}
+}
+
+func verifyResultWithTotalClaimed(totalClaimed string) *x402.VerifyResponse {
+	return &x402.VerifyResponse{
+		IsValid: true, Payer: "0xpayer",
+		Extra: map[string]interface{}{"balance": "1000", "totalClaimed": totalClaimed},
+	}
+}
+
+func TestAfterVerifyHook_NoRecordUsesOnchainTotalClaimedAsBaseline(t *testing.T) {
+	s := NewBatchSettlementEvmScheme("0xreceiver", nil)
+	id := testChannelId(t)
+	// price=10, onchain totalClaimed=500: honest voucher is exactly 510.
+	stub := &stubPayload{data: voucherPayload(id, "510", "0xsig")}
+	if res := runBeforeVerify(t, s, stub); res != nil {
+		t.Fatalf("BeforeVerify: %+v", res)
+	}
+	if res := runAfterVerify(t, s, stub, verifyResultWithTotalClaimed("500")); res != nil {
+		t.Fatalf("AfterVerify: %+v", res)
+	}
+	got, _ := s.GetSession(id)
+	if got == nil || got.ChargedCumulativeAmount != "500" || got.TotalClaimed != "500" {
+		t.Fatalf("session = %+v", got)
+	}
+}
+
+func TestAfterVerifyHook_NoRecordRejectsVoucherAdvancingByLessThanPrice(t *testing.T) {
+	s := NewBatchSettlementEvmScheme("0xreceiver", nil)
+	id := testChannelId(t)
+	stub := &stubPayload{data: voucherPayload(id, "501", "0xsig")}
+	if res := runBeforeVerify(t, s, stub); res != nil {
+		t.Fatalf("BeforeVerify must defer the check without a local record: %+v", res)
+	}
+	res := runAfterVerify(t, s, stub, verifyResultWithTotalClaimed("500"))
+	if res == nil || !res.Abort || res.Reason != batchsettlement.ErrCumulativeAmountMismatch {
+		t.Fatalf("expected cumulative mismatch abort, got %+v", res)
+	}
+	if got, _ := s.GetSession(id); got != nil {
+		t.Fatalf("no session should be stored on mismatch, got %+v", got)
+	}
+	snap := s.TakeChannelSnapshot(stub)
+	if snap == nil || snap.ChargedCumulativeAmount != "500" || snap.TotalClaimed != "500" || snap.Balance != "1000" {
+		t.Fatalf("corrective snapshot must carry onchain state, got %+v", snap)
+	}
+}
+
+func TestAfterVerifyHook_NoRecordRefundVoucherBaselineIsOnchainTotalClaimed(t *testing.T) {
+	s := NewBatchSettlementEvmScheme("0xreceiver", nil)
+	id := testChannelId(t)
+	stub := &stubPayload{data: refundPayload(id, "500", "0xsig")}
+	if res := runBeforeVerify(t, s, stub); res != nil {
+		t.Fatalf("BeforeVerify: %+v", res)
+	}
+	res := runAfterVerify(t, s, stub, verifyResultWithTotalClaimed("500"))
+	if res == nil || !res.SkipHandler {
+		t.Fatalf("expected SkipHandler, got %+v", res)
+	}
+	got, _ := s.GetSession(id)
+	if got == nil || got.ChargedCumulativeAmount != "500" {
+		t.Fatalf("session = %+v", got)
+	}
+}
+
+func TestAfterVerifyHook_NoRecordMissingOrMalformedTotalClaimedFailsClosed(t *testing.T) {
+	cases := map[string]map[string]interface{}{
+		"missing":   {"balance": "1000"},
+		"malformed": {"balance": "1000", "totalClaimed": "abc"},
+		"negative":  {"balance": "1000", "totalClaimed": "-5"},
+	}
+	for name, extra := range cases {
+		t.Run(name, func(t *testing.T) {
+			s := NewBatchSettlementEvmScheme("0xreceiver", nil)
+			id := testChannelId(t)
+			stub := &stubPayload{data: voucherPayload(id, "10", "0xsig")}
+			if res := runBeforeVerify(t, s, stub); res != nil {
+				t.Fatalf("BeforeVerify: %+v", res)
+			}
+			res := runAfterVerify(t, s, stub, &x402.VerifyResponse{IsValid: true, Payer: "0xpayer", Extra: extra})
+			if res == nil || !res.Abort || res.Reason != batchsettlement.ErrVerificationStateUnavailable {
+				t.Fatalf("expected verification_state_unavailable, got %+v", res)
+			}
+		})
 	}
 }
 
 func TestAfterVerifyHook_DepositStoresSession(t *testing.T) {
 	s := NewBatchSettlementEvmScheme("0xreceiver", nil)
 	id := testChannelId(t)
-	stub := &stubPayload{data: depositPayloadFor(id, "100", "0xsig")}
+	stub := &stubPayload{data: depositPayloadFor(id, "10", "0xsig")}
 	if res := runBeforeVerify(t, s, stub); res != nil {
 		t.Fatalf("BeforeVerify: %+v", res)
 	}
@@ -443,7 +615,7 @@ func TestAfterVerifyHook_DepositStoresSession(t *testing.T) {
 		t.Fatalf("AfterVerify: %+v", res)
 	}
 	got, _ := s.GetSession(id)
-	if got == nil || got.SignedMaxClaimable != "100" {
+	if got == nil || got.SignedMaxClaimable != "10" {
 		t.Fatalf("session = %+v", got)
 	}
 }

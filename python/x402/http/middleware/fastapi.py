@@ -21,6 +21,7 @@ except ImportError as e:
     ) from e
 
 from ...schemas import SettleResponse, VerifiedPaymentCancelOptions
+from ..background_init import handle_background_init_error
 from ..constants import SETTLEMENT_OVERRIDES_HEADER
 from ..facilitator_client_base import FacilitatorResponseError
 from ..types import (
@@ -164,6 +165,21 @@ def _facilitator_error_response(error: FacilitatorResponseError) -> JSONResponse
     )
 
 
+def _decoded_route_path(request: Request) -> str:
+    """request.url.path with any ASGI root_path mount prefix stripped,
+    mirroring Starlette's own get_route_path so mounted apps stay protected.
+    """
+    path = request.url.path
+    root_path = request.scope.get("root_path", "")
+    if not root_path or not path.startswith(root_path):
+        return path
+    if path == root_path:
+        return ""
+    if path[len(root_path)] == "/":
+        return path[len(root_path) :]
+    return path
+
+
 def payment_middleware(
     routes: RoutesConfig,
     server: x402ResourceServer,
@@ -178,7 +194,7 @@ def payment_middleware(
         server: Pre-configured x402ResourceServer.
         paywall_config: Optional paywall UI configuration.
         paywall_provider: Optional custom paywall provider.
-        sync_facilitator_on_start: Fetch facilitator support on first request.
+        sync_facilitator_on_start: Fetch facilitator support when the middleware is created.
 
     Returns:
         FastAPI middleware function.
@@ -226,9 +242,19 @@ def payment_middleware(
     if paywall_provider:
         http_server.register_paywall_provider(paywall_provider)
 
-    # Lazy initialization state with async lock for concurrency safety
+    # Initialization state with async lock for concurrency safety
     init_done = False
     init_lock = asyncio.Lock()
+
+    # Initialize if requested - queries facilitator /supported to populate
+    # facilitator clients. Fatal capability / route mismatches exit the process
+    # so a misconfigured server does not stay up until the first paid request.
+    if sync_facilitator_on_start:
+        try:
+            http_server.initialize()
+            init_done = True
+        except Exception as error:
+            handle_background_init_error(error)
 
     async def middleware(
         request: Request,
@@ -238,12 +264,13 @@ def payment_middleware(
 
         # Create adapter and context
         adapter = FastAPIAdapter(request)
-        # Routers dispatch on the escaped path, so route matching must use the
-        # raw request path rather than the decoded URL path.
+        # Starlette dispatches literal routes on the decoded path but
+        # wildcard/param routes on the escaped one, so match both.
         raw_path = request.scope["raw_path"].decode("ascii").split("?")[0]
         context = HTTPRequestContext(
             adapter=adapter,
             path=raw_path,
+            decoded_path=_decoded_route_path(request),
             method=request.method,
             payment_header=(
                 adapter.get_header("payment-signature") or adapter.get_header("x-payment")
@@ -478,7 +505,7 @@ def payment_middleware_from_config(
         schemes: Scheme registrations for server-side processing.
         paywall_config: Optional paywall UI configuration.
         paywall_provider: Optional custom paywall provider.
-        sync_facilitator_on_start: Fetch facilitator support on first request.
+        sync_facilitator_on_start: Fetch facilitator support when the middleware is created.
 
     Returns:
         FastAPI middleware function.
