@@ -77,7 +77,7 @@ In addition to the standard x402 `PaymentRequirements` fields, the `exact` schem
 - `extra.lastValidBlockHeight` (optional): The last block height at which `extra.recentBlockhash` is valid, as a decimal string. This informational hint is not serialized into the transaction and MAY be ignored by the Client or Sponsor. It is ignored when `recentBlockhash` is absent.
 - `extra.transactionVersions` (optional): The transaction message versions the sponsor accepts, as an array of `0` and/or `1`. Copied by the Resource Server from the facilitator's `/supported` `extra`. When absent, the accepted set is `[0]`. See §1.5.
 
-These optional fields are transaction-construction hints. They do not bind the submitted transaction to the hinted blockhash, and the facilitator's verification does not compare the transaction blockhash with `extra.recentBlockhash`.
+`extra.recentBlockhash` and `extra.lastValidBlockHeight` are transaction-construction hints. They do not bind the submitted transaction to the hinted blockhash, and the facilitator's verification does not compare the transaction blockhash with `extra.recentBlockhash`.
 
 ## PaymentPayload `payload` Field
 
@@ -196,9 +196,13 @@ Address Lookup Tables), and version `1` ([SIMD-0385](https://github.com/solana-f
 carry the compute budget in the message header). The facilitator advertises
 the versions it accepts as `extra.transactionVersions` in `/supported`, and the
 server MUST copy that value into `PaymentRequirements.extra.transactionVersions`.
-Entries are the integers `0` and `1`, the Wallet Standard
-`supportedTransactionVersions` vocabulary. When the field is absent, the
-accepted set is `[0]`.
+Entries MUST be the JSON integers `0` and `1` only. Unlike Wallet Standard
+`supportedTransactionVersions`, the field never contains `legacy`, and a
+string such as `"1"` is not a valid entry. A client or server MUST treat a field
+containing any non-integer entry (a string, `null`, or `"legacy"`) or any
+integer other than `0` or `1` as invalid and fail closed with
+`unsupported_transaction_version`. When the field is absent, the accepted set
+is `[0]`.
 
 Legacy (unversioned) messages are deprecated. They are never advertised in
 `extra.transactionVersions` and clients MUST NOT build them. A facilitator MAY
@@ -224,12 +228,15 @@ scheme.
   `loadedAccountsDataSizeLimit` (a version-1 transaction that omits either is
   budgeted zero and cannot execute), it MUST NOT contain Compute Budget program
   instructions, and its `priorityFee` is a total in lamports, evaluated against
-  a per-compute-unit cap as `priorityFee * 1000000 <= maxPriorityFeeMicroLamports *
-  computeUnitLimit`. Here `maxPriorityFeeMicroLamports` is the sponsor's
-  maximum compute unit price in microlamports per compute unit, the same bound
-  it applies to `SetComputeUnitPrice` in a legacy or version-0 transaction
-  (§2.2.1). On the static fast path (§3.1) it is 5,000,000 microlamports
-  (5 lamports/CU).
+  a per-compute-unit cap as `priorityFee * 1000000 <= capMicroLamports *
+  computeUnitLimit`. `capMicroLamports` is the compute unit price cap, in
+  microlamports per compute unit, of the verification path that accepts the
+  transaction. It is the same cap that path applies to `SetComputeUnitPrice` in
+  a legacy or version-0 transaction: `maxPriorityFeeMicroLamports` on Path 1
+  (§3.1) and `smartWalletMaxPriorityFeeMicroLamports` on Path 2 (§3.2); see
+  §2.2.1 for the defaults. The sponsor MUST evaluate both sides of the
+  inequality with arbitrary-precision integers (or at least 128-bit unsigned
+  integers), so that an oversized `priorityFee` cannot wrap and pass the check.
 
 ## 2. Sponsor Acceptance Policy (Reference)
 
@@ -281,16 +288,22 @@ Reference defaults (operator-configurable):
 | Limit | Default |
 |---|---|
 | Max compute units | `400,000` |
-| Max priority fee (`maxPriorityFeeMicroLamports`) | `50,000` microlamports / CU |
+| Path 1 max compute unit price (`maxPriorityFeeMicroLamports`) | `5,000,000` microlamports / CU (5 lamports / CU) |
+| Path 2 max compute unit price (`smartWalletMaxPriorityFeeMicroLamports`) | `50,000` microlamports / CU |
 
-(The static fast path of the reference implementation applies a tighter cap of ≤ 5 lamports / CU for standard wallets; see §3.1.)
+The two price caps are separate. Path 1 (§3.1) accepts only the fixed
+standard-wallet layout and applies `maxPriorityFeeMicroLamports`. Path 2 (§3.2)
+admits arbitrary allowlisted programs and applies the stricter
+`smartWalletMaxPriorityFeeMicroLamports`.
 
 In a version-1 transaction the same caps apply to the message
 `TransactionConfig` instead: `computeUnitLimit` MUST be present and MUST NOT
 exceed the configured maximum, `loadedAccountsDataSizeLimit` MUST be present, and
 `priorityFee` (total lamports) MUST satisfy
-`priorityFee * 1000000 <= maxPriorityFeeMicroLamports * computeUnitLimit`. A version-1 transaction
-that contains a Compute Budget instruction MUST be rejected.
+`priorityFee * 1000000 <= capMicroLamports * computeUnitLimit`, where
+`capMicroLamports` is the price cap of the accepting path, evaluated without
+overflow as specified in §1.5. A version-1 transaction that contains a Compute
+Budget instruction MUST be rejected.
 
 #### 2.2.2 Program Allow/Deny Lists (SHOULD)
 
@@ -365,15 +378,16 @@ A version-1 transaction MUST contain 1 to 5 instructions in this order:
 - If `extra.memo` is present, the facilitator MUST verify that exactly one Memo instruction exists and that its data matches `extra.memo` encoded as UTF-8.
 - Fee payer isolation, destination ATA derivation, and exact amount match are
   enforced on both layouts. The legacy/version-0 Compute Budget price and the
-  version-1 total priority fee MUST each be no greater than 5 lamports/CU on
-  this path, using the normalization in §1.5 for version 1.
+  version-1 total priority fee MUST each be no greater than
+  `maxPriorityFeeMicroLamports` (default 5 lamports/CU) on this path, using the
+  normalization in §1.5 for version 1.
 
 ### 3.2 Path 2 — Simulation-Based Smart Wallet Verification
 
 Smart wallet programs wrap the transfer inside their own instruction (e.g. Squads `vaultTransactionExecute`, Swig `SignV2`), so Path 1 sees an unknown program at the transfer position and rejects it. Path 2 verifies the **outcome** instead of the instruction format:
 
 1. **Fee payer isolation** (§2.1.1): the fee payer MUST NOT appear in any instruction's accounts or as a program ID, after ALT resolution (§2.1.2).
-2. **Compute budget caps** (§2.2.1): operator-configurable CU and priority-fee caps.
+2. **Compute budget caps** (§2.2.1): operator-configurable CU cap and `smartWalletMaxPriorityFeeMicroLamports` (default 50,000 microlamports/CU), applied to `SetComputeUnitPrice` on legacy/version 0 and to the normalized `priorityFee` on version 1 (§1.5).
 3. **Program allowlist** (§2.2.2): the wrapping program MUST be on the allowlist.
 4. **Memo enforcement**: if `extra.memo` is present, exactly one top-level Memo instruction MUST match it (mirrors Path 1, so a seller-required memo cannot be bypassed by routing through a smart wallet).
 5. **Simulate with inner instructions**: `simulateTransaction` is called with `innerInstructions: true` to obtain the full CPI trace (no additional round-trip — simulation is already the final verification step). The RPC may return inner instructions in either `jsonParsed` or compiled (base58) format; both are handled.

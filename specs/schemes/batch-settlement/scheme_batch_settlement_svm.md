@@ -1299,9 +1299,13 @@ Address Lookup Tables), and version `1` ([SIMD-0385](https://github.com/solana-f
 carry the compute budget in the message header). The facilitator advertises
 the versions it accepts as `extra.transactionVersions` in `/supported`, and the
 server MUST copy that value into `PaymentRequirements.extra.transactionVersions`.
-Entries are the integers `0` and `1`, the Wallet Standard
-`supportedTransactionVersions` vocabulary. When the field is absent, the
-accepted set is `[0]`.
+Entries MUST be the JSON integers `0` and `1` only. Unlike Wallet Standard
+`supportedTransactionVersions`, the field never contains `legacy`, and a
+string such as `"1"` is not a valid entry. A client or server MUST treat a field
+containing any non-integer entry (a string, `null`, or `"legacy"`) or any
+integer other than `0` or `1` as invalid and fail closed with
+`unsupported_transaction_version`. When the field is absent, the accepted set
+is `[0]`.
 
 Legacy (unversioned) messages are deprecated. They are never advertised in
 `extra.transactionVersions` and clients MUST NOT build them. A facilitator MAY
@@ -1329,7 +1333,9 @@ scheme.
   computeUnitLimit`. Here `maxPriorityFeeMicroLamports` is the maximum
   compute-unit price that applies to `SetComputeUnitPrice` in a legacy or
   version-0 transaction: `5000000` microlamports per compute unit, or a
-  stricter local sponsor policy.
+  stricter local sponsor policy. Both sides of the inequality MUST be evaluated
+  with arbitrary-precision integers (or at least 128-bit unsigned integers), so
+  that an oversized `priorityFee` cannot wrap and pass the check.
 
 ##### Message and signer rules
 
