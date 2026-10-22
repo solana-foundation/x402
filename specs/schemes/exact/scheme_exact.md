@@ -36,8 +36,8 @@ Each method MUST declare:
 
 Each method MUST satisfy:
 
-- **Transfer correctness**: settlement MUST produce exactly one identifiable transfer of `amount` of `asset` to `payTo`. Operations incidental to making that payment, such as fee payment or change outputs, do not disqualify it; a binding MAY constrain transaction structure further as sponsor policy.
-- **Facilitator safety**: where the facilitator sponsors the fee, no operation in the signed payment may debit the facilitator beyond that fee.
+- **Transfer correctness**: settlement MUST produce exactly one identifiable transfer of `amount` of `asset` to `payTo`. When the optional `extra.splits` extension is present (see Multi-Payee Splits below), this applies per payment leg: `payTo` receives the remainder and each split recipient its declared amount, each in a distinct transfer. Operations incidental to making that payment, such as fee payment or change outputs, do not disqualify it; a binding MAY constrain transaction structure further as sponsor policy.
+- **Facilitator safety**: where the facilitator sponsors the fee, no operation in the signed payment may debit the facilitator beyond that fee. The only exception is a cost the facilitator explicitly advertises that it covers and the binding bounds, such as sponsored recipient ATA rent on SVM (see Multi-Payee Splits below).
 - **Replay**: the network's own primitive is authoritative. A consumed primitive MUST produce a settlement failure, never a success.
 - **Duplicate delivery**: the network primitive prevents double-spend, not double-delivery. Where a resubmission is indistinguishable from the original, submission returns success to every caller and one payment yields several resources. Such methods MUST deduplicate settlements atomically across every process serving `/settle`, retaining each key until its payment can no longer land.
 
@@ -61,9 +61,9 @@ While implementation details vary by network, facilitators MUST enforce security
 
 ### SVM
 
-- Fee payer safety: the fee payer MUST NOT appear as an account in sensitive instructions or be the transfer authority/source. The sole bounded exception is fee-payer-funded ATA creation for recipients the Resource Server marks `ataCreationRequired`, and only when the facilitator advertises that it sponsors ATA creation (see Multi-Payee Splits below).
-- Destination correctness: the receiver MUST match the `payTo` derived destination for the specified `asset`.
-- Amount exactness: the transferred amount MUST equal `maxAmountRequired`. When splits are present, the amount is distributed across legs and the merchant receives the remainder (see Multi-Payee Splits below).
+- Fee payer safety: the fee payer MUST NOT appear as an account in sensitive instructions or be the transfer authority/source. The sole bounded exception is fee-payer-funded ATA creation for recipients the Resource Server marks `ataCreationRequired`, and only when the facilitator advertises that it sponsors ATA creation, in the account positions listed in `scheme_exact_svm.md` §2.1.1 (see Multi-Payee Splits below).
+- Destination correctness: the receiver MUST match the `payTo` derived destination for the specified `asset`. With splits, each leg's receiver MUST match the destination derived from that leg's `payTo`.
+- Amount: the transfer to `payTo` MUST be at least `amount` (overpayment is tolerated for smart-wallet rounding, `scheme_exact_svm.md` §1.4). With splits, `payTo` MUST receive at least the remainder and each split recipient exactly its declared amount (see Multi-Payee Splits below).
 
 ### Stellar
 
@@ -105,9 +105,9 @@ The `exact` scheme MAY carry an optional `extra.splits` array that distributes a
 
 The extension is network-agnostic in shape but network-specific in encoding and verification. Common rules across networks:
 
-- Each split entry declares an absolute `amount` in base units of the same `asset` (not a percentage or basis points).
+- Each split entry declares an absolute `amount` in base units of the same `asset` (not a percentage or basis points). It MUST be a positive integer within the asset's base-unit range on that network.
 - The primary recipient (`payTo`) receives the remainder: `amount − Σ splits[].amount`. This remainder MUST be greater than zero; requirements that consume the entire amount with splits MUST be rejected.
-- Each payment leg (primary plus each split) MUST be settled to its declared recipient for its declared amount, and a verifier MUST match each leg to a distinct on-chain transfer.
+- Each payment leg (primary plus each split) MUST be settled to its declared recipient, and a verifier MUST match each leg to a distinct on-chain transfer. Split legs MUST settle for exactly their declared amount. The primary leg MUST settle for at least the remainder, keeping whatever overpayment tolerance the network binding allows for a single-payee payment, so any excess goes to `payTo` and never to a split recipient.
 - Clients MUST verify that `splits` contains only recipients and amounts they agreed to before authorizing payment; a malicious server could otherwise inject splits to divert funds.
 - Split support is an advertised facilitator capability, not an unadvertised local policy. A facilitator MUST announce the maximum number of splits it accepts (and any related sponsorship, such as recipient account creation) in the `extra` of the matching `kinds[]` entry of its `/supported` response; absent advertisement means no support. Resource servers MUST NOT issue requirements exceeding what the selected facilitator advertises.
 

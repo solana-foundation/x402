@@ -78,9 +78,9 @@ In addition to the standard x402 `PaymentRequirements` fields, the `exact` schem
 - `extra.recentBlockhash` (optional): A recent blockhash for the Client to use as the transaction's lifetime, supplied by the Resource Server. When present and valid, the Client SHOULD use it instead of fetching its own via `getLatestBlockhash`, saving an RPC round-trip and pinning the transaction to a blockhash the settling RPC has observed. When absent or malformed, the Client MUST fetch a recent blockhash itself. A Resource Server SHOULD only set this when it has an RPC endpoint whose view of recent blockhashes matches the settling Sponsor's; a stale or fork-divergent blockhash will cause the transaction to expire or fail to land.
 - `extra.lastValidBlockHeight` (optional): The last block height at which `extra.recentBlockhash` is valid, as a decimal string. This informational hint is not serialized into the transaction and MAY be ignored by the Client or Sponsor. It is ignored when `recentBlockhash` is absent.
 - `extra.splits` (optional): An array of additional payees that receive fixed carve-outs of `amount` in the same transaction. When present, the merchant (`payTo`) receives the remainder rather than the full `amount`. See **Multi-Payee Splits** (§5) for the schema and semantics. When absent or empty, the scheme behaves exactly as specified in §1–§4 (a single transfer to `payTo`).
-- `extra.ataCreationRequired` (optional): Boolean, default `false`. Marks the primary `payTo` as a recipient whose Associated Token Account for `asset` may not exist yet and may need to be created in the payment transaction. Fee-payer-funded creation is permitted only when the Sponsor advertises `ataCreationSponsored` in `/supported`. See §5.4 and §5.5.
+- `extra.ataCreationRequired` (optional): Boolean, default `false`. Marks the primary `payTo` as a recipient whose Associated Token Account for `asset` may not exist yet and may need to be created in the payment transaction. When set, the `feePayer` funds the creation, so it MUST only be set when the Sponsor advertises `ataCreationSponsored` in `/supported`. See §5.4 and §5.5.
 
-These optional fields are transaction-construction hints. They do not bind the submitted transaction to the hinted blockhash, and the facilitator's verification does not compare the transaction blockhash with `extra.recentBlockhash`.
+`extra.recentBlockhash` and `extra.lastValidBlockHeight` are transaction-construction hints. They do not bind the submitted transaction to the hinted blockhash, and the facilitator's verification does not compare the transaction blockhash with `extra.recentBlockhash`. `extra.splits` and `extra.ataCreationRequired` are not hints: they are payment terms, verified under §5.
 
 ## PaymentPayload `payload` Field
 
@@ -143,7 +143,7 @@ A transaction satisfies the `exact` payment scheme **if and only if**, when exec
 
 ### 1.1 Required Payment Outcome (MUST)
 
-The transaction MUST result in:
+For a single-payee charge (no `extra.splits`), the transaction MUST result in:
 
 - A transfer of at least `PaymentRequirements.amount`
 - Of the asset identified by `PaymentRequirements.asset`
@@ -160,7 +160,7 @@ The payment MUST be:
 
 The transfer MAY appear either as a top-level instruction or as an inner instruction (CPI) emitted by another program. This is what allows smart wallets to satisfy the scheme: the payment outcome is what matters, not the instruction that produced it.
 
-When `extra.splits` is present, the required outcome comprises multiple payment legs (one to `payTo` plus one per split), and `PaymentRequirements.amount` is the total across all legs. The single-transfer definition below applies per leg; see §5.
+When `extra.splits` is present, §5.3 replaces this outcome. `PaymentRequirements.amount` is the total across all legs, `payTo` receives only the remainder (§5.2), and each split recipient receives its declared amount. The other properties above (asset, ATA derivation, token program, top-level or CPI) apply to each leg.
 
 ### 1.2 Payment Identification (MUST)
 
@@ -217,7 +217,12 @@ If the fee payer is never referenced by any instruction, the Solana runtime cann
 
 The `feePayer` MAY appear as the payment recipient when `feePayer == payTo`, since receiving funds does not require the fee payer to be a signer on a debiting instruction.
 
-The `feePayer` MAY additionally appear solely as the funding `payer` of an idempotent ATA-creation instruction for a recipient the Resource Server has marked `ataCreationRequired`, and only when the Sponsor advertises `ataCreationSponsored` in `/supported`. This is the one bounded exception to fee-payer isolation and is tightly scoped in §5.4 and §5.5; it MUST NOT be read as permitting the fee payer in any other instruction's accounts.
+The one bounded exception to fee-payer isolation is recipient ATA creation (§5.4). The `feePayer` MAY appear in a top-level `AssociatedTokenProgram: CreateIdempotent` instruction, and in that instruction's CPI trace, only in these positions:
+
+- **Funding payer** (account 0, signer, writable): only when the Sponsor advertises `ataCreationSponsored` in `/supported` and the instruction creates the ATA, for `asset`, of a recipient marked `ataCreationRequired`. In the resulting CPI trace, the fee payer MAY be the source of the System Program `CreateAccount` (or, when the ATA address already holds lamports, `Transfer`) to that ATA, for no more than the rent-exempt minimum of the token account.
+- **Wallet owner** (account 2, read-only, not a signer): only when the fee payer is itself a declared recipient (`feePayer == payTo`, or a split `payTo` equal to `feePayer`) and the instruction creates that recipient's ATA. The owner position grants no authority.
+
+The fee payer MUST NOT appear in any other account position, in any other instruction (including inside a smart-wallet wrapper), or as the source of any other System Program instruction in the CPI trace.
 
 #### 2.1.2 Address Lookup Table Visibility (MUST)
 
@@ -227,7 +232,7 @@ If the transaction uses Address Lookup Tables (ALTs), the sponsor MUST resolve t
 
 The sponsor MUST reject any transaction in which the sponsor's funds could be debited beyond the network fee — including SOL transfers from sponsor-controlled accounts, token transfers for which the sponsor is the authority, or account closures/reallocations that move the sponsor's lamports. Enforcing §2.1.1 and §2.1.2 is sufficient to prevent these conditions for standard Solana programs.
 
-The sole intentional exception is fee-payer-funded ATA rent for recipients (the primary `payTo` or a split recipient) that the Resource Server marks `ataCreationRequired`, offered only by Sponsors that advertise `ataCreationSponsored` in `/supported` (§5.4, §5.5). This is bounded (≈0.002 SOL per created ATA, at most once per recipient per mint because creation is idempotent), opt-in on both sides, and forbidden for any owner outside the declared recipient set; a sponsor that does not advertise ATA sponsorship is unaffected.
+The sole intentional exception is fee-payer-funded ATA rent for recipients (the primary `payTo` or a split recipient) that the Resource Server marks `ataCreationRequired`, offered only by Sponsors that advertise `ataCreationSponsored` in `/supported` (§5.4, §5.5). This is bounded per transaction (≈0.002 SOL per created ATA, never for an ATA that already exists), opt-in on both sides, and forbidden for any owner outside the declared recipient set. It is not bounded over time: an owner can close its ATA and the next charge pays rent again (§5.4). A sponsor that does not advertise ATA sponsorship is unaffected.
 
 #### 2.1.4 Signer Set Integrity (MUST)
 
@@ -322,7 +327,7 @@ When `extra.splits` is present or any recipient is marked `ataCreationRequired`,
 
 Smart wallet programs wrap the transfer inside their own instruction (e.g. Squads `vaultTransactionExecute`, Swig `SignV2`), so Path 1 sees an unknown program at the transfer position and rejects it. Path 2 verifies the **outcome** instead of the instruction format:
 
-1. **Fee payer isolation** (§2.1.1): the fee payer MUST NOT appear in any instruction's accounts or as a program ID, after ALT resolution (§2.1.2). The only exception is the bounded one in §2.1.1 / §5.4: when the Sponsor advertises `ataCreationSponsored`, the fee payer MAY appear as the funding `payer` of a top-level `CreateIdempotent` instruction for the ATA of a recipient marked `ataCreationRequired`. The fee payer MUST NOT appear in any other instruction, including inside a smart-wallet wrapper.
+1. **Fee payer isolation** (§2.1.1): the fee payer MUST NOT appear in any instruction's accounts or as a program ID, after ALT resolution (§2.1.2). The only exception is the bounded `CreateIdempotent` one in §2.1.1 (funding payer or wallet owner of a top-level `CreateIdempotent` for a marked recipient, plus that instruction's rent CPI). The fee payer MUST NOT appear in any other instruction, including inside a smart-wallet wrapper.
 2. **Compute budget caps** (§2.2.1): operator-configurable CU and priority-fee caps.
 3. **Program allowlist** (§2.2.2): the wrapping program MUST be on the allowlist.
 4. **Memo enforcement**: if `extra.memo` is present, exactly one top-level Memo instruction MUST match it (mirrors Path 1, so a seller-required memo cannot be bypassed by routing through a smart wallet).
@@ -341,8 +346,8 @@ The `verify` and `settle` entry points share a single internal `_verify` returni
 
 Simulation proves a transaction *would* succeed but is not proof it *did* (a malicious program could behave differently at execution time). For smart-wallet (Path 2) settlements, after the transaction confirms the sponsor MUST verify the transfer actually executed on-chain:
 
-- **Primary**: fetch the confirmed transaction's inner instructions (`getConfirmedTransactionInnerInstructions`, with bounded retry for RPC indexing lag) and confirm exactly one matching `TransferChecked`.
-- **Fallback**: if inner instructions are unavailable (indexing lag), check the destination ATA balance delta (`balanceAfter - balanceBefore >= required`), trying both SPL Token and Token-2022 programs.
+- **Primary**: fetch the confirmed transaction's inner instructions (`getConfirmedTransactionInnerInstructions`, with bounded retry for RPC indexing lag) and confirm exactly one matching `TransferChecked` per payment leg. A single-payee charge has one leg; a split charge has `N + 1`, matched to distinct transfers as in §3.2 step 6 and §5.3.
+- **Fallback**: if inner instructions are unavailable (indexing lag), check the balance delta of every leg's destination ATA, trying both SPL Token and Token-2022 programs. The primary ATA's delta MUST be `>=` its required amount (`amount` for a single-payee charge, the remainder with splits) and each split ATA's delta MUST equal that split's `amount`.
 
 Settlement success MUST reflect actual on-chain effects, not simulation alone.
 
@@ -357,7 +362,7 @@ The verification model upholds the following invariants:
 | I1 | **No token loss** | Fee payer never used as authority/source/delegate on any token operation; enforced *before signing* (§2.1.1, §2.1.3). |
 | I2 | **Bounded SOL exposure** | Per-transaction cost capped via compute budget limits (§2.2.1). |
 | I3 | **Merchant truth** | Settlement success returned only after confirming actual on-chain effects, not simulation (§3.4). |
-| I4 | **Payment landed** | Exactly one confirmed `TransferChecked` matches the required amount, mint, and destination ATA (§1.4). |
+| I4 | **Payment landed** | Exactly one confirmed `TransferChecked` per payment leg matches that leg's amount, mint, and destination ATA (§1.4, §3.4, §5.3). |
 | I5 | **Simulation is non-critical** | Simulation saves fees; security comes from I1 (pre-sign) and I3 (post-settle) (§2.2.3, §3.4). |
 | I6 | **No hidden accounts** | ALTs resolved so every reachable account is visible to verification (§2.1.2). |
 | I7 | **Known programs only** | Only allowlisted wallet programs reach simulation-based verification (§2.2.2). |
@@ -401,9 +406,9 @@ In the example the client pays `1050000` base units in total: `50000` to the spl
 |---|---|---|---|
 | `splits` | array | OPTIONAL | 1–8 entries. Absent or empty ⇒ single-payee `exact`. |
 | `splits[].payTo` | string | REQUIRED | Base58-encoded recipient public key. |
-| `splits[].amount` | string | REQUIRED | Decimal string in base units of `asset`. An **absolute** amount, not a percentage or basis points. |
-| `splits[].memo` | string | OPTIONAL | Human-readable label for this leg (e.g. `"platform fee"`, `"referral"`), ≤ 566 bytes. This is what a client displays to the payer when obtaining consent for the split (§5.6); it is **not** emitted as an on-chain Memo instruction and is not verified by the Sponsor. Mirrors `splits[].memo` in the MPP Solana charge draft for wire parity. |
-| `splits[].ataCreationRequired` | boolean | OPTIONAL | Default `false`. Marks this recipient's ATA as possibly needing creation in the payment transaction; authorizes fee-payer-funded creation when the Sponsor advertises `ataCreationSponsored` (§5.4, §5.5). Meaningful only for SPL / Token-2022 assets. |
+| `splits[].amount` | string | REQUIRED | Decimal string in base units of `asset`. An **absolute** amount, not a percentage or basis points. MUST be a positive integer no greater than `2^64 − 1` (the SPL Token `u64` range), with no sign, decimal point, exponent, or leading zeros. |
+| `splits[].memo` | string | OPTIONAL | Human-readable label for this leg (e.g. `"platform fee"`, `"referral"`), ≤ 566 bytes. Part of the payment terms: the client MUST show it with the leg's `payTo` address and `amount` when obtaining consent (§5.6), and, because it is unauthenticated server-supplied text, MUST NOT show it in place of the address. It is bound like every other requirements field: the client echoes the requirements it consented to in `PaymentPayload.accepted`, and verification runs against them. It is **not** emitted as an on-chain Memo instruction. Mirrors `splits[].memo` in the MPP Solana charge draft for wire parity. |
+| `splits[].ataCreationRequired` | boolean | OPTIONAL | Default `false`. Marks this recipient's ATA as possibly needing creation in the payment transaction, funded by the `feePayer`. MUST only be set when the Sponsor advertises `ataCreationSponsored` (§5.4, §5.5). Meaningful only for SPL / Token-2022 assets. |
 
 The primary `payTo` carries the equivalent top-level flag `extra.ataCreationRequired` (default `false`), governed by the same rules (§5.4). The single on-chain Memo remains governed by `extra.memo` (§3.1); per-split memos never reach the chain.
 
@@ -434,13 +439,15 @@ Split legs MUST match their declared `amount` **exactly** (`==`). The primary le
 
 A recipient — the primary `payTo` or a split recipient — may not yet hold an Associated Token Account for `asset`, and a transfer to a missing ATA fails. The transaction MAY therefore include an **idempotent** ATA-creation instruction (`AssociatedTokenProgram: CreateIdempotent`) for a recipient. Because ATA creation spends the funding account's lamports (rent, ≈0.002 SOL) beyond the network fee, it is authorized explicitly on every side:
 
-- **Resource Server**: marks each recipient whose ATA may need creating — `extra.ataCreationRequired: true` for the primary `payTo`, `splits[].ataCreationRequired: true` for a split recipient. It MUST NOT set either flag when the selected Sponsor does not advertise `ataCreationSponsored` (§5.5).
-- **Sponsor**: advertises whether it funds such creation via `ataCreationSponsored` in `/supported` (§5.5). A `CreateIdempotent` instruction MAY be funded by the `feePayer` **only** for a recipient marked `ataCreationRequired: true`, and only by a Sponsor that advertises `ataCreationSponsored`. A Sponsor MUST reject any transaction in which the fee payer funds ATA creation for an unmarked recipient, for an owner outside the declared recipient set (`payTo` and every `splits[].payTo`), or when it has not advertised ATA sponsorship (`split_ata_creation_not_authorized`).
-- **Client**: constructs the transaction and consents by signing it. The client MUST include a `CreateIdempotent` instruction for each marked recipient whose ATA it has not confirmed to exist, and SHOULD omit it for recipients whose ATA already exists. When included, the instruction MUST be `CreateIdempotent`, not `Create`: a non-idempotent `Create` fails if the ATA is created between transaction construction and settlement (for example by a concurrent charge to the same recipient), which would fail the whole payment. When the ATA already exists, `CreateIdempotent` is a cheap no-op, so the cost of including it is transaction size, not rent.
+- **Resource Server**: marks each recipient whose ATA may need creating — `extra.ataCreationRequired: true` for the primary `payTo`, `splits[].ataCreationRequired: true` for a split recipient. Setting a flag authorizes the `feePayer` to fund that creation, so the Resource Server MUST NOT set either flag when the selected Sponsor does not advertise `ataCreationSponsored` (§5.5).
+- **Sponsor**: advertises whether it funds such creation via `ataCreationSponsored` in `/supported` (§5.5). The funding payer of every `CreateIdempotent` in the transaction MUST be the `feePayer`, and the fee payer MAY fund it **only** for a recipient marked `ataCreationRequired: true`, and only by a Sponsor that advertises `ataCreationSponsored`. A Sponsor MUST reject any transaction in which the fee payer funds ATA creation for an unmarked recipient, for an owner outside the declared recipient set (`payTo` and every `splits[].payTo`), or when it has not advertised ATA sponsorship (`split_ata_creation_not_authorized`).
+- **Client**: constructs the transaction and consents by signing it, naming the `feePayer` as the funding payer. The client MUST include a `CreateIdempotent` instruction for each marked recipient whose ATA it has not confirmed to exist, and SHOULD omit it for recipients whose ATA already exists. When included, the instruction MUST be `CreateIdempotent`, not `Create`: a non-idempotent `Create` fails if the ATA is created between transaction construction and settlement (for example by a concurrent charge to the same recipient), which would fail the whole payment. When the ATA already exists, `CreateIdempotent` is a cheap no-op, so the cost of including it is transaction size, not rent.
 - ATA-creation instructions for unmarked recipients, or for any owner outside the declared recipient set, MUST NOT appear in the transaction regardless of who funds them.
-- When the fee payer does not sponsor rent (`ataCreationSponsored` absent or `false`, a merchant-operated fee payer, or `feePayer == payTo`), the client MAY still include `CreateIdempotent` instructions for marked recipients, funded by the client.
+- Client-funded ATA creation is not part of this extension. A client cannot see the Sponsor's `/supported` response, so the flag itself carries the funding decision: a marked recipient is always fee-payer funded. When the fee payer is itself the recipient (`feePayer == payTo`, or a split to the Sponsor for cost recovery), it also appears as the wallet owner of that `CreateIdempotent`, as permitted by §2.1.1.
 
-This is a deliberate, bounded exception to Fee Payer Isolation (§2.1.1) and Fee Payer Fund Safety (§2.1.3): the fee payer MAY appear solely as the funding `payer` of a `CreateIdempotent` instruction whose created account is the ATA, for `asset`, of a marked recipient, and MUST NOT appear in any other instruction's accounts. Rent exposure is bounded on several axes: it is opt-in per Sponsor (advertised), opt-in per recipient (marked), at most one ATA per recipient per mint (creation is idempotent), and the Sponsor can recover the cost by naming itself as a split recipient (fee-payer cost recovery). Because a Resource Server could still rotate `payTo` addresses to extract rent on every charge, a Sponsor that advertises `ataCreationSponsored` SHOULD apply the griefing controls of §2.2 to sponsored creations (for example rate-limiting them per Resource Server or pricing them through a split).
+This is a deliberate, bounded exception to Fee Payer Isolation (§2.1.1) and Fee Payer Fund Safety (§2.1.3); §2.1.1 lists the exact account positions and the rent CPI in which the fee payer may appear. The Sponsor MUST also check that the created account is the ATA derived from the marked owner, `asset`, and the instruction's token program.
+
+Per transaction, rent exposure is opt-in per Sponsor (advertised), opt-in per recipient (marked), and never charged for an ATA that already exists, since `CreateIdempotent` is then a no-op. It is **not** bounded over time. An owner can close its ATA, reclaiming the rent to an address it chooses, and the next charge funds creation again. A Resource Server that controls its recipients can therefore cycle create and close to extract ≈0.002 SOL per charge, and can rotate `payTo` addresses to the same effect. A Sponsor that advertises `ataCreationSponsored` SHOULD bound this, for example by tracking sponsored creations per owner and mint and refusing or pricing repeats, by rate-limiting sponsored creations per Resource Server (§2.2), or by recovering the cost through a split to itself.
 
 ### 5.5 Capability Advertisement and Sponsor Acceptance with Splits (MUST)
 
@@ -466,7 +473,7 @@ Split support is not an unadvertised local policy. A Sponsor announces it in the
 
 These keys sit in `kinds[].extra`, next to `feePayer`, rather than in a discriminator-style `capabilities` map. They are not variants of the payload a client may choose between. `maxSplits` is a numeric bound and `ataCreationSponsored` is a commitment of the Sponsor's own funds, and both MUST fail closed: a Sponsor that predates this extension advertises neither key, and that MUST be read as no support. A capabilities map where absence means full support would read the same silence as unlimited splits and sponsored rent.
 
-A Resource Server MUST NOT issue requirements with more splits than the selected Sponsor advertises, and MUST NOT mark recipients `ataCreationRequired` for a Sponsor that does not advertise `ataCreationSponsored`. Clients MUST NOT assume split support that the Sponsor has not advertised.
+A Resource Server MUST NOT issue requirements with more splits than the selected Sponsor advertises, and MUST NOT mark recipients `ataCreationRequired` for a Sponsor that does not advertise `ataCreationSponsored` (marking a recipient authorizes fee-payer funding, §5.4). Clients MUST NOT assume split support that the Sponsor has not advertised.
 
 A Sponsor that signs a split transaction as `feePayer` MUST, in addition to the baseline in §2.1:
 
@@ -482,7 +489,7 @@ Within what it advertises, a Sponsor retains the policy flexibility of §2.3 (fo
 
 Before signing, the client MUST verify that `extra.splits` — when present — contains only the recipients and amounts it expects. A malicious Resource Server could otherwise inject or alter splits to divert a portion of the payment. Specifically, the client MUST:
 
-- Confirm each split `payTo` and `amount` against the terms it agreed to, presenting the split's `memo` (when present) as the human-readable label for that leg.
+- Confirm each split's `payTo`, `amount`, and `memo` (when present) against the terms it agreed to. When asking a user for consent, show the `memo` as the label for that leg alongside its `payTo` address and `amount`, never instead of the address.
 - Independently compute the primary remainder (`amount − Σ splits[].amount`) and confirm it is the amount reaching the merchant.
 - Reject requirements whose split recipients or amounts it did not agree to, and reject any `ataCreationRequired: true` it is unwilling to fund.
 
@@ -508,7 +515,7 @@ These extend the invariants of §4 when `extra.splits` is present.
 | # | Invariant | How it is enforced |
 |---|---|---|
 | I8 | **No fund diversion** | Every `asset` transfer lands on an ATA derived from `payTo` or a declared split `payTo`; unexpected transfers rejected (§5.3, §5.5). |
-| I9 | **Bounded rent exposure** | Fee payer funds ATA creation only when it advertises `ataCreationSponsored`, only for recipients explicitly marked `ataCreationRequired`, at most once per recipient per mint; creation for owners outside the declared recipient set forbidden (§5.4, §5.5). |
+| I9 | **Bounded rent exposure** | Fee payer funds ATA creation only when it advertises `ataCreationSponsored`, only for recipients explicitly marked `ataCreationRequired`, never for an existing ATA, and only in the account positions of §2.1.1; creation for owners outside the declared recipient set forbidden. Repeat creation after an owner closes its ATA is bounded by Sponsor policy (§5.4, §5.5). |
 | I10 | **Exact carve-outs** | Each split leg matches its declared amount exactly; only the primary leg tolerates overpayment (§5.3). |
 | I11 | **Consented distribution** | Client verifies split recipients and amounts before signing (§5.6). |
 | I12 | **Advertised capability** | Split count and ATA sponsorship are bounded by what the Sponsor advertises in `/supported`; absent advertisement means no support, and requirements exceeding it are rejected (§5.5). |
