@@ -68,7 +68,8 @@
           "schemes/overview",
           "schemes/exact",
           "schemes/upto",
-          "schemes/batch-settlement"
+          "schemes/batch-settlement",
+          "schemes/atomic-batch"
         ]
       },
       {
@@ -81,7 +82,9 @@
           "extensions/sign-in-with-x",
           "extensions/offer-receipt",
           "extensions/eip2612-gas-sponsoring",
-          "extensions/erc20-approval-gas-sponsoring"
+          "extensions/erc20-approval-gas-sponsoring",
+          "extensions/facilitator-discovery",
+          "extensions/agent-messaging"
         ]
       },
       {
