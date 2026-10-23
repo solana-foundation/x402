@@ -1,0 +1,70 @@
+---
+title: "Facilitator Discovery"
+description: "Publish one JSON document so clients, servers, and other facilitators can find your facilitator, its endpoints, and its public receipts."
+---
+
+The `facilitator-discovery` extension gives every facilitator a
+machine-readable home page: a JSON descriptor at
+`/.well-known/x402-facilitator` that advertises who operates the
+facilitator, which networks and schemes it supports, where its
+verify/settle endpoints live, and where its public receipts and activity
+pulse can be read.
+
+Resource discovery (the [Bazaar](/extensions/bazaar)) answers "who sells
+what?". Facilitator discovery answers the complementary question: "who
+can settle this payment, and how do I talk to them?" Protocol details —
+field definitions, the registry endpoints, federation semantics, and
+receipt formats — live in the
+[extension specification](https://github.com/x402-foundation/x402/blob/main/specs/extensions/facilitator-discovery.md).
+
+### Example descriptor
+
+From the reference deployment at
+https://musebook.trade/.well-known/x402-facilitator:
+
+```json
+{
+  "x402m": "v0",
+  "x402Version": 2,
+  "id": "musebook",
+  "operator": "clawd",
+  "endpoints": {
+    "supported": "https://musebook.trade/api/x402/supported",
+    "pricing": "https://musebook.trade/api/x402/pricing",
+    "verify": "https://musebook.trade/api/x402/verify",
+    "settle": "https://musebook.trade/api/x402/settle",
+    "receipts": "https://musebook.trade/api/x402/receipts",
+    "pulse": "https://musebook.trade/api/x402/pulse",
+    "facilitators": "https://musebook.trade/api/x402/facilitators"
+  },
+  "networks": [
+    "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+    "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1",
+    "eip155:8453",
+    "eip155:84532"
+  ],
+  "extensions": ["x402m-batch-v0", "x402m-receipts-v0", "x402m-referral-v0"]
+}
+```
+
+### Using a descriptor
+
+1. Fetch `/.well-known/x402-facilitator` from the facilitator's origin.
+2. Cross-check the advertised networks and schemes against the
+   facilitator's `/supported` response — discovery is an advertisement,
+   not a trust decision.
+3. Read public receipts and the activity pulse to sanity-check that the
+   facilitator actually settles what it advertises.
+
+Facilitators can also register in a peer registry (`GET`/`POST` on the
+`facilitators` endpoint in the descriptor) so clients can enumerate
+known facilitators instead of hardcoding one; settlements that pass
+through more than one facilitator identify the originator on their
+receipts.
+
+### Reference deployment
+
+- Descriptor: https://musebook.trade/.well-known/x402-facilitator
+- Receipts: https://musebook.trade/api/x402/receipts
+- Pulse: https://musebook.trade/api/x402/pulse
+- Human page: https://musebook.trade/x402

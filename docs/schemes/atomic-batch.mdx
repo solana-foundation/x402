@@ -1,0 +1,89 @@
+---
+title: "Atomic Batch"
+description: "Pay multiple recipients in one Solana transaction: one client signature, all-or-nothing settlement."
+---
+
+The `atomic-batch` scheme pays **several recipients in a single Solana transaction**. The payment requirements enumerate every recipient and amount (`extra.items`); the client builds one transaction with one `TransferChecked` instruction per item, signs it once as fee payer and sole signer, and the facilitator verifies and broadcasts it unchanged. Either every payment lands or none does.
+
+Use `atomic-batch` for marketplace splits (seller + platform fee + creator royalty in one payment), agent tool calls that pay several services at once, payroll-style disbursements, and bundled purchases — anywhere the alternative is N separate `exact` payments with partial-failure risk.
+
+<Callout type="info">
+  `atomic-batch` is not `batch-settlement`. Batch settlement escrows funds and redeems cumulative off-chain vouchers over time; atomic batch settles immediately, on-chain, to many recipients at once, with no escrow and no facilitator custody. The full comparison and protocol details live in the [scheme specification](https://github.com/x402-foundation/x402/blob/main/specs/schemes/atomic-batch/scheme_atomic_batch.md) and the [SVM binding](https://github.com/x402-foundation/x402/blob/main/specs/schemes/atomic-batch/scheme_atomic_batch_svm.md).
+</Callout>
+
+### How It Works
+
+1. **Requirements:** the resource server prices the resource as a batch — `extra.items` lists 1–8 `{ payTo, amount }` entries; the top-level `amount` is their sum and `payTo` is the first item.
+2. **Payload:** the client creates one transaction containing exactly those transfers and signs it (one signature total).
+3. **Verify:** the facilitator re-derives everything from the signed bytes — signature, instruction allowlist, per-item asset / amount / recipient (including on-chain token-account ownership) — then simulates.
+4. **Settle:** the facilitator broadcasts the transaction unchanged and confirms it. Duplicate submissions are rejected by message hash.
+
+Recipient token accounts must already exist (the strict instruction allowlist contains no account-creation instructions). This version covers classic SPL Token mints (e.g. USDC) on Solana mainnet and devnet.
+
+### Server Setup
+
+Register the scheme with a resource server and price routes with an itemized `AssetAmount`:
+
+```typescript
+import { x402ResourceServer } from "@x402/core/server";
+import { registerAtomicBatchSvmScheme } from "@x402/svm/atomic-batch/server";
+
+const server = new x402ResourceServer();
+registerAtomicBatchSvmScheme(server);
+
+// Route price: an AssetAmount whose extra.items enumerates the batch.
+// The registered scheme derives amount (the item sum) and payTo (items[0]).
+const price = {
+  amount: "0", // replaced by the item sum
+  asset: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", // USDC (mainnet)
+  extra: {
+    items: [
+      { payTo: "SellerWallet111111111111111111111111111", amount: "90000" },
+      { payTo: "PlatformWallet1111111111111111111111111", amount: "10000" },
+    ],
+  },
+};
+```
+
+### Client Setup
+
+```typescript
+import { x402Client } from "@x402/core/client";
+import { registerAtomicBatchSvmScheme } from "@x402/svm/atomic-batch/client";
+import { toClientSvmSigner } from "@x402/svm";
+
+const client = new x402Client();
+registerAtomicBatchSvmScheme(client, { signer: toClientSvmSigner(keypair) });
+```
+
+The client reads the batch from the requirements, builds the single multi-transfer transaction, and signs it once. No per-item interaction is needed.
+
+### Facilitator Setup
+
+```typescript
+import { x402Facilitator } from "@x402/core/facilitator";
+import { registerAtomicBatchSvmScheme } from "@x402/svm/atomic-batch/facilitator";
+import { toFacilitatorSvmSigner } from "@x402/svm";
+
+const facilitator = new x402Facilitator();
+registerAtomicBatchSvmScheme(facilitator, {
+  signer: toFacilitatorSvmSigner(relayKeypair),
+  rpcUrl: "https://your-solana-rpc.example", // production facilitators should set this
+});
+```
+
+The facilitator never signs batch transactions and never holds funds — its key only relays already-signed transactions for broadcast. Verification failures return the scheme's `invalid_atomic_batch_svm_*` reason strings; see the [SVM binding](https://github.com/x402-foundation/x402/blob/main/specs/schemes/atomic-batch/scheme_atomic_batch_svm.md) for the full list.
+
+### Reference Deployment
+
+The Musebook facilitator runs `atomic-batch` in production on Solana mainnet and devnet (as the `x402m-batch-v0` profile), alongside `exact`:
+
+- Facilitator discovery: https://musebook.trade/.well-known/x402-facilitator
+- Human pages: https://musebook.trade/x402 and https://musebook.trade/x402m
+- Pricing: `GET https://musebook.trade/api/x402/pricing`
+- Public receipts: `GET https://musebook.trade/api/x402/receipts`
+
+### Related
+
+- [Facilitator Discovery](/extensions/facilitator-discovery) — how clients find this facilitator and its supported kinds.
+- [Agent Messaging](/extensions/agent-messaging) — how agents send each other the payment requests that a batch then settles.

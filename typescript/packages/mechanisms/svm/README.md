@@ -5,6 +5,7 @@ SVM (Solana Virtual Machine) implementation of the x402 payment protocol.
 **Payment schemes:**
 - **Exact** — fixed-price SPL Token transfers (client pays the advertised amount)
 - **Upto** — usage-based billing via [payment-channels](https://github.com/solana-foundation/payment-channels) (client authorizes a max; server settles actual usage)
+- **Atomic Batch** — multi-recipient payments in one transaction (client signs once; every item settles or none does)
 
 ## Installation
 
@@ -53,6 +54,16 @@ Usage-based payments: authorize a ceiling, settle actual usage. See [Upto SVM Sc
 | Client | `@x402/svm/upto/client` → `UptoSvmScheme` |
 | Server | `@x402/svm/upto/server` → `UptoSvmScheme` (requires `receiverAuthorizerSigner` unless the facilitator's `receiverAuthorizer` is delegated to) |
 | Facilitator | `@x402/svm/upto/facilitator` → `UptoSvmScheme` (requires `getSigner` on the facilitator signer) |
+
+### Atomic Batch Scheme (`@x402/svm/atomic-batch/*`)
+
+Multi-recipient payments: the requirements enumerate 1–8 payments in `extra.items`; the client builds one transaction with one `TransferChecked` per item and signs once (payer is fee payer and sole signer); the facilitator verifies every item against the signed bytes and broadcasts unchanged. See [Atomic Batch specs](../../../../specs/schemes/atomic-batch/).
+
+| Role | Import |
+|------|--------|
+| Client | `@x402/svm/atomic-batch/client` → `AtomicBatchSvmScheme` |
+| Server | `@x402/svm/atomic-batch/server` → `AtomicBatchSvmScheme` |
+| Facilitator | `@x402/svm/atomic-batch/facilitator` → `AtomicBatchSvmScheme` |
 
 ### V1 Package (`@x402/svm/v1`)
 
