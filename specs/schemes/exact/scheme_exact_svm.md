@@ -381,7 +381,7 @@ order:
 6. (Optional) Lighthouse or Memo program instruction
 7. (Optional) Memo program instruction
 
-A version-1 transaction MUST contain 1 to 5 instructions in this order:
+For a single-payee charge, a version-1 transaction MUST contain 1 to 5 instructions in this order:
 
 1. SPL Token or Token-2022 `TransferChecked`
 2. (Optional) Lighthouse or Memo program instruction
@@ -399,7 +399,7 @@ A version-1 transaction MUST contain 1 to 5 instructions in this order:
   `maxPriorityFeeMicroLamports` (default 5 lamports/CU) on this path, using the
   normalization in §1.5 for version 1.
 
-When `extra.splits` is present or any recipient is marked `ataCreationRequired`, the 3–7 instruction cap does not apply as written. It generalizes to `3 + N + K` to `7 + N + K` instructions, where `N` is the number of splits and `K` the number of `CreateIdempotent` instructions (at most one per marked recipient), in the layout defined in §5.7. Split charges from standard wallets are expected to verify on Path 1: a charge whose instruction count is within these bounds MUST NOT be rejected, or sent to Path 2, because of its count.
+When `extra.splits` is present or any recipient is marked `ataCreationRequired`, the single-payee caps do not apply as written. They generalize to `3 + N + K` to `7 + N + K` instructions for a legacy or version-0 transaction, and to `1 + N + K` to `5 + N + K` for a version-1 transaction, where `N` is the number of splits and `K` the number of `CreateIdempotent` instructions (at most one per marked recipient), in the layout defined in §5.7. Split charges from standard wallets are expected to verify on Path 1: a charge whose instruction count is within these bounds MUST NOT be rejected, or sent to Path 2, because of its count.
 
 ### 3.2 Path 2 — Simulation-Based Smart Wallet Verification
 
@@ -500,7 +500,7 @@ Every split shares the top-level `asset`; a split MUST NOT name a different mint
 - `Σ splits[].amount` MUST be strictly less than `amount`; equivalently, the primary remainder MUST be greater than zero. A Resource Server MUST NOT issue, and a Sponsor MUST reject, requirements in which splits consume the entire amount (`split_remainder_not_positive`).
 - All amounts are integers in base units. No rounding or remainder redistribution is performed; the arithmetic MUST balance exactly.
 
-A charge with `N` splits produces `N + 1` payment legs (one primary plus `N` splits), for a maximum of nine legs. The practical maximum may be lower than eight splits: the transaction MUST still fit Solana's 1232-byte limit, which additional `TransferChecked` and ATA-creation instructions consume; Address Lookup Tables MAY be used to raise this ceiling (subject to §2.1.2).
+A charge with `N` splits produces `N + 1` payment legs (one primary plus `N` splits), for a maximum of nine legs. The practical maximum may be lower than eight splits: the transaction MUST still fit the size limit of its message version (§1.5: 1232 bytes for legacy and version 0, 4096 bytes for version 1), which additional `TransferChecked` and ATA-creation instructions consume. A version-0 transaction MAY use Address Lookup Tables to raise this ceiling (subject to §2.1.2); a version-1 transaction cannot use them, but its larger limit fits a full eight-split charge with room to spare.
 
 ### 5.3 Payment Outcome with Splits (MUST)
 
@@ -573,7 +573,7 @@ Before signing, the client MUST verify that `extra.splits` — when present — 
 
 ### 5.7 Static Layout with Splits (MUST)
 
-Path 1 (§3.1) generalizes for splits and for ATA creation. With `N` splits and `K` `CreateIdempotent` instructions (`0 ≤ K ≤` the number of recipients marked `ataCreationRequired: true`), the decompiled transaction MUST contain `3 + N + K` to `7 + N + K` instructions in this order:
+Path 1 (§3.1) generalizes for splits and for ATA creation. With `N` splits and `K` `CreateIdempotent` instructions (`0 ≤ K ≤` the number of recipients marked `ataCreationRequired: true`), a legacy or version-0 transaction MUST contain `3 + N + K` to `7 + N + K` instructions in this order:
 
 1. Compute Budget: Set Compute Unit Limit
 2. Compute Budget: Set Compute Unit Price
@@ -582,7 +582,9 @@ Path 1 (§3.1) generalizes for splits and for ATA creation. With `N` splits and 
 5. `N` `TransferChecked` instructions, one per split, in the order of `extra.splits`
 6. Up to four optional instructions: the same wallet-injected Lighthouse / SPL Memo instructions permitted in §3.1
 
-The optional tail keeps the four slots of §3.1, so Phantom and Solflare injections stay on the fast path no matter how many legs the charge has. A verifier matches the transfers positionally: the first `TransferChecked` after the `K` creates is the primary leg, and the next `N` are `extra.splits[0]` through `extra.splits[N - 1]`. A transaction that departs from this layout is a recoverable layout failure (§3.3) and MAY still verify on Path 2. The compute unit limit naturally grows with `N` and `K`, and remains subject to §2.2.1.
+A version-1 transaction carries its compute budget in the message header (§1.5), so it omits steps 1 and 2 and MUST contain `1 + N + K` to `5 + N + K` instructions in the same order from step 3. When `K > 0`, the transaction also invokes the Associated Token Account program, whose program data counts against `loadedAccountsDataSizeLimit`, so the client MUST size that limit to include it.
+
+The optional tail keeps the four slots of §3.1, so Phantom and Solflare injections stay on the fast path no matter how many legs the charge has. A verifier matches the transfers positionally: the first `TransferChecked` after the `K` creates is the primary leg, and the next `N` are `extra.splits[0]` through `extra.splits[N - 1]`. A transaction that departs from this layout is a recoverable layout failure (§3.3) and MAY still verify on Path 2. The compute unit limit naturally grows with `N` and `K`, and remains subject to §2.2.1 (and, on version 1, the `TransactionConfig` rules of §1.5).
 
 The exactly-one-Memo rule for `extra.memo` (§3.1) is unchanged: a single on-chain Memo governs the whole charge, not one per leg. Smart-wallet (Path 2, §3.2) charges verify the same `N + 1`-leg outcome across the CPI trace, and post-settlement verification (§3.4) confirms every leg landed on-chain, not simulation alone.
 
