@@ -10,7 +10,7 @@ A signed SVM transfer commits to an exact amount and exact instruction data, so 
 - Every later operation is authorized by an Ed25519 message signed by the receiver authorizer and verified by the program. `capture`, `void`, and `refund` each carry their own signed message, so the program rather than the facilitator enforces server consent.
 - The capture deadline locks the hold until it passes and releases it afterwards. Before it, the client cannot close the channel. After it, no capture lands and anyone can return the remaining hold to the client.
 
-The binding depends on the auth-capture channel extension of the payment-channels program specified in [payment-channels#99](https://github.com/solana-foundation/payment-channels/issues/99). The instructions and message formats that extension adds are summarized in [Program surface](#program-surface). Until a release implementing it is deployed, no network supports this binding, and a facilitator MUST NOT advertise it in `/supported`.
+The program instructions and message formats the binding relies on are summarized in [Program surface](#program-surface).
 
 Only the `escrow` payment flow is defined. A channel always places a hold, so `paymentFlow: "authorization"` is not supported; see [Payment flows](#payment-flows).
 
@@ -49,7 +49,7 @@ The scheme's [network requirements](./scheme_auth_capture.md#network-requirement
 
 The canonical program id is a network constant, not a wire field. Implementations MUST target the canonical payment-channels program for the selected `network` and MUST NOT read a program id from `extra`. The auth-capture channel is an opt-in account version of that program, created by `open` with deadlines; earlier channel versions keep their existing behavior and are never valid for this scheme.
 
-The binding relies on the following program behavior, as specified in [payment-channels#99](https://github.com/solana-foundation/payment-channels/issues/99). Instruction names and message magics below are provisional until that release ships, and this document will be updated to its final ABI.
+The binding relies on the following program behavior:
 
 | Instruction | Behavior relied on |
 | --- | --- |
@@ -74,9 +74,9 @@ magic(2) || channelId(32) || u64(cumulativeAmount).le || i64(expiresAt).le
 | Final | `0x56 0x05` | Total captured at seal (capture-and-void, or void when equal to current captured) | `extra.captureDeadline` | `seal_final` |
 | Refund | `0x56 0x06` | Total refunded after this refund | `extra.refundDeadline` | `refund` |
 
-The capture message is the program's existing version-1 voucher. Final and refund messages use magics distinct from it and from each other, so a message signed for one operation is never accepted by another. `0x56 0x02` is reserved for `settleBatch` and `0x56 0x03` / `0x56 0x04` are proposed for `settle_metered`; the final and refund magics are provisional.
+The capture message is the program's existing version-1 voucher. Final and refund messages use magics distinct from it and from each other, so a message signed for one operation is never accepted by another.
 
-`expiresAt` is fixed by the binding rather than chosen per message, so the facilitator can rebuild every message from the channel and the payload alone. The program enforces the deadlines in any case; `expiresAt` makes a message unusable after its deadline even if a later program release relaxed that rule.
+`expiresAt` is fixed by the binding rather than chosen per message, so the facilitator can rebuild every message from the channel and the payload alone. The program enforces the deadlines in any case; `expiresAt` additionally binds each message to the deadline it was signed for.
 
 ### Single-use consent
 
@@ -528,4 +528,4 @@ The scheme uses the standard x402 error codes plus the following. Every reason t
 
 | Version | Date | Changes | Authors |
 | --- | --- | --- | --- |
-| v1.0 | 2026-10-26 | Initial draft, on the payment-channels auth-capture extension (payment-channels#99) | @lgalabru |
+| v1.0 | 2026-10-26 | Initial draft | @lgalabru |
