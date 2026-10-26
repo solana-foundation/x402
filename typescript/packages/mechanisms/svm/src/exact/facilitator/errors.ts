@@ -34,6 +34,7 @@ export const ErrComputePriceInstruction =
   "invalid_exact_svm_payload_transaction_instructions_compute_price_instruction";
 export const ErrComputePriceInstructionTooHigh =
   "invalid_exact_svm_payload_transaction_instructions_compute_price_instruction_too_high";
+export const ErrTransactionSizeExceeded = "invalid_exact_svm_payload_transaction_size_exceeded";
 export const ErrLoadedAccountsDataSizeLimitMissing =
   "invalid_exact_svm_payload_transaction_loaded_accounts_data_size_limit_missing";
 export const ErrTransactionV1ComputeBudgetInstruction =

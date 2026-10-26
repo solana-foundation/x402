@@ -1,6 +1,7 @@
 """SVM utility functions for network, address, and amount handling."""
 
 import base64
+import binascii
 import hashlib
 import re
 from collections.abc import Sequence
@@ -370,6 +371,27 @@ def max_transaction_size(version: int | str) -> int:
         4096 bytes for version 1, 1232 bytes for legacy and version 0.
     """
     return MAX_TRANSACTION_SIZE_V1 if version == 1 else MAX_TRANSACTION_SIZE_V0
+
+
+def transaction_size_exceeded(transaction_b64: str, version: int | str) -> bool:
+    """Whether a wire transaction exceeds its message version's size limit.
+
+    Verifiers call this after the version gate: the decoder accepts an
+    oversized transaction, but the network would drop it after the sponsor
+    co-signed it. Legacy is policed as version 0.
+
+    Args:
+        transaction_b64: The base64-encoded wire transaction.
+        version: Its message version, as ``get_transaction_version`` reports it.
+
+    Returns:
+        True when the serialized transaction is larger than the limit.
+    """
+    try:
+        size = len(base64.b64decode(transaction_b64, validate=True))
+    except (binascii.Error, ValueError):
+        return True
+    return size > max_transaction_size(version)
 
 
 def encode_partially_signed_transaction(message: MessageV0 | MessageV1, keypair: Keypair) -> str:

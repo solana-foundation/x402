@@ -13,8 +13,9 @@ import pytest
 from solders.hash import Hash
 from solders.instruction import AccountMeta, Instruction
 from solders.keypair import Keypair
-from solders.message import MessageV1, TransactionConfig
+from solders.message import MessageV1, TransactionConfig, to_bytes_versioned
 from solders.pubkey import Pubkey
+from solders.signature import Signature
 from solders.transaction import VersionedTransaction
 
 from x402.mechanisms.svm import (
@@ -28,6 +29,7 @@ from x402.mechanisms.svm import (
     ERR_LOADED_ACCOUNTS_DATA_SIZE_LIMIT_MISSING,
     ERR_MEMO_MISMATCH,
     ERR_NO_TRANSFER_INSTRUCTION,
+    ERR_TRANSACTION_SIZE_EXCEEDED,
     ERR_UNKNOWN_FOURTH_INSTRUCTION,
     ERR_UNKNOWN_SEVENTH_INSTRUCTION,
     ERR_V1_COMPUTE_BUDGET_INSTRUCTION,
@@ -45,6 +47,7 @@ from x402.mechanisms.svm.exact import ExactSvmClientScheme, ExactSvmFacilitatorS
 from x402.mechanisms.svm.exact.v1 import ExactSvmSchemeV1Facilitator
 from x402.mechanisms.svm.signers import KeypairSigner
 from x402.mechanisms.svm.utils import (
+    compile_payment_message,
     encode_partially_signed_transaction,
     priority_fee_lamports,
 )
@@ -368,3 +371,62 @@ class TestTransactionSizeLimit:
         memos = [_memo_ix(bytes([i]) * 1_100) for i in range(4)]
         with pytest.raises(ValueError, match="4096-byte limit"):
             _v1_wire([_transfer_ix(), *memos])
+
+
+def _unchecked_wire(version: int, memo_len: int) -> str:
+    """A signed payment padded through its memo, bypassing the client's size check."""
+    message = compile_payment_message(
+        version, FEE_PAYER.pubkey(), [_transfer_ix(), _memo_ix(b"a" * memo_len)], BLOCKHASH
+    )
+    signature = CLIENT.sign_message(to_bytes_versioned(message))
+    tx = VersionedTransaction.populate(message, [Signature.default(), signature])
+    return base64.b64encode(bytes(tx)).decode("utf-8")
+
+
+def _wire_of_size(version: int, size: int) -> str:
+    probe = len(base64.b64decode(_unchecked_wire(version, 500)))
+    wire = _unchecked_wire(version, 500 + size - probe)
+    assert len(base64.b64decode(wire)) == size
+    return wire
+
+
+class TestVerifierSizeLimit:
+    @pytest.mark.parametrize(
+        ("version", "size", "accepted"),
+        [
+            (0, 1232, True),
+            (0, 1233, False),
+            (1, 1233, True),
+            (1, 4096, True),
+            (1, 4097, False),
+        ],
+    )
+    def test_exact_verify_enforces_the_version_size_limit(self, version, size, accepted):
+        result = _verify(_wire_of_size(version, size))
+        if accepted:
+            assert result.is_valid, result.invalid_reason
+        else:
+            assert result.invalid_reason == ERR_TRANSACTION_SIZE_EXCEEDED
+
+    def test_legacy_protocol_facilitator_enforces_the_size_limit(self):
+        requirements = PaymentRequirementsV1(
+            scheme="exact",
+            network="solana-devnet",
+            asset=USDC_DEVNET_ADDRESS,
+            max_amount_required=str(AMOUNT),
+            pay_to=str(PAY_TO.pubkey()),
+            max_timeout_seconds=3600,
+            resource="http://example.com/protected",
+            description="",
+            mime_type="application/json",
+            extra={"feePayer": str(FEE_PAYER.pubkey())},
+        )
+        facilitator = ExactSvmSchemeV1Facilitator(RecordingFacilitatorSigner())
+        for size, expected in ((4096, None), (4097, ERR_TRANSACTION_SIZE_EXCEEDED)):
+            payload = PaymentPayloadV1(
+                x402_version=1,
+                scheme="exact",
+                network="solana-devnet",
+                payload={"transaction": _wire_of_size(1, size)},
+            )
+            assert facilitator.verify(payload, requirements).invalid_reason == expected

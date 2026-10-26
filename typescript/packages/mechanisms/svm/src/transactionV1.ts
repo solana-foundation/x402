@@ -1,4 +1,5 @@
 import {
+  getBase64Encoder,
   setTransactionMessageConfig,
   TRANSACTION_CONFIG_COMPUTE_UNIT_LIMIT_BIT_MASK,
   TRANSACTION_CONFIG_HEAP_SIZE_BIT_MASK,
@@ -36,6 +37,25 @@ export type BuildableTransactionVersion = 0 | 1;
  */
 export function maxTransactionSize(version: number | string): number {
   return version === 1 ? V1_MAX_TRANSACTION_SIZE : V0_MAX_TRANSACTION_SIZE;
+}
+
+/**
+ * Whether a base64 wire transaction exceeds the serialized size limit of its
+ * message version (legacy is policed as version 0). Verifiers call this after
+ * the version gate: the decoder accepts an oversized transaction, but the
+ * network would drop it after the sponsor co-signed it.
+ *
+ * @param transactionBase64 - The base64 wire transaction
+ * @param version - Its message version
+ * @returns The size and limit when the transaction is too large, otherwise undefined
+ */
+export function transactionSizeExceeded(
+  transactionBase64: string,
+  version: number | string,
+): { size: number; limit: number } | undefined {
+  const size = getBase64Encoder().encode(transactionBase64).byteLength;
+  const limit = maxTransactionSize(version);
+  return size > limit ? { size, limit } : undefined;
 }
 
 /**

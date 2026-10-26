@@ -324,3 +324,51 @@ func TestValidateComputeBudgetLimitsVersion1UsesSmartWalletCodes(t *testing.T) {
 		})
 	}
 }
+
+// sizedExactFixture pads an exact payment's memo so the serialized
+// transaction is exactly size bytes.
+func sizedExactFixture(t *testing.T, version solana.MessageVersion, size int) exactFixture {
+	t.Helper()
+	build := func(memoLen int) exactFixture {
+		memo := memoInstruction(strings.Repeat("a", memoLen))
+		if version == solana.MessageVersionV1 {
+			return buildV1ExactFixture(t, v1ExactConfig(), nil, memo)
+		}
+		return buildExactFixtureWithOptional(t, memo)
+	}
+	probe := build(500)
+	raw, err := probe.tx.MarshalBinary()
+	require.NoError(t, err)
+	f := build(500 + size - len(raw))
+	raw, err = f.tx.MarshalBinary()
+	require.NoError(t, err)
+	require.Len(t, raw, size)
+	return f
+}
+
+func TestExactSvmScheme_VerifyEnforcesTheSizeLimitOfTheMessageVersion(t *testing.T) {
+	tests := []struct {
+		version  solana.MessageVersion
+		size     int
+		accepted bool
+	}{
+		{solana.MessageVersionV0, svm.MaxTransactionSizeLegacy, true},
+		{solana.MessageVersionV0, svm.MaxTransactionSizeLegacy + 1, false},
+		{solana.MessageVersionV1, svm.MaxTransactionSizeLegacy + 1, true},
+		{solana.MessageVersionV1, svm.MaxTransactionSizeV1, true},
+		{solana.MessageVersionV1, svm.MaxTransactionSizeV1 + 1, false},
+	}
+	for _, test := range tests {
+		f := sizedExactFixture(t, test.version, test.size)
+		resp, signer, err := verifyFixture(t, f)
+		if test.accepted {
+			require.NoError(t, err, "version %d, %d bytes", test.version, test.size)
+			assert.True(t, resp.IsValid)
+			continue
+		}
+		var verifyErr *x402.VerifyError
+		require.True(t, errors.As(err, &verifyErr), "version %d, %d bytes: %v", test.version, test.size, err)
+		assert.Equal(t, ErrTransactionSizeExceeded, verifyErr.InvalidReason)
+		assert.Zero(t, signer.simulateCalls)
+	}
+}

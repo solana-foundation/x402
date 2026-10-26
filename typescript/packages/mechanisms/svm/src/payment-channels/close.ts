@@ -35,6 +35,7 @@ import {
   checkTransactionV1Budget,
   getCompiledInstructions,
   readTransactionV1Config,
+  transactionSizeExceeded,
 } from "../transactionV1";
 import { isAcceptedTransactionVersion } from "../utils";
 import {
@@ -150,6 +151,12 @@ export async function verifyRequestCloseTransaction(
   if (!isAcceptedTransactionVersion(compiledMessage.version)) {
     throw new Error(
       `${ErrUnsupportedTransactionVersion}: verifyRequestCloseTransaction: transaction message version ${String(compiledMessage.version)} is not accepted; request-close transactions must be legacy, version 0, or version 1`,
+    );
+  }
+  const oversized = transactionSizeExceeded(transactionBase64, compiledMessage.version);
+  if (oversized) {
+    throw new Error(
+      `verifyRequestCloseTransaction: transaction is ${oversized.size} bytes, above the ${oversized.limit}-byte limit for version ${String(compiledMessage.version)}`,
     );
   }
   const message = {

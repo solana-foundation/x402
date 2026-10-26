@@ -35,6 +35,20 @@ func MaxTransactionSize(version solana.MessageVersion) int {
 	return MaxTransactionSizeLegacy
 }
 
+// TransactionSizeExceeded reports whether a base64 wire transaction exceeds
+// the serialized size limit of its message version (legacy is policed as
+// version 0). Verifiers call it after the version gate: the decoder accepts an
+// oversized transaction, but the network would drop it after the sponsor
+// co-signed it. It returns the size and the limit.
+func TransactionSizeExceeded(base64Tx string, version solana.MessageVersion) (int, int, bool) {
+	size := base64.StdEncoding.DecodedLen(len(base64Tx))
+	if raw, err := base64.StdEncoding.DecodeString(base64Tx); err == nil {
+		size = len(raw)
+	}
+	limit := MaxTransactionSize(version)
+	return size, limit, size > limit
+}
+
 // PeekWireTransactionVersion reads a wire transaction's message version from
 // its raw bytes, without trusting the SDK decoder. Legacy and version-0
 // transactions start with the compact-u16 signature count (below 0x80 within

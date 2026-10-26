@@ -258,7 +258,7 @@ describe("verifier version gates", () => {
     version: 0 | "legacy" | 1 = 0,
     options: Pick<
       Parameters<typeof buildExactPaymentTransaction>[0],
-      "v1Config" | "leadingInstructions"
+      "v1Config" | "leadingInstructions" | "memo"
     > = {},
   ): Promise<{
     transaction: string;
@@ -497,6 +497,54 @@ describe("verifier version gates", () => {
     );
     expect(result.invalidReason).toBe(Errors.ErrTransactionV1ComputeBudgetInstruction);
   });
+
+  /** Serialized size of a base64 wire transaction. */
+  function wireSize(transaction: string): number {
+    return getBase64Codec().encode(transaction).byteLength;
+  }
+
+  /** An exact payment padded through its memo to exactly `size` bytes. */
+  async function paymentOfSize(version: 0 | 1, size: number) {
+    const probe = await exactPayment(version, { memo: "a".repeat(500) });
+    const memo = "a".repeat(500 + size - wireSize(probe.transaction));
+    const sized = await exactPayment(version, { memo });
+    expect(wireSize(sized.transaction)).toBe(size);
+    return sized;
+  }
+
+  it.each([
+    [0, 1232, true],
+    [0, 1233, false],
+    [1, 1233, true],
+    [1, 4096, true],
+    [1, 4097, false],
+  ] as const)(
+    "exact verify enforces the version %s size limit at %s bytes",
+    async (version, size, accepted) => {
+      const { transaction, requirements } = await paymentOfSize(version, size);
+      const signer = facilitatorSigner();
+      const result = await new ExactSvmFacilitatorScheme(signer).verify(
+        v2Payload(transaction, requirements),
+        requirements,
+      );
+      if (accepted) {
+        expect(result).toMatchObject({ isValid: true });
+      } else {
+        expect(result.invalidReason).toBe(Errors.ErrTransactionSizeExceeded);
+        expect(signer.simulateTransaction).not.toHaveBeenCalled();
+      }
+
+      const v1Protocol = await new ExactSvmSchemeV1(facilitatorSigner()).verify(
+        v1ProtocolPayload(transaction),
+        v1ProtocolRequirements(),
+      );
+      if (accepted) {
+        expect(v1Protocol).toMatchObject({ isValid: true });
+      } else {
+        expect(v1Protocol.invalidReason).toBe(Errors.ErrTransactionSizeExceeded);
+      }
+    },
+  );
 
   it("smart wallet checks apply their own caps to a version 1 message", async () => {
     const v1 = decodeTransactionFromPayload({ transaction: (await exactPayment(1)).transaction });

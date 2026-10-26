@@ -5,14 +5,21 @@
  * budget in the message config, which the verifiers cap.
  */
 import {
+  appendTransactionMessageInstruction,
+  compileTransaction,
+  decompileTransactionMessage,
   generateKeyPairSigner,
   getBase64Codec,
+  getBase64EncodedWireTransaction,
   getCompiledTransactionMessageDecoder,
   getTransactionDecoder,
+  partiallySignTransaction,
+  type Address,
+  type KeyPairSigner,
 } from "@solana/kit";
 import { describe, expect, it } from "vitest";
 
-import { TOKEN_PROGRAM_ADDRESS } from "../../src/constants";
+import { MEMO_PROGRAM_ADDRESS, TOKEN_PROGRAM_ADDRESS } from "../../src/constants";
 import { USDC_DEVNET_ADDRESS } from "../../src/defaultAssets";
 import {
   buildRequestCloseTransaction,
@@ -48,6 +55,24 @@ function retagAsVersion2(transactionBase64: string): string {
   expect(bytes[0]).toBe(0x81);
   bytes[0] = 0x82;
   return getBase64Codec().decode(bytes);
+}
+
+/**
+ * Append a Memo instruction of `bytes` bytes to a client transaction and
+ * re-sign it as `payer`, keeping its message version: a payload over its
+ * version's size limit that the builders refuse to produce.
+ */
+async function padded(transactionBase64: string, payer: KeyPairSigner, bytes: number) {
+  const message = decompileTransactionMessage(compiled(transactionBase64));
+  const withMemo = appendTransactionMessageInstruction(
+    { programAddress: MEMO_PROGRAM_ADDRESS as Address, data: new Uint8Array(bytes).fill(97) },
+    message,
+  );
+  const signed = await partiallySignTransaction(
+    [payer.keyPair],
+    compileTransaction(withMemo as never),
+  );
+  return getBase64EncodedWireTransaction(signed);
 }
 
 async function openTransaction(
@@ -105,7 +130,7 @@ async function topUpTransaction(version: BuildableTransactionVersion) {
     mint: USDC_DEVNET_ADDRESS,
     tokenProgram: TOKEN_PROGRAM_ADDRESS,
   };
-  return { topUp, topUpExpected, expected };
+  return { topUp, topUpExpected, expected, payer };
 }
 
 async function closeTransaction(version: BuildableTransactionVersion) {
@@ -122,7 +147,7 @@ async function closeTransaction(version: BuildableTransactionVersion) {
     feePayer: feePayer.address,
     payer: payer.address,
   };
-  return { transaction, closeExpected };
+  return { transaction, closeExpected, payer };
 }
 
 describe("payment-channels open builder", () => {
@@ -226,5 +251,46 @@ describe("payment-channels top-up and close across versions", () => {
     await expect(
       verifyRequestCloseTransaction(retagAsVersion2(transaction), closeExpected),
     ).rejects.toThrow();
+  });
+});
+
+describe("payment-channel verifiers enforce the size limit of the message version", () => {
+  it.each([
+    [0, 1300],
+    [1, 4200],
+  ] as const)("rejects a version %s open padded to about %s bytes", async (version, target) => {
+    const { open, expected, payer } = await openTransaction([version]);
+    const size = getBase64Codec().encode(open.transaction).byteLength;
+    const oversized = await padded(open.transaction, payer, target - size);
+    expect(wireVersion(oversized)).toBe(version);
+    await expect(verifyOpenTransaction(oversized, expected)).rejects.toThrow(
+      /verifyOpenTransaction: transaction is \d+ bytes, above the (1232|4096)-byte limit/,
+    );
+  });
+
+  it("accepts a version 1 open above 1232 bytes", async () => {
+    const { open, expected, payer } = await openTransaction([1]);
+    const size = getBase64Codec().encode(open.transaction).byteLength;
+    const larger = await padded(open.transaction, payer, 1400 - size);
+    expect(getBase64Codec().encode(larger).byteLength).toBeGreaterThan(1232);
+    await expect(verifyOpenTransaction(larger, expected)).resolves.toMatchObject({
+      channelId: open.channelId,
+    });
+  });
+
+  it("rejects an oversized version 0 top-up", async () => {
+    const { topUp, topUpExpected, payer } = await topUpTransaction(0);
+    const oversized = await padded(topUp.transaction, payer, 1300);
+    await expect(verifyTopUpTransaction(oversized, topUpExpected)).rejects.toThrow(
+      /verifyTopUpTransaction: transaction is \d+ bytes, above the 1232-byte limit for version 0/,
+    );
+  });
+
+  it("rejects an oversized version 1 request_close", async () => {
+    const { transaction, closeExpected, payer } = await closeTransaction(1);
+    const oversized = await padded(transaction, payer, 4200);
+    await expect(verifyRequestCloseTransaction(oversized, closeExpected)).rejects.toThrow(
+      /verifyRequestCloseTransaction: transaction is \d+ bytes, above the 4096-byte limit for version 1/,
+    );
   });
 });

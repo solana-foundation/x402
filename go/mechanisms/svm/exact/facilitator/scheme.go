@@ -240,6 +240,12 @@ func (f *ExactSvmScheme) verify(
 		return nil, x402.NewVerifyError(ErrUnsupportedTransactionVersion, "", fmt.Sprintf("unsupported transaction message version %d", svm.WireTransactionVersion(tx.Message.GetVersion())))
 	}
 
+	// Size limit of the message version (§1.5): 1232 bytes for legacy and
+	// version 0, 4096 for version 1. The decoder accepts larger payloads.
+	if size, limit, exceeded := svm.TransactionSizeExceeded(solanaPayload.Transaction, tx.Message.GetVersion()); exceeded {
+		return nil, x402.NewVerifyError(ErrTransactionSizeExceeded, "", fmt.Sprintf("transaction is %d bytes, above the %d-byte limit", size, limit))
+	}
+
 	if f.config.MaxRequiredSignatures != nil && tx.Message.Header.NumRequiredSignatures > *f.config.MaxRequiredSignatures {
 		return nil, x402.NewVerifyError(ErrExcessiveSigners, "", ErrExcessiveSigners)
 	}

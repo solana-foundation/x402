@@ -279,6 +279,23 @@ func decodeChannelTransaction(transactionBase64, label string) (*solana.Transact
 	if !svm.IsAcceptedTransactionVersion(tx.Message.GetVersion()) {
 		return nil, unsupportedTransactionVersionError(label, svm.WireTransactionVersion(tx.Message.GetVersion()))
 	}
+	// The decoder accepts a transaction over its version's size limit (1232
+	// bytes for legacy and version 0, 4096 for version 1), which the network
+	// would drop after the sponsor co-signed it.
+	if size, limit, exceeded := svm.TransactionSizeExceeded(transactionBase64, tx.Message.GetVersion()); exceeded {
+		prefix := ""
+		if label != "" {
+			prefix = label + ": "
+		}
+		version := "legacy"
+		if wire := svm.WireTransactionVersion(tx.Message.GetVersion()); wire >= 0 {
+			version = fmt.Sprintf("%d", wire)
+		}
+		return nil, fmt.Errorf(
+			"%stransaction is %d bytes, above the %d-byte limit for version %s",
+			prefix, size, limit, version,
+		)
+	}
 	return tx, nil
 }
 

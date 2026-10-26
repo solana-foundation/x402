@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"math"
+	"strings"
 	"testing"
 
 	solana "github.com/gagliardetto/solana-go"
@@ -178,4 +179,36 @@ func TestExactSvmSchemeV1_VerifyRejectsTransactionVersion1Violations(t *testing.
 		require.NoError(t, err)
 		assert.True(t, resp.IsValid)
 	})
+}
+
+func TestExactSvmSchemeV1_VerifyEnforcesTheVersion1SizeLimit(t *testing.T) {
+	memo := func(n int) solana.Instruction {
+		return solana.NewInstruction(solana.MustPublicKeyFromBase58(svm.MemoProgramAddress), solana.AccountMetaSlice{}, []byte(strings.Repeat("a", n)))
+	}
+	_, _, _, probe := buildMessageV1Fixture(t, v1MessageConfig(), nil, memo(500))
+	raw, err := probe.MarshalBinary()
+	require.NoError(t, err)
+	for _, test := range []struct {
+		size     int
+		accepted bool
+	}{
+		{svm.MaxTransactionSizeV1, true},
+		{svm.MaxTransactionSizeV1 + 1, false},
+	} {
+		payload, requirements, facilitatorAddr, tx := buildMessageV1Fixture(t, v1MessageConfig(), nil, memo(500+test.size-len(raw)))
+		sized, err := tx.MarshalBinary()
+		require.NoError(t, err)
+		require.Len(t, sized, test.size)
+		signer := &mockV1Signer{addresses: []solana.PublicKey{facilitatorAddr}}
+		resp, err := NewExactSvmSchemeV1(signer).Verify(context.Background(), payload, requirements, nil)
+		if test.accepted {
+			require.NoError(t, err)
+			assert.True(t, resp.IsValid)
+			continue
+		}
+		var verifyErr *x402.VerifyError
+		require.True(t, errors.As(err, &verifyErr), "%v", err)
+		assert.Equal(t, ErrTransactionSizeExceeded, verifyErr.InvalidReason)
+		assert.Zero(t, signer.simulateCalls)
+	}
 }

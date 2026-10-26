@@ -391,3 +391,56 @@ func TestVerifyChannelTransactionsApplyCapsToVersion1Budgets(t *testing.T) {
 		})
 	}
 }
+
+// padWithMemo appends a copy of the transaction's last instruction (its memo)
+// carrying size bytes of data, then re-signs as payer: a payload over its
+// version's size limit that the builders refuse to produce.
+func padWithMemo(t *testing.T, wire string, payer solana.PrivateKey, size int) string {
+	t.Helper()
+	tx, err := svm.DecodeTransaction(wire)
+	require.NoError(t, err)
+	last := tx.Message.Instructions[len(tx.Message.Instructions)-1]
+	tx.Message.Instructions = append(tx.Message.Instructions, solana.CompiledInstruction{
+		ProgramIDIndex: last.ProgramIDIndex,
+		Data:           []byte(strings.Repeat("a", size)),
+	})
+	signTransaction(t, tx, payer)
+	return encodeTransaction(t, tx)
+}
+
+func TestChannelVerifiersEnforceTheSizeLimitOfTheMessageVersion(t *testing.T) {
+	fixture := newOpenFixture(t)
+
+	v0Open := padWithMemo(t, fixture.buildSignedOpen(t, nil, nil), fixture.payerKey, 1300)
+	_, err := VerifyOpenTransaction(v0Open, fixture.expected())
+	require.ErrorContains(t, err, "verifyOpenTransaction: transaction is")
+	require.ErrorContains(t, err, "above the 1232-byte limit for version 0")
+
+	v1Open := padWithMemo(t, fixture.buildV1Open(t, nil), fixture.payerKey, 4200)
+	_, err = VerifyOpenTransaction(v1Open, fixture.expected())
+	require.ErrorContains(t, err, "above the 4096-byte limit for version 1")
+
+	payer := testKeypair(t)
+	feePayer := testKeypair(t).PublicKey()
+	channel := testKeypair(t).PublicKey()
+	topUp, err := BuildTopUpPaymentChannelTransaction(BuildTopUpArgs{
+		Payer: payer.PublicKey(), ChannelID: channel, Mint: fixture.mint, TokenProgram: solana.TokenProgramID,
+		FeePayer: feePayer, Amount: 7, Blockhash: solana.Hash(testKeypair(t).PublicKey()),
+		TransactionVersion: solana.MessageVersionV0,
+	})
+	require.NoError(t, err)
+	require.ErrorContains(t, VerifyTopUpTransaction(
+		padWithMemo(t, encodeTransaction(t, topUp.Transaction), payer, 1300),
+		VerifyTopUpExpected{FeePayer: feePayer, From: payer.PublicKey(), ChannelID: channel},
+	), "verifyTopUpTransaction: transaction is")
+
+	requestClose, err := BuildRequestCloseTransaction(BuildRequestCloseArgs{
+		Payer: payer.PublicKey(), FeePayer: feePayer, ChannelID: channel,
+		Blockhash: solana.Hash(testKeypair(t).PublicKey()), TransactionVersion: solana.MessageVersionV1,
+	})
+	require.NoError(t, err)
+	require.ErrorContains(t, VerifyRequestCloseTransaction(
+		padWithMemo(t, encodeTransaction(t, requestClose), payer, 4200),
+		VerifyRequestCloseExpected{Payer: payer.PublicKey(), FeePayer: feePayer, ChannelID: channel},
+	), "verifyRequestCloseTransaction: transaction is")
+}

@@ -12,6 +12,7 @@ const (
 	ErrTransactionCouldNotBeDecoded = "invalid_exact_solana_payload_transaction_could_not_be_decoded"
 	// ErrUnsupportedTransactionVersion mirrors svm.ErrUnsupportedTransactionVersion.
 	ErrUnsupportedTransactionVersion  = "unsupported_transaction_version"
+	ErrTransactionSizeExceeded        = "invalid_exact_solana_payload_transaction_size_exceeded"
 	ErrSignatureInvalid               = "invalid_exact_solana_payload_signature_invalid"
 	ErrTransactionInstructionsLength  = "invalid_exact_solana_payload_transaction_instructions_length"
 	ErrUnknownFourthInstruction       = "invalid_exact_solana_payload_unknown_fourth_instruction"

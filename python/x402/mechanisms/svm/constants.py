@@ -120,6 +120,8 @@ ERR_V1_COMPUTE_BUDGET_INSTRUCTION = (
     "invalid_exact_svm_payload_transaction_v1_compute_budget_instruction"
 )
 ERR_V1_HEAP_SIZE = "invalid_exact_svm_payload_transaction_v1_heap_size"
+# A transaction over its message version's serialized size limit.
+ERR_TRANSACTION_SIZE_EXCEEDED = "invalid_exact_svm_payload_transaction_size_exceeded"
 ERR_NO_TRANSFER_INSTRUCTION = "invalid_exact_svm_payload_no_transfer_instruction"
 ERR_MINT_MISMATCH = "invalid_exact_svm_payload_mint_mismatch"
 ERR_RECIPIENT_MISMATCH = "invalid_exact_svm_payload_recipient_mismatch"

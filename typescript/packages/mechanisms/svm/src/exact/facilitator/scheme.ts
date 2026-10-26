@@ -48,7 +48,11 @@ import {
   transactionMessageHash,
   TransactionOnchainFailureError,
 } from "../../utils";
-import { checkTransactionV1Budget, readTransactionV1Config } from "../../transactionV1";
+import {
+  checkTransactionV1Budget,
+  readTransactionV1Config,
+  transactionSizeExceeded,
+} from "../../transactionV1";
 import {
   assertSmartWalletLimits,
   assertSmartWalletVerifySigner,
@@ -829,6 +833,19 @@ export class ExactSvmScheme implements SchemeNetworkFacilitator {
         response: {
           isValid: false,
           invalidReason: Errors.ErrUnsupportedTransactionVersion,
+          payer: "",
+        },
+        verificationPath: null,
+      };
+    }
+
+    // Size limit of the message version (§1.5): 1232 bytes for legacy and
+    // version 0, 4096 for version 1. The decoder accepts larger payloads.
+    if (transactionSizeExceeded(exactSvmPayload.transaction, compiled.version)) {
+      return {
+        response: {
+          isValid: false,
+          invalidReason: Errors.ErrTransactionSizeExceeded,
           payer: "",
         },
         verificationPath: null,

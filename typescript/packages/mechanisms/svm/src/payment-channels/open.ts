@@ -50,6 +50,7 @@ import {
   getCompiledInstructions,
   maxTransactionSize,
   readTransactionV1Config,
+  transactionSizeExceeded,
   type TransactionV1Config,
 } from "../transactionV1";
 import { isAcceptedTransactionVersion } from "../utils";
@@ -639,6 +640,12 @@ export async function verifyTopUpTransaction(
       `${ErrUnsupportedTransactionVersion}: verifyTopUpTransaction: transaction message version ${String(compiledMessage.version)} is not accepted; top-up transactions must be legacy, version 0, or version 1`,
     );
   }
+  const oversized = transactionSizeExceeded(transactionBase64, compiledMessage.version);
+  if (oversized) {
+    throw new Error(
+      `verifyTopUpTransaction: transaction is ${oversized.size} bytes, above the ${oversized.limit}-byte limit for version ${String(compiledMessage.version)}`,
+    );
+  }
   const message = toCompiledOpenMessage(compiledMessage);
   if (message.addressTableLookups && message.addressTableLookups.length > 0) {
     throw new Error("verifyTopUpTransaction: address-lookup tables are not permitted");
@@ -803,6 +810,12 @@ export async function verifyOpenTransaction(
   if (!isAcceptedTransactionVersion(message.version)) {
     throw new Error(
       `${ErrUnsupportedTransactionVersion}: verifyOpenTransaction: transaction message version ${String(message.version)} is not accepted; open transactions must be legacy, version 0, or version 1`,
+    );
+  }
+  const oversized = transactionSizeExceeded(transactionBase64, message.version);
+  if (oversized) {
+    throw new Error(
+      `verifyOpenTransaction: transaction is ${oversized.size} bytes, above the ${oversized.limit}-byte limit for version ${String(message.version)}`,
     );
   }
   if (message.addressTableLookups && message.addressTableLookups.length > 0) {

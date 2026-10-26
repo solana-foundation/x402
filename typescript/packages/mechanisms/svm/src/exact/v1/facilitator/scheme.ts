@@ -32,6 +32,7 @@ import {
   MEMO_PROGRAM_ADDRESS,
 } from "../../../constants";
 import {
+  ErrTransactionSizeExceeded,
   ErrUnsupportedTransactionVersion,
   TRANSACTION_V1_BUDGET_REASONS,
 } from "../../facilitator/errors";
@@ -45,7 +46,11 @@ import {
   peekWireTransactionVersion,
   transactionMessageHash,
 } from "../../../utils";
-import { checkTransactionV1Budget, readTransactionV1Config } from "../../../transactionV1";
+import {
+  checkTransactionV1Budget,
+  readTransactionV1Config,
+  transactionSizeExceeded,
+} from "../../../transactionV1";
 import { verifyRequiredSignatures } from "../../facilitator/signatureVerification";
 
 const compiledMessageDecoder = getCompiledTransactionMessageDecoder();
@@ -197,6 +202,16 @@ export class ExactSvmSchemeV1 implements SchemeNetworkFacilitator {
       return {
         isValid: false,
         invalidReason: ErrUnsupportedTransactionVersion,
+        payer: "",
+      };
+    }
+
+    // Size limit of the message version (§1.5): 1232 bytes for legacy and
+    // version 0, 4096 for version 1. The decoder accepts larger payloads.
+    if (transactionSizeExceeded(exactSvmPayload.transaction, compiled.version)) {
+      return {
+        isValid: false,
+        invalidReason: ErrTransactionSizeExceeded,
         payer: "",
       };
     }
