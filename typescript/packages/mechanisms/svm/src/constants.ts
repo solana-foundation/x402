@@ -37,6 +37,19 @@ export const DEFAULT_COMPUTE_UNIT_LIMIT = 20_000;
 export const MAX_MEMO_BYTES = 256;
 
 /**
+ * Multi-payee splits (scheme_exact_svm.md §5)
+ */
+export const MAX_SPLITS = 8;
+export const MAX_SPLIT_MEMO_BYTES = 566;
+export const ASSOCIATED_TOKEN_PROGRAM_ADDRESS = "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL";
+export const SYSTEM_PROGRAM_ADDRESS = "11111111111111111111111111111111";
+// Compute units added on top of DEFAULT_COMPUTE_UNIT_LIMIT per extra
+// TransferChecked and per CreateIdempotent. Sized for Token-2022, which costs
+// more than SPL Token on both.
+export const SPLIT_TRANSFER_COMPUTE_UNITS = 15_000;
+export const ATA_CREATION_COMPUTE_UNITS = 40_000;
+
+/**
  * How long a transaction is held in the duplicate settlement cache (ms).
  * Covers the Solana blockhash lifetime (~60-90s) with margin.
  */

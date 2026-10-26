@@ -220,6 +220,20 @@ Supports SPL Token and Token-2022 program tokens:
 
 **Upto** uses the payment-channels program (`open` → escrow deposit, then `settle_and_seal` + `distribute` with a server voucher for the actual amount). Details in [Upto SVM Scheme](./src/upto/README.md).
 
+## Multi-Payee Splits (Exact)
+
+An `exact` payment can pay the merchant and up to eight other recipients in one transaction, as specified in [scheme_exact_svm.md §5](../../../../specs/schemes/exact/scheme_exact_svm.md). The server declares each split as an absolute carve-out in the route's `extra`; `payTo` receives the remainder.
+
+```typescript
+extra: {
+  splits: [{ payTo: platformAddress, amount: "50000", memo: "platform fee" }],
+}
+```
+
+- **Facilitator**: splits are off by default. Pass `maxSplits` (0–8) to accept them and `ataCreationSponsored: true` to fund `CreateIdempotent` for recipients marked `ataCreationRequired`; both are advertised in `/supported`. Sponsored rent is not bounded over time (an owner can close and recreate its ATA), so rate-limit or price it.
+- **Server**: `enhancePaymentRequirements` throws when a route asks for more splits, or ATA sponsorship, than the selected facilitator advertises.
+- **Client**: requirements with splits are refused unless the client config sets `approveSplits`, which receives every split and the remainder reaching `payTo` and must return `true` only for terms the payer agreed to.
+
 ## Duplicate Settlement Protection
 
 This package includes a built-in `SettlementCache` that prevents a known race condition on Solana where the same payment transaction could be settled multiple times before on-chain confirmation. When the facilitator scheme is registered via `registerExactSvmScheme`, a single `SettlementCache` instance is automatically shared across both V1 and V2 scheme versions.
