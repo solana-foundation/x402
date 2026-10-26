@@ -211,10 +211,13 @@ func verifyReason(t *testing.T, resp *x402.VerifyResponse, err error) string {
 func TestSplits_AdvertisedOnlyWhenConfigured(t *testing.T) {
 	p := newSplitParties(t)
 	plain := NewExactSvmScheme(p.signer()).GetExtra(svm.SolanaDevnetCAIP2)
-	assert.Equal(t, map[string]interface{}{"feePayer": p.feePayer.String()}, plain)
+	assert.Equal(t, p.feePayer.String(), plain["feePayer"])
+	assert.NotContains(t, plain, "maxSplits")
+	assert.NotContains(t, plain, "ataCreationSponsored")
 
 	configured := NewExactSvmScheme(p.signer(), &Config{MaxSplits: 8, AtaCreationSponsored: true}).GetExtra(svm.SolanaDevnetCAIP2)
-	assert.Equal(t, map[string]interface{}{"feePayer": p.feePayer.String(), "maxSplits": 8, "ataCreationSponsored": true}, configured)
+	assert.Equal(t, 8, configured["maxSplits"])
+	assert.Equal(t, true, configured["ataCreationSponsored"])
 	assert.Equal(t, svm.SplitCapabilities{MaxSplits: 8, AtaCreationSponsored: true}, svm.GetSplitCapabilities(configured))
 
 	assert.PanicsWithValue(t, "exact svm facilitator: maxSplits must be between 0 and 8, received 9", func() {

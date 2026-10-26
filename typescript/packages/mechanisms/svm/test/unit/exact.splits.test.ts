@@ -438,13 +438,19 @@ describe("exact facilitator with splits", () => {
     const signer = facilitatorSigner(p.feePayer.address);
     expect(new ExactSvmFacilitator(signer).getExtra(SOLANA_DEVNET_CAIP2)).toEqual({
       feePayer: p.feePayer.address,
+      transactionVersions: [0],
     });
     expect(
       new ExactSvmFacilitator(signer, undefined, {
         maxSplits: 8,
         ataCreationSponsored: true,
       }).getExtra(SOLANA_DEVNET_CAIP2),
-    ).toEqual({ feePayer: p.feePayer.address, maxSplits: 8, ataCreationSponsored: true });
+    ).toEqual({
+      feePayer: p.feePayer.address,
+      transactionVersions: [0],
+      maxSplits: 8,
+      ataCreationSponsored: true,
+    });
     expect(() => new ExactSvmFacilitator(signer, undefined, { maxSplits: 9 })).toThrow(/maxSplits/);
   });
 

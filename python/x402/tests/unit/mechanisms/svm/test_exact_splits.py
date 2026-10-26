@@ -499,10 +499,18 @@ class TestClientWithSplits:
 
 class TestFacilitatorWithSplits:
     def test_advertises_split_capabilities_only_when_configured(self, p):
-        assert facilitator(p).get_extra(SOLANA_DEVNET_CAIP2) == {"feePayer": addr(p.fee_payer)}
+        assert facilitator(p).get_extra(SOLANA_DEVNET_CAIP2) == {
+            "feePayer": addr(p.fee_payer),
+            "transactionVersions": [0],
+        }
         assert facilitator(p, max_splits=8, ata_creation_sponsored=True).get_extra(
             SOLANA_DEVNET_CAIP2
-        ) == {"feePayer": addr(p.fee_payer), "maxSplits": 8, "ataCreationSponsored": True}
+        ) == {
+            "feePayer": addr(p.fee_payer),
+            "transactionVersions": [0],
+            "maxSplits": 8,
+            "ataCreationSponsored": True,
+        }
 
     @pytest.mark.parametrize("max_splits", [9, -1, True, 2.0, "2"])
     def test_rejects_an_out_of_range_max_splits(self, p, max_splits):
