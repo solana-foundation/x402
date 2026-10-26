@@ -240,8 +240,16 @@ export function assertMaxIdleSecs(value: number | undefined): number {
   return value;
 }
 
-/** Default reclaim instruction ceiling; wire-size packing may choose fewer. */
+/** Default v0 reclaim instruction ceiling; wire-size packing may choose fewer. */
 export const DEFAULT_MAX_RECLAIMS_PER_TX = 8;
+
+/**
+ * Default v1 reclaim instruction ceiling: 62 reclaims sharing one fee payer
+ * and rent payer fill the 64 static-account budget (fee payer, program, and
+ * one channel PDA each) within 4,096 bytes. The packer still splits a batch
+ * that exceeds the wire, account, or instruction limits.
+ */
+export const DEFAULT_MAX_RECLAIMS_PER_TX_V1 = 62;
 
 /**
  * Largest reclaim batch proven, by the Go SDK's
@@ -575,7 +583,7 @@ export class PaymentChannelRentCleanupManager {
     const maxIdleSecs = resolveMaxIdleSecs(opts.maxIdleSecs ?? this.maxIdleSecs);
     const maxReclaimsPerTx = resolveCleanupCount(
       opts.maxReclaimsPerTx,
-      DEFAULT_MAX_RECLAIMS_PER_TX,
+      this.useTransactionV1 ? DEFAULT_MAX_RECLAIMS_PER_TX_V1 : DEFAULT_MAX_RECLAIMS_PER_TX,
       this.useTransactionV1 ? undefined : MAX_SAFE_RECLAIMS_PER_TX,
     );
     const maxTxsPerRun = resolveCleanupCount(opts.maxTxsPerRun, DEFAULT_MAX_TXS_PER_RUN);

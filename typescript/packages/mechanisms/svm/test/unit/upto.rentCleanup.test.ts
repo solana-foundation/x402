@@ -17,7 +17,10 @@ import {
   InMemoryPaymentChannelStorage,
   type PaymentChannelRecord,
 } from "../../src/payment-channels/storage";
-import { UptoSvmRentCleanupManager } from "../../src/upto/facilitator/rentCleanupManager";
+import {
+  DEFAULT_MAX_RECLAIMS_PER_TX_V1,
+  UptoSvmRentCleanupManager,
+} from "../../src/upto/facilitator/rentCleanupManager";
 import { UptoSvmScheme } from "../../src/upto/facilitator/scheme";
 
 const NETWORK = SOLANA_DEVNET_CAIP2 as Network;
@@ -422,9 +425,9 @@ describe("UptoSvmRentCleanupManager — cleanup", () => {
   // A misconfigured non-positive maxReclaimsPerTx must fall back to the
   // default instead of spinning the batching loop forever (`i += 0`).
   it.each([undefined, 0, -1, NaN, Infinity])(
-    "defaults maxReclaimsPerTx=%s to eight",
+    "defaults maxReclaimsPerTx=%s to the v1 ceiling of 62",
     async maxReclaimsPerTx => {
-      for (let i = 0; i < 9; i++) {
+      for (let i = 0; i < DEFAULT_MAX_RECLAIMS_PER_TX_V1 + 1; i++) {
         await seed();
       }
       fetchMaybeChannelMock.mockResolvedValue(
@@ -436,7 +439,7 @@ describe("UptoSvmRentCleanupManager — cleanup", () => {
       await manager.cleanup({ maxReclaimsPerTx, maxTxsPerSigner: 1, onReclaim });
 
       expect(onReclaim).toHaveBeenCalledTimes(1);
-      expect(onReclaim.mock.calls[0]![0].channelIds).toHaveLength(8);
+      expect(onReclaim.mock.calls[0]![0].channelIds).toHaveLength(DEFAULT_MAX_RECLAIMS_PER_TX_V1);
     },
   );
 
