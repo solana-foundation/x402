@@ -35,11 +35,13 @@ import { ExactSvmScheme as ExactSvmServer } from "../../src/exact/server/scheme"
 import { verifyPostSettlementLegs } from "../../src/exact/facilitator/smartWalletVerification";
 import * as Errors from "../../src/exact/facilitator/errors";
 import {
+  assertFeePayerIsolatedWithAtaCreation,
   deriveLegDestinations,
   getSplitCapabilities,
   matchTransfersToLegs,
   parsePaymentLegs,
   SplitsError,
+  validateAtaCreation,
   type ObservedTransfer,
 } from "../../src/exact/splits";
 import {
@@ -929,5 +931,269 @@ describe("exact server with splits", () => {
     await expect(
       server.enhancePaymentRequirements(requirements(p), kind({ maxSplits: 2 }), []),
     ).resolves.toMatchObject({ extra: { feePayer: p.feePayer.address } });
+  });
+});
+
+describe("split rule edges", () => {
+  it("rejects malformed split entries and flags", async () => {
+    const p = await parties();
+    const bad: Record<string, unknown>[] = [
+      { splits: "not-an-array" },
+      { ataCreationRequired: "yes" },
+      { splits: [null] },
+      { splits: [{ payTo: p.platform.address, amount: "1", memo: 7 }] },
+    ];
+    for (const extra of bad) {
+      expect(() => parsePaymentLegs(requirements(p, extra))).toThrow(Errors.ErrSplitsInvalid);
+    }
+    const noExtra = { ...requirements(p), extra: undefined } as unknown as PaymentRequirements;
+    expect(parsePaymentLegs(noExtra)).toHaveLength(1);
+  });
+
+  it("validates every CreateIdempotent field", async () => {
+    const p = await parties();
+    const good = async () => ({
+      programAddress: ASSOCIATED_TOKEN_PROGRAM_ADDRESS,
+      accounts: [
+        p.feePayer.address,
+        await ata(p.merchant.address),
+        p.merchant.address,
+        USDC_DEVNET_ADDRESS,
+        "11111111111111111111111111111111",
+        TOKEN_PROGRAM_ADDRESS,
+      ].map(address => ({ address })),
+      data: new Uint8Array([1]),
+    });
+    const ctx = () => ({
+      asset: USDC_DEVNET_ADDRESS,
+      feePayer: p.feePayer.address,
+      markedOwners: new Set([p.merchant.address as string]),
+      createdOwners: new Set<string>(),
+    });
+    await expect(validateAtaCreation(await good(), ctx())).resolves.toEqual({
+      owner: p.merchant.address,
+      tokenProgram: TOKEN_PROGRAM_ADDRESS,
+    });
+
+    const variants: Array<(ix: Awaited<ReturnType<typeof good>>) => void> = [
+      ix => (ix.data = new Uint8Array([0])),
+      ix => (ix.accounts = ix.accounts.slice(0, 5)),
+      ix => (ix.accounts[3] = { address: TOKEN_PROGRAM_ADDRESS }),
+      ix => (ix.accounts[4] = { address: TOKEN_PROGRAM_ADDRESS }),
+      ix => (ix.accounts[1] = { address: p.platform.address }),
+    ];
+    for (const mutate of variants) {
+      const ix = await good();
+      mutate(ix);
+      await expect(validateAtaCreation(ix, ctx())).rejects.toThrow(
+        Errors.ErrSplitAtaCreationNotAuthorized,
+      );
+    }
+    const twice = ctx();
+    await validateAtaCreation(await good(), twice);
+    await expect(validateAtaCreation(await good(), twice)).rejects.toThrow(/duplicate/);
+  });
+
+  it("rejects the fee payer as a program or in any other instruction", async () => {
+    const p = await parties();
+    const ctx = { asset: USDC_DEVNET_ADDRESS, markedOwners: new Set<string>() };
+    await expect(
+      assertFeePayerIsolatedWithAtaCreation(
+        [{ programAddress: p.feePayer.address }],
+        p.feePayer.address,
+        ctx,
+      ),
+    ).rejects.toThrow(/invoked as program/);
+    await expect(
+      assertFeePayerIsolatedWithAtaCreation(
+        [{ programAddress: MEMO_PROGRAM_ADDRESS, accounts: [{ address: p.feePayer.address }] }],
+        p.feePayer.address,
+        ctx,
+      ),
+    ).rejects.toThrow(Errors.ErrSmartWalletFeePayerNotIsolated);
+  });
+
+  it("ignores transfers of other mints when matching legs", async () => {
+    const p = await parties();
+    const legs = await deriveLegDestinations(
+      parsePaymentLegs(requirements(p)),
+      USDC_DEVNET_ADDRESS,
+    );
+    const pay = async (owner: string, amount: bigint, mint = USDC_DEVNET_ADDRESS) => ({
+      programId: TOKEN_PROGRAM_ADDRESS,
+      amount,
+      mint,
+      destination: await ata(owner),
+      authority: p.payer.address,
+    });
+    const other = await generateKeyPairSigner();
+    const matched = matchTransfersToLegs(
+      [
+        await pay(p.merchant.address, 1_000_000n),
+        await pay(p.platform.address, 40_000n),
+        await pay(p.referrer.address, 10_000n),
+        await pay(other.address, 5n, other.address),
+      ],
+      legs,
+      USDC_DEVNET_ADDRESS,
+    );
+    expect(matched).toHaveLength(3);
+  });
+
+  describe("Path 1 split rejections", () => {
+    const facilitatorFor = (p: Parties, extra: Partial<Record<string, unknown>> = {}) =>
+      new ExactSvmFacilitator(facilitatorSigner(p.feePayer.address), undefined, {
+        maxSplits: 8,
+        ...extra,
+      });
+    const legsTx = async (p: Parties, tail: Instruction[] = [memo("nonce")]) =>
+      buildTransaction(p, [
+        await transfer(p, p.merchant.address, 1_000_000n),
+        await transfer(p, p.platform.address, 40_000n),
+        await transfer(p, p.referrer.address, 10_000n),
+        ...tail,
+      ]);
+
+    it("rejects a compute limit above the configured cap", async () => {
+      const p = await parties();
+      const req = requirements(p);
+      const result = await facilitatorFor(p, { maxComputeUnits: 1_000 }).verify(
+        payment(req, await legsTx(p)),
+        req,
+      );
+      expect(result.invalidReason).toBe(Errors.ErrComputeLimitInstructionTooHigh);
+    });
+
+    it("rejects legs under different token programs", async () => {
+      const p = await parties();
+      const req = requirements(p);
+      const split2022 = {
+        ...(await transfer(p, p.platform.address, 40_000n)),
+        programAddress: TOKEN_2022_PROGRAM_ADDRESS as Address,
+      };
+      const tx = await buildTransaction(p, [
+        await transfer(p, p.merchant.address, 1_000_000n),
+        split2022,
+        await transfer(p, p.referrer.address, 10_000n),
+        memo("nonce"),
+      ]);
+      expect((await facilitatorFor(p).verify(payment(req, tx), req)).invalidReason).toBe(
+        Errors.ErrSplitLegUnmatched,
+      );
+    });
+
+    it("rejects a facilitator authority and mixed authorities", async () => {
+      const p = await parties();
+      const req = requirements(p);
+      const selfSpend = new ExactSvmFacilitator(
+        {
+          ...facilitatorSigner(p.feePayer.address),
+          getAddresses: () => [p.feePayer.address, p.payer.address],
+        } as unknown as FacilitatorSvmSigner,
+        undefined,
+        { maxSplits: 8 },
+      );
+      expect((await selfSpend.verify(payment(req, await legsTx(p)), req)).invalidReason).toBe(
+        Errors.ErrFeePayerTransferringFunds,
+      );
+
+      const other = await generateKeyPairSigner();
+      const mixed = await buildTransaction(p, [
+        await transfer(p, p.merchant.address, 1_000_000n),
+        await transfer({ ...p, payer: other }, p.platform.address, 40_000n),
+        await transfer(p, p.referrer.address, 10_000n),
+        memo("nonce"),
+      ]);
+      expect((await facilitatorFor(p).verify(payment(req, mixed), req)).invalidReason).toBe(
+        Errors.ErrSplitAuthorityMismatch,
+      );
+    });
+
+    it("rejects a wrong mint, an unknown tail instruction, and the fee payer in a memo", async () => {
+      const p = await parties();
+      const req = requirements(p);
+      const wrongMint = { ...req, asset: p.referrer.address };
+      expect(
+        (await facilitatorFor(p).verify(payment(wrongMint, await legsTx(p)), wrongMint))
+          .invalidReason,
+      ).toBe(Errors.ErrMintMismatch);
+
+      const unknownTail = await legsTx(p, [
+        { programAddress: SWIG_PROGRAM as Address, data: new Uint8Array([0]) },
+      ]);
+      expect((await facilitatorFor(p).verify(payment(req, unknownTail), req)).invalidReason).toBe(
+        Errors.ErrUnknownOptionalInstruction,
+      );
+
+      const feePayerMemo = await legsTx(p, [
+        {
+          ...memo("nonce"),
+          accounts: [{ address: p.feePayer.address, role: AccountRole.READONLY }],
+        } as Instruction,
+      ]);
+      expect(
+        (await facilitatorFor(p).verify(payment(req, feePayerMemo), req)).invalidReason,
+      ).toContain(Errors.ErrSmartWalletFeePayerNotIsolated);
+    });
+
+    it("rejects a memo mismatch and a failed simulation", async () => {
+      const p = await parties();
+      const withMemo = requirements(p, { memo: "pi_123" });
+      expect(
+        (await facilitatorFor(p).verify(payment(withMemo, await legsTx(p)), withMemo))
+          .invalidReason,
+      ).toBe(Errors.ErrMemoMismatch);
+
+      const req = requirements(p);
+      const failing = new ExactSvmFacilitator(
+        {
+          ...facilitatorSigner(p.feePayer.address),
+          simulateTransaction: vi.fn(async () => {
+            throw new Error("insufficient funds");
+          }),
+        } as unknown as FacilitatorSvmSigner,
+        undefined,
+        { maxSplits: 8 },
+      );
+      expect(await failing.verify(payment(req, await legsTx(p)), req)).toMatchObject({
+        isValid: false,
+        invalidReason: Errors.ErrTransactionSimulationFailed,
+        invalidMessage: "insufficient funds",
+      });
+    });
+  });
+
+  it("returns unverified when a leg's balance cannot be established", async () => {
+    const p = await parties();
+    const legs = await deriveLegDestinations(
+      parsePaymentLegs(requirements(p)),
+      USDC_DEVNET_ADDRESS,
+    );
+    const atas = await Promise.all(legs.map(leg => ata(leg.owner)));
+    const run = (getTokenAccountBalance: () => Promise<bigint | null>, before: bigint | null) =>
+      verifyPostSettlementLegs(
+        {
+          ...facilitatorSigner(p.feePayer.address),
+          getConfirmedTransactionInnerInstructions: vi.fn(async () => ({
+            innerInstructions: null,
+          })),
+          getTokenAccountBalance: vi.fn(getTokenAccountBalance),
+        } as unknown as FacilitatorSvmSigner,
+        "sig",
+        SOLANA_DEVNET_CAIP2,
+        legs,
+        USDC_DEVNET_ADDRESS,
+        [p.feePayer.address],
+        [],
+        atas.map(a => ({ ata: a, before })),
+      );
+    // Unmarked leg with no pre-balance: no baseline to compare against.
+    expect(await run(async () => 1n, null)).toEqual({ verified: false, method: "unverified" });
+    expect(
+      await run(async () => {
+        throw new Error("rpc down");
+      }, 0n),
+    ).toEqual({ verified: false, method: "unverified" });
+    expect(await run(async () => null, 0n)).toEqual({ verified: false, method: "unverified" });
   });
 });
