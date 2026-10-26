@@ -25,7 +25,7 @@
     "@x402/svm": "workspace:*",
     "@x402/tvm": "workspace:*",
     "@x402/xrpl": "workspace:*",
-    "next": "^16.2.6",
+    "next": "^15.5.28",
     "react": "^19.2.6",
     "react-dom": "^19.2.6",
     "viem": "^2.48.11"
