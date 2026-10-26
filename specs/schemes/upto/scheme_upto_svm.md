@@ -433,13 +433,30 @@ scheme.
   set; it does not read `PaymentRequirements.extra.transactionVersions`.
 - A legacy or version-0 transaction MUST NOT exceed 1232 serialized bytes; a version-1
   transaction MUST NOT exceed 4096 serialized bytes.
-- A version-1 transaction carries its compute budget in the message
-  `TransactionConfig`. It MUST set `computeUnitLimit` and
-  `loadedAccountsDataSizeLimit` (a version-1 transaction that omits either is
-  budgeted zero and cannot execute), it MUST NOT contain Compute Budget program
-  instructions, and its `priorityFee` is a total in lamports, evaluated against
-  a per-compute-unit cap as `priorityFee * 1000000 <= maxPriorityFeeMicroLamports *
-  computeUnitLimit`. Here `maxPriorityFeeMicroLamports` is the maximum
+- A version-1 transaction carries its compute budget in the message's
+  `TransactionConfigMask` and the config values that follow it
+  ([SIMD-0385](https://github.com/solana-foundation/solana-improvement-documents/blob/main/proposals/0385-transaction-v1.md#transactionconfigmask)).
+  This spec names the values by the bits that carry them:
+  - bits 0 and 1: `priorityFee`, the total priority fee in lamports (u64). The
+    two bits are set together; a transaction with only one set is invalid.
+  - bit 2: `computeUnitLimit` (u32).
+  - bit 3: `loadedAccountsDataSizeLimit` (u32).
+  - bit 4: the requested heap size (u32).
+
+  SDKs expose these as a config object (for example `config` on a
+  `@solana/kit` message or `TransactionConfig` in solana-go). An unset value
+  takes its minimum: an unset `priorityFee` is 0, an unset `computeUnitLimit`
+  requests 0 compute units, and an unset `loadedAccountsDataSizeLimit` requests
+  0 bytes of loaded account data. (The cost model still reserves 32 KiB of
+  loaded account data for scheduling, but the transaction's own budget is 0.)
+  A transaction that leaves bit 2 or bit 3 unset therefore cannot execute its
+  instructions, so a client-built version-1 transaction MUST set both.
+- The runtime ignores Compute Budget program instructions in a version-1
+  transaction: they configure nothing and execute as no-ops that still consume
+  compute units. As an x402 sponsor rule, a client-built version-1 transaction
+  MUST NOT contain them, and the sponsor MUST reject one that does.
+- A version-1 `priorityFee` is evaluated against a per-compute-unit cap as
+  `priorityFee * 1000000 <= maxPriorityFeeMicroLamports * computeUnitLimit`. Here `maxPriorityFeeMicroLamports` is the maximum
   compute-unit price that applies to `SetComputeUnitPrice` in a legacy or
   version-0 transaction: `5000000` microlamports per compute unit, or a
   stricter local sponsor policy. Both sides of the inequality MUST be evaluated
@@ -505,12 +522,14 @@ price, and required-signature count (operator-configurable caps), but MUST NOT
 admit a compute-unit limit above `400000` or a compute-unit price above
 `5000000` microlamports.
 
-In a version-1 transaction the same caps apply to the message
-`TransactionConfig` instead: `computeUnitLimit` MUST be present and MUST NOT
-exceed `400000`, `loadedAccountsDataSizeLimit` MUST be present, and
-`priorityFee` (total lamports) MUST satisfy
-`priorityFee * 1000000 <= 5000000 * computeUnitLimit`. A version-1 transaction
-that contains a Compute Budget instruction MUST be rejected.
+In a version-1 transaction the same caps apply to the message config values
+instead (see [Transaction versions](#transaction-versions)): `computeUnitLimit`
+(bit 2) MUST be set and MUST NOT exceed `400000`, `loadedAccountsDataSizeLimit`
+(bit 3) MUST be set, and `priorityFee` (bits 0 and 1, total lamports) MUST
+satisfy `priorityFee * 1000000 <= 5000000 * computeUnitLimit`, evaluated without
+overflow. A version-1 transaction that contains a Compute Budget instruction
+MUST be rejected (an x402 sponsor rule; the runtime treats such instructions as
+no-ops).
 
 Lighthouse and Memo instructions are allowed only in the optional suffix and
 MUST NOT reference `extra.feePayer` as an account or as the invoked program.
@@ -769,9 +788,9 @@ The claim settlement (`settle_and_seal` + `distribute`) and the later
 version is the facilitator's choice:
 
 - The facilitator MAY build any message version the network supports. A
-  version-1 transaction it builds MUST set both `computeUnitLimit` and
-  `loadedAccountsDataSizeLimit` in its `TransactionConfig` (an unset field is
-  budgeted zero). It SHOULD set them to
+  version-1 transaction it builds MUST set both `computeUnitLimit` (bit 2) and
+  `loadedAccountsDataSizeLimit` (bit 3) of its `TransactionConfigMask` (an
+  unset value requests 0). It SHOULD set them to
   values sized for the transaction rather than the runtime maxima.
 - The claim settlement carries one channel per transaction and fits either
   version. Only `reclaim` batches: its size MUST be derived from the serialized
