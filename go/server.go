@@ -26,6 +26,7 @@ var (
 //   - Percent of requirements.Amount: "50%"  (up to 2 decimal places, floored)
 //   - Dollar price: "$0.05" (converted using the provided decimals)
 func ResolveSettlementOverrideAmount(rawAmount string, requirements types.PaymentRequirements, decimals int) (string, error) {
+	var resolved string
 	if m := percentRegex.FindStringSubmatch(rawAmount); m != nil {
 		parts := strings.SplitN(m[1], ".", 2)
 		integerPart, ok := new(big.Int).SetString(parts[0], 10)
@@ -47,14 +48,35 @@ func ResolveSettlementOverrideAmount(rawAmount string, requirements types.Paymen
 		}
 		result := new(big.Int).Mul(base, scaledPercent)
 		result.Div(result, big.NewInt(10000))
-		return result.String(), nil
+		resolved = result.String()
+	} else if m := dollarRegex.FindStringSubmatch(rawAmount); m != nil {
+		converted, err := ConvertToTokenAmount(m[1], decimals)
+		if err != nil {
+			return "", err
+		}
+		resolved = converted
+	} else {
+		resolved = rawAmount
 	}
 
-	if m := dollarRegex.FindStringSubmatch(rawAmount); m != nil {
-		return ConvertToTokenAmount(m[1], decimals)
+	resolvedAmount, ok := new(big.Int).SetString(resolved, 10)
+	if !ok {
+		return "", fmt.Errorf("invalid settlement override amount: %s", rawAmount)
+	}
+	authorized, ok := new(big.Int).SetString(requirements.Amount, 10)
+	if !ok {
+		return "", fmt.Errorf("invalid requirements amount: %s", requirements.Amount)
+	}
+	if resolvedAmount.Cmp(authorized) > 0 {
+		return "", fmt.Errorf(
+			"settlement override amount %q resolves to %s atomic units, which exceeds the authorized maximum of %s in PaymentRequirements",
+			rawAmount,
+			resolved,
+			requirements.Amount,
+		)
 	}
 
-	return rawAmount, nil
+	return resolved, nil
 }
 
 // x402ResourceServer manages payment requirements and verification for protected resources

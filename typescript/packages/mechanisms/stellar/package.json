@@ -51,7 +51,7 @@
     "vitest": "^3.2.7"
   },
   "dependencies": {
-    "@stellar/stellar-sdk": "^16.3.0",
+    "@stellar/stellar-sdk": "^16.4.1",
     "@x402/core": "workspace:~"
   },
   "exports": {
@@ -97,6 +97,7 @@
     }
   },
   "files": [
-    "dist"
+    "dist",
+    "NOTICE"
   ]
 }

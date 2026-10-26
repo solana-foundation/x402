@@ -107,13 +107,19 @@ func (c *ExactSvmScheme) CreatePaymentPayload(
 	}
 
 	// Find source ATA (client's token account)
-	sourceATA, _, err := solana.FindAssociatedTokenAddress(c.signer.Address(), mintPubkey)
+	sourceATA, _, err := solana.FindProgramAddress(
+		[][]byte{c.signer.Address().Bytes(), tokenProgramID.Bytes(), mintPubkey.Bytes()},
+		solana.SPLAssociatedTokenAccountProgramID,
+	)
 	if err != nil {
 		return types.PaymentPayload{}, fmt.Errorf(ErrFailedToDeriveSourceATA+": %w", err)
 	}
 
 	// Find destination ATA (recipient's token account)
-	destinationATA, _, err := solana.FindAssociatedTokenAddress(payToPubkey, mintPubkey)
+	destinationATA, _, err := solana.FindProgramAddress(
+		[][]byte{payToPubkey.Bytes(), tokenProgramID.Bytes(), mintPubkey.Bytes()},
+		solana.SPLAssociatedTokenAccountProgramID,
+	)
 	if err != nil {
 		return types.PaymentPayload{}, fmt.Errorf(ErrFailedToDeriveDestinationATA+": %w", err)
 	}
@@ -166,6 +172,12 @@ func (c *ExactSvmScheme) CreatePaymentPayload(
 	if err != nil {
 		return types.PaymentPayload{}, fmt.Errorf(ErrFailedToBuildTransferIx+": %w", err)
 	}
+	transferData, err := transferIx.Data()
+	if err != nil {
+		return types.PaymentPayload{}, fmt.Errorf(ErrFailedToBuildTransferIx+": %w", err)
+	}
+	// Bind the mint's program to this instruction without changing token.ProgramID globally.
+	transferInstruction := solana.NewInstruction(tokenProgramID, transferIx.Accounts(), transferData)
 
 	// Memo instruction: use seller-defined memo from extra.memo, or random nonce for uniqueness
 	var memoPayload []byte
@@ -191,7 +203,7 @@ func (c *ExactSvmScheme) CreatePaymentPayload(
 	tx, err := solana.NewTransactionBuilder().
 		AddInstruction(cuLimit).
 		AddInstruction(cuPrice).
-		AddInstruction(transferIx).
+		AddInstruction(transferInstruction).
 		AddInstruction(memoIx).
 		SetRecentBlockHash(recentBlockhash).
 		SetFeePayer(feePayer).

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+from types import MappingProxyType
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -14,6 +15,7 @@ from x402.http.facilitator_client import (
     HTTPFacilitatorClientSync,
 )
 from x402.http.facilitator_client_base import (
+    CreateHeadersAuthProvider,
     FacilitatorConfig,
     FacilitatorResponseError,
 )
@@ -222,3 +224,37 @@ def test_defaults_timeout_to_90_seconds():
     assert HTTPFacilitatorClient()._timeout == 90.0
     assert HTTPFacilitatorClient(FacilitatorConfig(timeout=5.0))._timeout == 5.0
     assert HTTPFacilitatorClient({})._timeout == 90.0
+
+
+def test_create_headers_allows_omitted_paths():
+    provider = CreateHeadersAuthProvider(lambda: {"verify": {"Authorization": "Bearer verify"}})
+
+    headers = provider.get_auth_headers()
+
+    assert headers.verify == {"Authorization": "Bearer verify"}
+    assert headers.settle == {}
+
+
+def test_create_headers_accepts_mapping_path_values():
+    client = HTTPFacilitatorClientSync(
+        {
+            "url": "https://facilitator.test",
+            "create_headers": lambda: {
+                "verify": MappingProxyType({"Authorization": "Bearer verify"}),
+            },
+        }
+    )
+
+    assert client._get_verify_headers()["Authorization"] == "Bearer verify"
+
+
+def test_create_headers_rejects_flat_headers_dict():
+    client = HTTPFacilitatorClientSync(
+        {
+            "url": "https://facilitator.test",
+            "create_headers": lambda: {"Authorization": "Bearer token"},
+        }
+    )
+
+    with pytest.raises(ValueError, match="keyed by facilitator path"):
+        client._get_verify_headers()

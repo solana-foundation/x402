@@ -79,6 +79,7 @@ In addition to the standard x402 `PaymentRequirements` fields, the `exact` schem
 - `extra.lastValidBlockHeight` (optional): The last block height at which `extra.recentBlockhash` is valid, as a decimal string. This informational hint is not serialized into the transaction and MAY be ignored by the Client or Sponsor. It is ignored when `recentBlockhash` is absent.
 - `extra.splits` (optional): An array of additional payees that receive fixed carve-outs of `amount` in the same transaction. When present, the merchant (`payTo`) receives the remainder rather than the full `amount`. See **Multi-Payee Splits** (§5) for the schema and semantics. When absent or empty, the scheme behaves exactly as specified in §1–§4 (a single transfer to `payTo`).
 - `extra.ataCreationRequired` (optional): Boolean, default `false`. Marks the primary `payTo` as a recipient whose Associated Token Account for `asset` may not exist yet and may need to be created in the payment transaction. When set, the `feePayer` funds the creation, so it MUST only be set when the Sponsor advertises `ataCreationSponsored` in `/supported`. See §5.4 and §5.5.
+- `extra.transactionVersions` (optional): The transaction message versions the sponsor accepts, as an array of `0` and/or `1`. Copied by the Resource Server from the facilitator's `/supported` `extra`. When absent, the accepted set is `[0]`. See §1.5.
 
 `extra.recentBlockhash` and `extra.lastValidBlockHeight` are transaction-construction hints. They do not bind the submitted transaction to the hinted blockhash, and the facilitator's verification does not compare the transaction blockhash with `extra.recentBlockhash`. `extra.splits` and `extra.ataCreationRequired` are not hints: they are payment terms, verified under §5.
 
@@ -92,7 +93,7 @@ The `payload` field of the `PaymentPayload` contains:
 }
 ```
 
-The `transaction` field contains the base64-encoded, serialized, **partially-signed** versioned Solana transaction.
+The `transaction` field contains the base64-encoded, serialized, **partially-signed** versioned Solana transaction. Its message version MUST be one the requirements advertise in `extra.transactionVersions`, or version `0` when that field is absent (see §1.5).
 
 Full `PaymentPayload` object:
 
@@ -131,7 +132,7 @@ The `SettlementResponse` for the exact scheme on Solana:
   "success": true,
   "transaction": "base58 encoded transaction signature",
   "network": "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
-  "payer": "base58 encoded public address of the transaction fee payer"
+  "payer": "base58 encoded public address of the payer's wallet"
 }
 ```
 
@@ -196,6 +197,55 @@ When `extra.splits` is present, this rule applies **per payment leg**: exactly o
 
 ---
 
+### 1.5 Transaction Versions (MUST)
+
+Solana defines three transaction message formats: legacy, version `0` (adds
+Address Lookup Tables), and version `1` ([SIMD-0385](https://github.com/solana-foundation/solana-improvement-documents/blob/main/proposals/0385-transaction-v1.md): 4096-byte transactions that
+carry the compute budget in the message header). The facilitator advertises
+the versions it accepts as `extra.transactionVersions` in `/supported`, and the
+server MUST copy that value into `PaymentRequirements.extra.transactionVersions`.
+Entries MUST be the JSON integers `0` and `1` only. Unlike Wallet Standard
+`supportedTransactionVersions`, the field never contains `legacy`, and a
+string such as `"1"` is not a valid entry. A client or server MUST treat a field
+containing any non-integer entry (a string, `null`, or `"legacy"`) or any
+integer other than `0` or `1` as invalid and fail closed with
+`unsupported_transaction_version`. When the field is absent, the accepted set
+is `[0]`.
+
+Legacy (unversioned) messages are deprecated. They are never advertised in
+`extra.transactionVersions` and clients MUST NOT build them. A facilitator MAY
+keep accepting legacy messages from existing clients for backward
+compatibility; that tolerance will be removed in a future revision of this
+scheme.
+
+- The client MUST intersect the advertised versions (`[0]` when the field is
+  absent) with the versions it and its signer support, then build the highest
+  version in that intersection. It MUST fail with
+  `unsupported_transaction_version` when the intersection is empty.
+  A version-1 message MUST NOT use Address Lookup Tables because that message
+  format does not support them. Legacy and version-0 messages remain subject
+  to the ALT visibility requirements in §2.1.2.
+- The sponsor MUST reject a message whose version is outside the set it
+  accepts, before inspecting any instruction, with
+  `unsupported_transaction_version`. The sponsor enforces its own accepted
+  set; it does not read `PaymentRequirements.extra.transactionVersions`.
+- A legacy or version-0 transaction MUST NOT exceed 1232 serialized bytes; a version-1
+  transaction MUST NOT exceed 4096 serialized bytes.
+- A version-1 transaction carries its compute budget in the message
+  `TransactionConfig`. It MUST set `computeUnitLimit` and
+  `loadedAccountsDataSizeLimit` (a version-1 transaction that omits either is
+  budgeted zero and cannot execute), it MUST NOT contain Compute Budget program
+  instructions, and its `priorityFee` is a total in lamports, evaluated against
+  a per-compute-unit cap as `priorityFee * 1000000 <= capMicroLamports *
+  computeUnitLimit`. `capMicroLamports` is the compute unit price cap, in
+  microlamports per compute unit, of the verification path that accepts the
+  transaction. It is the same cap that path applies to `SetComputeUnitPrice` in
+  a legacy or version-0 transaction: `maxPriorityFeeMicroLamports` on Path 1
+  (§3.1) and `smartWalletMaxPriorityFeeMicroLamports` on Path 2 (§3.2); see
+  §2.2.1 for the defaults. The sponsor MUST evaluate both sides of the
+  inequality with arbitrary-precision integers (or at least 128-bit unsigned
+  integers), so that an oversized `priorityFee` cannot wrap and pass the check.
+
 ## 2. Sponsor Acceptance Policy (Reference)
 
 This section defines minimum required and recommended checks for any sponsor that signs as `feePayer` (merchant or third-party facilitator).
@@ -255,9 +305,22 @@ Reference defaults (operator-configurable):
 | Limit | Default |
 |---|---|
 | Max compute units | `400,000` |
-| Max priority fee | `50,000` microlamports |
+| Path 1 max compute unit price (`maxPriorityFeeMicroLamports`) | `5,000,000` microlamports / CU (5 lamports / CU) |
+| Path 2 max compute unit price (`smartWalletMaxPriorityFeeMicroLamports`) | `50,000` microlamports / CU |
 
-(The static fast path of the reference implementation applies a tighter cap of ≤ 5 lamports / CU for standard wallets; see §3.1.)
+The two price caps are separate. Path 1 (§3.1) accepts only the fixed
+standard-wallet layout and applies `maxPriorityFeeMicroLamports`. Path 2 (§3.2)
+admits arbitrary allowlisted programs and applies the stricter
+`smartWalletMaxPriorityFeeMicroLamports`.
+
+In a version-1 transaction the same caps apply to the message
+`TransactionConfig` instead: `computeUnitLimit` MUST be present and MUST NOT
+exceed the configured maximum, `loadedAccountsDataSizeLimit` MUST be present, and
+`priorityFee` (total lamports) MUST satisfy
+`priorityFee * 1000000 <= capMicroLamports * computeUnitLimit`, where
+`capMicroLamports` is the price cap of the accepting path, evaluated without
+overflow as specified in §1.5. A version-1 transaction that contains a Compute
+Budget instruction MUST be rejected.
 
 #### 2.2.2 Program Allow/Deny Lists (SHOULD)
 
@@ -305,7 +368,10 @@ When `enableSmartWalletVerification` is enabled, the signer MUST implement the s
 
 ### 3.1 Path 1 — Static Layout Verification (standard wallets)
 
-The fast path for standard wallets. For a single-payee charge (no `extra.splits` and no ATA creation), the decompiled transaction MUST contain 3 to 7 instructions in this order:
+The fast path for standard wallets has a version-specific layout.
+
+For a single-payee charge (no `extra.splits` and no ATA creation), a legacy or version-0 transaction MUST contain 3 to 7 instructions in this
+order:
 
 1. Compute Budget: Set Compute Unit Limit
 2. Compute Budget: Set Compute Unit Price
@@ -315,11 +381,23 @@ The fast path for standard wallets. For a single-payee charge (no `extra.splits`
 6. (Optional) Lighthouse or Memo program instruction
 7. (Optional) Memo program instruction
 
+A version-1 transaction MUST contain 1 to 5 instructions in this order:
+
+1. SPL Token or Token-2022 `TransferChecked`
+2. (Optional) Lighthouse or Memo program instruction
+3. (Optional) Lighthouse or Memo program instruction
+4. (Optional) Lighthouse or Memo program instruction
+5. (Optional) Memo program instruction
+
 - Allowed optional programs: Lighthouse (`L2TExMFKdjpN9kozasaurPirfHy9P8sbXoAN1qA3S95`) and SPL Memo (`MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr`).
-- Phantom wallet injects up to 3 Lighthouse instructions; Solflare injects 2. These are wallet-injected user protection mechanisms and MUST be allowed. The cap of 7 instructions keeps these wallets on the fast path without needing Path 2.
+- Phantom wallet injects up to 3 Lighthouse instructions; Solflare injects 2. These are wallet-injected user protection mechanisms and MUST be allowed. For legacy and version-0 transactions, the cap of 7 instructions keeps these wallets on the fast path without needing Path 2. A version-1 transaction has no Compute Budget instructions, so its cap is 5 and that cap still applies.
 - The Memo instruction ensures transaction uniqueness across concurrent payments with identical parameters. Clients MUST include a Memo instruction containing either the value of `extra.memo` (when present) or a random nonce (at least 16 bytes, hex-encoded for UTF-8 compliance).
 - If `extra.memo` is present, the facilitator MUST verify that exactly one Memo instruction exists and that its data matches `extra.memo` encoded as UTF-8.
-- Fee payer isolation, compute budget validity (compute unit price ≤ 5 lamports/CU on this path), destination ATA derivation, and exact amount match are enforced as before.
+- Fee payer isolation, destination ATA derivation, and exact amount match are
+  enforced on both layouts. The legacy/version-0 Compute Budget price and the
+  version-1 total priority fee MUST each be no greater than
+  `maxPriorityFeeMicroLamports` (default 5 lamports/CU) on this path, using the
+  normalization in §1.5 for version 1.
 
 When `extra.splits` is present or any recipient is marked `ataCreationRequired`, the 3–7 instruction cap does not apply as written. It generalizes to `3 + N + K` to `7 + N + K` instructions, where `N` is the number of splits and `K` the number of `CreateIdempotent` instructions (at most one per marked recipient), in the layout defined in §5.7. Split charges from standard wallets are expected to verify on Path 1: a charge whose instruction count is within these bounds MUST NOT be rejected, or sent to Path 2, because of its count.
 
@@ -328,7 +406,7 @@ When `extra.splits` is present or any recipient is marked `ataCreationRequired`,
 Smart wallet programs wrap the transfer inside their own instruction (e.g. Squads `vaultTransactionExecute`, Swig `SignV2`), so Path 1 sees an unknown program at the transfer position and rejects it. Path 2 verifies the **outcome** instead of the instruction format:
 
 1. **Fee payer isolation** (§2.1.1): the fee payer MUST NOT appear in any instruction's accounts or as a program ID, after ALT resolution (§2.1.2). The only exception is the bounded `CreateIdempotent` one in §2.1.1 (funding payer or wallet owner of a top-level `CreateIdempotent` for a marked recipient, plus that instruction's rent CPI). The fee payer MUST NOT appear in any other instruction, including inside a smart-wallet wrapper.
-2. **Compute budget caps** (§2.2.1): operator-configurable CU and priority-fee caps.
+2. **Compute budget caps** (§2.2.1): operator-configurable CU cap and `smartWalletMaxPriorityFeeMicroLamports` (default 50,000 microlamports/CU), applied to `SetComputeUnitPrice` on legacy/version 0 and to the normalized `priorityFee` on version 1 (§1.5).
 3. **Program allowlist** (§2.2.2): the wrapping program MUST be on the allowlist.
 4. **Memo enforcement**: if `extra.memo` is present, exactly one top-level Memo instruction MUST match it (mirrors Path 1, so a seller-required memo cannot be bypassed by routing through a smart wallet).
 5. **Simulate with inner instructions**: `simulateTransaction` is called with `innerInstructions: true` to obtain the full CPI trace (no additional round-trip — simulation is already the final verification step). The RPC may return inner instructions in either `jsonParsed` or compiled (base58) format; both are handled.

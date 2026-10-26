@@ -21,7 +21,11 @@ from x402.http.types import (
     PaymentOption,
     RouteConfig,
 )
-from x402.http.utils import decode_payment_response_header, encode_payment_signature_header
+from x402.http.utils import (
+    decode_payment_required_header,
+    decode_payment_response_header,
+    encode_payment_signature_header,
+)
 from x402.http.x402_http_server import x402HTTPResourceServer
 from x402.schemas import (
     AbortResult,
@@ -70,6 +74,9 @@ class MockFacilitatorClient:
 
     def set_settle_response(self, response: SettleResponse) -> None:
         self._settle_response = response
+
+    def set_verify_response(self, response: VerifyResponse) -> None:
+        self._verify_response = response
 
 
 class FlowScheme:
@@ -559,6 +566,26 @@ class TestHttpOrchestration:
         assert len(facilitator.settle_calls) == 1
         assert result.response is not None
         assert result.response.status == 402
+
+    @pytest.mark.asyncio
+    async def test_includes_the_invalid_reason_in_the_json_402_body_when_verification_fails(
+        self,
+    ) -> None:
+        http_server, _resource_server, facilitator = await _setup_http("authorization")
+        facilitator.set_verify_response(
+            VerifyResponse(is_valid=False, invalid_reason="insufficient_funds")
+        )
+
+        result = await _verified_request(http_server, "authorization")
+
+        assert result.type == "payment-error"
+        assert result.response is not None
+        assert result.response.status == 402
+        assert result.response.is_html is False
+        assert result.response.body == {"error": "insufficient_funds"}
+        decoded = decode_payment_required_header(result.response.headers["PAYMENT-REQUIRED"])
+        assert decoded.error == "insufficient_funds"
+        assert len(facilitator.verify_calls) == 1
 
     @pytest.mark.asyncio
     async def test_escrow_cancel_after_before_handler_returns_refund_receipt(self) -> None:
