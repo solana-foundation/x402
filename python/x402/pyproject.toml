@@ -42,9 +42,12 @@ evm = [
     "eth-account>=0.13.0",
     "web3>=7.15.0",
 ]
+# solders 0.29 is the first release that decodes and builds transaction
+# version 1 (SIMD-0385). RPC goes over httpx (mechanisms/svm/rpc.py) because
+# solana-py pins solders below 0.28 on every release that supports Python 3.10.
 svm = [
-    "solders>=0.27.0",
-    "solana>=0.36.0,<0.40",
+    "solders>=0.29.0",
+    "httpx>=0.28.1",
 ]
 tvm = [
     "httpx>=0.28.1",
@@ -92,8 +95,7 @@ dev = [
     "eth-account>=0.13.0",
     "web3>=7.15.0",
     # SVM dependencies
-    "solders>=0.27.0",
-    "solana>=0.36.0,<0.40",
+    "solders>=0.29.0",
     # TVM dependencies
     "pytoniq>=0.1.39",
     "pytoniq-core>=0.1.36",

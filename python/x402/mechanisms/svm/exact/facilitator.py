@@ -22,15 +22,11 @@ from ....schemas import (
 )
 from ..constants import (
     ADVERTISED_TRANSACTION_VERSIONS,
-    COMPUTE_BUDGET_PROGRAM_ADDRESS,
     ERR_AMOUNT_INSUFFICIENT,
     ERR_DUPLICATE_SETTLEMENT,
     ERR_FEE_PAYER_MISSING,
     ERR_FEE_PAYER_NOT_MANAGED,
     ERR_FEE_PAYER_TRANSFERRING,
-    ERR_INVALID_COMPUTE_LIMIT,
-    ERR_INVALID_COMPUTE_PRICE,
-    ERR_INVALID_INSTRUCTION_COUNT,
     ERR_MEMO_COUNT,
     ERR_MEMO_MISMATCH,
     ERR_MINT_MISMATCH,
@@ -45,11 +41,11 @@ from ..constants import (
     ERR_TRANSACTION_FAILED,
     ERR_UNKNOWN_FIFTH_INSTRUCTION,
     ERR_UNKNOWN_FOURTH_INSTRUCTION,
+    ERR_UNKNOWN_SEVENTH_INSTRUCTION,
     ERR_UNKNOWN_SIXTH_INSTRUCTION,
     ERR_UNSUPPORTED_SCHEME,
     ERR_UNSUPPORTED_TRANSACTION_VERSION,
     LIGHTHOUSE_PROGRAM_ADDRESS,
-    MAX_COMPUTE_UNIT_PRICE_MICROLAMPORTS,
     MEMO_PROGRAM_ADDRESS,
     SCHEME_EXACT,
     TOKEN_2022_PROGRAM_ADDRESS,
@@ -59,6 +55,7 @@ from ..settlement_cache import SettlementCache
 from ..signer import FacilitatorSvmSigner, FacilitatorSvmSignerWithGetAccountInfo
 from ..types import ExactSvmPayload
 from ..utils import (
+    check_exact_compute_budget,
     decode_transaction_from_payload,
     derive_ata,
     get_token_payer_from_transaction,
@@ -109,8 +106,8 @@ class ExactSvmScheme:
         """Get mechanism-specific extra data for the supported kinds endpoint.
 
         For SVM, this includes a randomly selected fee payer address and the
-        transaction message versions this facilitator advertises (version 0;
-        legacy is still accepted on the wire but is deprecated).
+        transaction message versions this facilitator advertises (versions 0
+        and 1; legacy is still accepted on the wire but is deprecated).
         Random selection distributes load across multiple signers.
 
         Args:
@@ -151,8 +148,9 @@ class ExactSvmScheme:
 
         Validates:
         - Scheme and network match
-        - Transaction structure (3-6 instructions)
-        - Compute budget instructions are valid
+        - Transaction version is legacy, 0 or 1
+        - Transaction structure (3-6 instructions, or 1-5 on version 1)
+        - Compute budget instructions (or message.config on version 1) are valid
         - TransferChecked instruction:
           - Token program is known (Token or Token-2022)
           - Mint matches requirements.asset
@@ -217,51 +215,12 @@ class ExactSvmScheme:
         instructions = message.instructions
         static_accounts = list(message.account_keys)
 
-        # 3-6 instructions: ComputeLimit + ComputePrice + TransferChecked + optional Lighthouse/Memo
-        if len(instructions) < 3 or len(instructions) > 6:
-            return VerifyResponse(
-                is_valid=False, invalid_reason=ERR_INVALID_INSTRUCTION_COUNT, payer=""
-            )
-
-        # Step 3: Verify Compute Budget Instructions
-        compute_budget_program = Pubkey.from_string(COMPUTE_BUDGET_PROGRAM_ADDRESS)
-
-        # Verify compute unit limit instruction (index 0)
-        cu_limit_ix = instructions[0]
-        cu_limit_program = static_accounts[cu_limit_ix.program_id_index]
-        cu_limit_data = bytes(cu_limit_ix.data)
-
-        if cu_limit_program != compute_budget_program or len(cu_limit_data) < 1:
-            return VerifyResponse(
-                is_valid=False, invalid_reason=ERR_INVALID_COMPUTE_LIMIT, payer=""
-            )
-        if cu_limit_data[0] != 2:  # SetComputeUnitLimit discriminator
-            return VerifyResponse(
-                is_valid=False, invalid_reason=ERR_INVALID_COMPUTE_LIMIT, payer=""
-            )
-
-        # Verify compute unit price instruction (index 1)
-        cu_price_ix = instructions[1]
-        cu_price_program = static_accounts[cu_price_ix.program_id_index]
-        cu_price_data = bytes(cu_price_ix.data)
-
-        if cu_price_program != compute_budget_program or len(cu_price_data) < 9:
-            return VerifyResponse(
-                is_valid=False, invalid_reason=ERR_INVALID_COMPUTE_PRICE, payer=""
-            )
-        if cu_price_data[0] != 3:  # SetComputeUnitPrice discriminator
-            return VerifyResponse(
-                is_valid=False, invalid_reason=ERR_INVALID_COMPUTE_PRICE, payer=""
-            )
-
-        # Parse microLamports (u64, little-endian) and check against max
-        micro_lamports = int.from_bytes(cu_price_data[1:9], "little")
-        if micro_lamports > MAX_COMPUTE_UNIT_PRICE_MICROLAMPORTS:
-            return VerifyResponse(
-                is_valid=False,
-                invalid_reason="invalid_exact_svm_payload_transaction_instructions_compute_price_instruction_too_high",
-                payer="",
-            )
+        # Instruction count and compute budget: a ComputeBudget prefix on
+        # legacy and version 0 (transfer at index 2), message.config on
+        # version 1 (transfer at index 0, no ComputeBudget instruction).
+        budget_error, transfer_index = check_exact_compute_budget(message)
+        if budget_error:
+            return VerifyResponse(is_valid=False, invalid_reason=budget_error, payer="")
 
         # Get token payer
         payer = get_token_payer_from_transaction(tx)
@@ -271,7 +230,7 @@ class ExactSvmScheme:
             )
 
         # Step 4: Verify Transfer Instruction
-        transfer_ix = instructions[2]
+        transfer_ix = instructions[transfer_index]
         transfer_program = static_accounts[transfer_ix.program_id_index]
         transfer_program_str = str(transfer_program)
 
@@ -284,14 +243,17 @@ class ExactSvmScheme:
             )
 
         # Step 5: Verify optional instructions (if present)
-        optional_instructions = instructions[3:]
+        optional_instructions = instructions[transfer_index + 1 :]
         if optional_instructions:
             lighthouse_program = Pubkey.from_string(LIGHTHOUSE_PROGRAM_ADDRESS)
             memo_program = Pubkey.from_string(MEMO_PROGRAM_ADDRESS)
+            # Named by optional slot, so the same codes apply on version 1,
+            # whose optional slots start at index 1 rather than 3.
             invalid_reasons = [
                 ERR_UNKNOWN_FOURTH_INSTRUCTION,
                 ERR_UNKNOWN_FIFTH_INSTRUCTION,
                 ERR_UNKNOWN_SIXTH_INSTRUCTION,
+                ERR_UNKNOWN_SEVENTH_INSTRUCTION,
             ]
 
             for idx, optional_ix in enumerate(optional_instructions):
