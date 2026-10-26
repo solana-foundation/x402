@@ -11,7 +11,7 @@ import type {
   VerifyResponse,
 } from "@x402/core/types";
 
-import { MEMO_PROGRAM_ADDRESS } from "../../constants";
+import { ADVERTISED_TRANSACTION_VERSIONS, MEMO_PROGRAM_ADDRESS } from "../../constants";
 import {
   discoverChannelsByRentPayer,
   type DiscoveredChannel,
@@ -198,8 +198,8 @@ export class BatchSvmScheme implements SchemeNetworkFacilitator {
     const addresses = this.signer.getAddresses();
     return {
       feePayer: addresses[Math.floor(Math.random() * addresses.length)],
-      // Servers copy the idle window into the 402: it is how long they have
-      // to claim before an idle channel is closed at its onchain watermark.
+      transactionVersions: [...ADVERTISED_TRANSACTION_VERSIONS],
+      // Copied into the 402: how long servers have to claim before an idle close.
       ...(this.maxIdleSecs > 0 ? { maxIdleSecs: this.maxIdleSecs } : {}),
       ...(this.delegatedReceiverAuth
         ? { receiverAuthorizer: this.delegatedReceiverAuth.receiverAuthorizer }
