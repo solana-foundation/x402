@@ -262,7 +262,7 @@ func (f *UptoSvmScheme) GetExtra(network x402.Network) map[string]interface{} {
 	}
 	extra := map[string]interface{}{
 		upto.ExtraFeePayer:            addresses[rand.IntN(len(addresses))].String(),
-		upto.ExtraTransactionVersions: svm.AdvertisedTransactionVersions,
+		upto.ExtraTransactionVersions: append([]int(nil), svm.AdvertisedTransactionVersions...),
 	}
 	if f.authorizerSigner != nil {
 		extra[upto.ExtraReceiverAuthorizer] = f.authorizerSigner.Address().String()

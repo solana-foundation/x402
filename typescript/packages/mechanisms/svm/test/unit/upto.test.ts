@@ -1,5 +1,8 @@
 import {
   address,
+  appendTransactionMessageInstructions,
+  compileTransaction,
+  createTransactionMessage,
   decompileTransactionMessage,
   generateKeyPairSigner,
   getBase58Decoder,
@@ -10,7 +13,12 @@ import {
   getCompiledTransactionMessageEncoder,
   getInstructionsFromCompiledTransactionMessage,
   getTransactionDecoder,
+  getTransactionEncoder,
   partiallySignTransaction,
+  pipe,
+  setTransactionMessageConfig,
+  setTransactionMessageFeePayerSigner,
+  setTransactionMessageLifetimeUsingBlockhash,
   type KeyPairSigner,
 } from "@solana/kit";
 import { fetchMint } from "@solana-program/token-2022";
@@ -2672,6 +2680,48 @@ describe("upto SVM scheme", () => {
       expect(
         facilitatorV1TransactionFits(feePayer, [{ ...memoIx, data: new Uint8Array(4_000) }]),
       ).toBe(false);
+    });
+
+    it("flips exactly where the serialized v1 transaction exceeds 4096 bytes", async () => {
+      const feePayer = await generateKeyPairSigner();
+      const options = {
+        computeUnitLimit: 200_000,
+        loadedAccountsDataSizeLimit: 65_536,
+        computeUnitPriceMicroLamports: 0,
+      };
+      const withData = (length: number) => [{ ...memoIx, data: new Uint8Array(length) }];
+      const wireSize = (length: number) =>
+        getTransactionEncoder().encode(
+          compileTransaction(
+            pipe(
+              createTransactionMessage({ version: 1 }),
+              m =>
+                setTransactionMessageConfig(
+                  {
+                    computeUnitLimit: options.computeUnitLimit,
+                    loadedAccountsDataSizeLimit: options.loadedAccountsDataSizeLimit,
+                  },
+                  m,
+                ),
+              m => setTransactionMessageFeePayerSigner(feePayer, m),
+              m =>
+                setTransactionMessageLifetimeUsingBlockhash(
+                  {
+                    blockhash: "11111111111111111111111111111111" as never,
+                    lastValidBlockHeight: 0n,
+                  },
+                  m,
+                ),
+              m => appendTransactionMessageInstructions(withData(length), m),
+            ),
+          ),
+        ).length;
+
+      let largest = 3_800;
+      expect(facilitatorV1TransactionFits(feePayer, withData(largest), options)).toBe(true);
+      while (facilitatorV1TransactionFits(feePayer, withData(largest + 1), options)) largest++;
+      expect(wireSize(largest)).toBe(4_096);
+      expect(wireSize(largest + 1)).toBe(4_097);
     });
   });
 
