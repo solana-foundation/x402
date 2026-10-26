@@ -191,7 +191,10 @@ export class BatchSvmScheme implements SchemeNetworkClient {
     if (context) this.creationContexts.set(requirements, context);
     // Fail closed before any channel work when the facilitator accepts no
     // transaction version this client can build (deposit, top-up, close).
-    resolveTransactionVersion(requirements.extra);
+    const transactionVersion = resolveTransactionVersion(
+      requirements.extra,
+      this.config.transactionVersions,
+    );
     const terms = await this.resolveTerms(requirements);
     const charge = parseU64(requirements.amount, "amount");
     const authorizationExpiresAt =
@@ -269,6 +272,7 @@ export class BatchSvmScheme implements SchemeNetworkClient {
       const rpc = createRpcClient(requirements.network, this.config.rpcUrl);
       const blockhash = await resolveBlockhash(rpc, requirements);
       const topUp = await buildTopUpPaymentChannelTransaction({
+        transactionVersion,
         amount: topUpAmount,
         blockhash,
         channelId: existing.tracker.channelId,
@@ -338,6 +342,7 @@ export class BatchSvmScheme implements SchemeNetworkClient {
       resolveOpenSlot(rpc, requirements),
     ]);
     const built = await buildDepositPayload({
+      transactionVersion,
       blockhash,
       depositAmount: deposit,
       feePayer: terms.feePayer,
@@ -408,7 +413,10 @@ export class BatchSvmScheme implements SchemeNetworkClient {
   ): Promise<Pick<PaymentPayload, "x402Version" | "payload">> {
     // Fail closed before any channel work when the facilitator accepts no
     // transaction version this client can build (deposit, top-up, close).
-    resolveTransactionVersion(requirements.extra);
+    const transactionVersion = resolveTransactionVersion(
+      requirements.extra,
+      this.config.transactionVersions,
+    );
     const cached = this.findCachedChannelForRoute(requirements);
     const located = await this.locateRefundChannel(requirements, cached);
     if (!located) throw new NoBatchChannelToRefundError();
@@ -436,6 +444,7 @@ export class BatchSvmScheme implements SchemeNetworkClient {
         feePayer: terms.feePayer,
         memo: terms.memo,
         payer: this.signer,
+        transactionVersion,
         ...credential,
       }),
     };

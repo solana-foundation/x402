@@ -3255,7 +3255,7 @@ describe("upto SVM scheme", () => {
       const facilitator = new UptoFacilitatorScheme(toFacilitatorSvmSigner(feePayer));
       expect(facilitator.getExtra(SOLANA_DEVNET_CAIP2)).toEqual({
         feePayer: feePayer.address,
-        transactionVersions: [0],
+        transactionVersions: [0, 1],
       });
       expect(facilitator.getSigners(SOLANA_DEVNET_CAIP2)).toEqual([feePayer.address]);
     });
@@ -3292,12 +3292,12 @@ describe("upto SVM scheme", () => {
         randomSpy.mockReturnValueOnce(0);
         expect(facilitator.getExtra(SOLANA_DEVNET_CAIP2)).toEqual({
           feePayer: feePayerA.address,
-          transactionVersions: [0],
+          transactionVersions: [0, 1],
         });
         randomSpy.mockReturnValueOnce(0.99);
         expect(facilitator.getExtra(SOLANA_DEVNET_CAIP2)).toEqual({
           feePayer: feePayerB.address,
-          transactionVersions: [0],
+          transactionVersions: [0, 1],
         });
       } finally {
         randomSpy.mockRestore();

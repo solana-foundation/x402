@@ -43,6 +43,7 @@ import {
 import { DEFAULT_ASSETS, findDefaultAsset, getDefaultAsset } from "./defaultAssets";
 import type { ExactSvmPayloadV1 } from "./types";
 import { SLOT_COMMITMENT } from "./payment-channels/commitments";
+import type { BuildableTransactionVersion } from "./transactionV1";
 
 export { normalizeNetwork } from "./constants";
 
@@ -127,11 +128,11 @@ export function peekWireTransactionVersion(
 /**
  * Whether a decoded transaction message's version is one the SVM verifiers
  * model. Verifiers call this before any signature or instruction check so a
- * version whose compute budget lives elsewhere (e.g. transaction v1's
- * `message.config`) cannot pass the instruction-scanning checks vacuously.
+ * version whose compute budget lives somewhere they do not read cannot pass
+ * the compute-budget checks vacuously.
  *
  * @param version - The `version` field of a compiled or decompiled transaction message
- * @returns Whether the version is legacy or 0
+ * @returns Whether the version is legacy, 0, or 1
  */
 export function isAcceptedTransactionVersion(version: number | string): boolean {
   return ACCEPTED_TRANSACTION_VERSIONS.includes(version);
@@ -139,15 +140,19 @@ export function isAcceptedTransactionVersion(version: number | string): boolean 
 
 /**
  * Pick the transaction message version a client builds from the versions the
- * facilitator advertised in `extra.transactionVersions`. This client only
- * builds version 0 today. Negotiation selects the highest version shared by
- * the facilitator advertisement and this client's supported-version set.
+ * facilitator advertised in `extra.transactionVersions`: the highest version
+ * shared by that advertisement and the versions the client (and its signer)
+ * can build.
  *
  * @param extra - The `extra` field of the payment requirements
+ * @param supported - Versions the client can build; defaults to {@link CLIENT_SUPPORTED_TRANSACTION_VERSIONS}
  * @returns The highest mutually supported transaction message version
  * @throws Error prefixed with `unsupported_transaction_version` when the sets do not intersect
  */
-export function resolveTransactionVersion(extra: Record<string, unknown> | undefined): 0 {
+export function resolveTransactionVersion(
+  extra: Record<string, unknown> | undefined,
+  supported: readonly number[] = CLIENT_SUPPORTED_TRANSACTION_VERSIONS,
+): BuildableTransactionVersion {
   const advertised = extra && "transactionVersions" in extra ? extra.transactionVersions : [0];
   if (!Array.isArray(advertised)) {
     throw new Error(`${ErrUnsupportedTransactionVersion}: transactionVersions must be an array`);
@@ -163,14 +168,33 @@ export function resolveTransactionVersion(extra: Record<string, unknown> | undef
   }
   const selected = selectHighestMutuallySupportedTransactionVersion(
     advertised,
-    CLIENT_SUPPORTED_TRANSACTION_VERSIONS,
+    normalizeClientTransactionVersions(supported),
   );
   if (selected !== undefined) {
-    return selected as 0;
+    return selected as BuildableTransactionVersion;
   }
   throw new Error(
     `${ErrUnsupportedTransactionVersion}: facilitator accepts none of the transaction versions this client can build (advertised ${JSON.stringify(advertised)})`,
   );
+}
+
+/**
+ * Validate a client's `transactionVersions` option.
+ *
+ * @param versions - The versions the client may build, or undefined for the default
+ * @returns The validated versions
+ * @throws Error when the list is empty or holds anything but 0 and 1
+ */
+export function normalizeClientTransactionVersions(
+  versions: readonly number[] | undefined,
+): readonly BuildableTransactionVersion[] {
+  if (versions === undefined) return CLIENT_SUPPORTED_TRANSACTION_VERSIONS;
+  if (versions.length === 0 || versions.some(version => version !== 0 && version !== 1)) {
+    throw new Error(
+      `transactionVersions must be a non-empty list of 0 and/or 1 (got ${JSON.stringify(versions)})`,
+    );
+  }
+  return versions as readonly BuildableTransactionVersion[];
 }
 
 /**

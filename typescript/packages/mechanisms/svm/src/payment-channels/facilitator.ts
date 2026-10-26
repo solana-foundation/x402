@@ -13,6 +13,7 @@ import {
   getSetComputeUnitPriceInstruction,
   parseSetComputeUnitPriceInstruction,
 } from "@solana-program/compute-budget";
+import { V1_MAX_TRANSACTION_SIZE, priorityFeeLamports } from "../transactionV1";
 import {
   address,
   type Address,
@@ -109,8 +110,8 @@ export const RECLAIM_LOADED_ACCOUNTS_DATA_SIZE_BASE = 262_144;
 /** Extra loaded-account-data budget for each channel PDA in a reclaim batch. */
 export const RECLAIM_LOADED_ACCOUNTS_DATA_SIZE_PER_CHANNEL = 1_024;
 
-/** Transaction-v1 wire and structural limits mandated by SIMD-0385. */
-export const V1_MAX_TRANSACTION_SIZE = 4_096;
+/** Transaction-v1 structural limits mandated by SIMD-0385. */
+export { V1_MAX_TRANSACTION_SIZE, priorityFeeLamports };
 export const V1_MAX_STATIC_ACCOUNTS = 64;
 export const V1_MAX_INSTRUCTIONS = 64;
 
@@ -144,12 +145,6 @@ export function reclaimLoadedAccountsDataSizeLimit(channelCount: number): number
     RECLAIM_LOADED_ACCOUNTS_DATA_SIZE_BASE +
     RECLAIM_LOADED_ACCOUNTS_DATA_SIZE_PER_CHANNEL * channelCount
   );
-}
-
-/** Convert a microlamports/CU operator setting to v1's total lamport fee. */
-export function priorityFeeLamports(computeUnitLimit: number, microLamports: number): bigint {
-  if (microLamports <= 0) return 0n;
-  return (BigInt(computeUnitLimit) * BigInt(Math.trunc(microLamports)) + 999_999n) / 1_000_000n;
 }
 
 /** Signer capable of signing Solana transactions and raw Ed25519 messages. */

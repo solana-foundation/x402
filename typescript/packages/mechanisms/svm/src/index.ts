@@ -96,6 +96,7 @@ export * from "./constants";
 
 // Export utilities
 export * from "./utils";
+export * from "./transactionV1";
 
 export {
   DEFAULT_ASSETS,

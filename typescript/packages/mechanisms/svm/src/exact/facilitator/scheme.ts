@@ -48,6 +48,7 @@ import {
   transactionMessageHash,
   TransactionOnchainFailureError,
 } from "../../utils";
+import { checkTransactionV1Budget, readTransactionV1Config } from "../../transactionV1";
 import {
   assertSmartWalletLimits,
   assertSmartWalletVerifySigner,
@@ -119,6 +120,17 @@ const LAYOUT_RECOVERABLE_REASONS = new Set<string>([
   Errors.ErrComputeLimitInstruction,
   Errors.ErrComputePriceInstruction,
 ]);
+
+/**
+ * Index of the Path 1 TransferChecked instruction: after the ComputeLimit +
+ * ComputePrice prefix on legacy and version 0, first on version 1.
+ *
+ * @param version - The compiled message version
+ * @returns The transfer's instruction index
+ */
+function staticTransferIndex(version: number | string): number {
+  return version === 1 ? 0 : 2;
+}
 
 /**
  * Configuration options for ExactSvmScheme.
@@ -692,10 +704,11 @@ export class ExactSvmScheme implements SchemeNetworkFacilitator {
   private hasStaticTransferLayout(transaction: Transaction): boolean {
     const compiled = compiledMessageDecoder.decode(transaction.messageBytes);
     const instructions = decompileTransactionMessage(compiled).instructions ?? [];
-    if (instructions.length < 3 || instructions.length > 7) {
+    const transferIndex = staticTransferIndex(compiled.version);
+    if (instructions.length < transferIndex + 1 || instructions.length > transferIndex + 5) {
       return false;
     }
-    const transferIx = instructions[2];
+    const transferIx = instructions[transferIndex];
     const programAddress = transferIx.programAddress.toString();
     if (
       programAddress !== TOKEN_PROGRAM_ADDRESS.toString() &&
@@ -924,6 +937,7 @@ export class ExactSvmScheme implements SchemeNetworkFacilitator {
     // ─── Path 1: Static validation (standard wallets) ───────────────────
     const staticResult = await this.verifyStaticPath(
       transaction,
+      compiled,
       decompiled,
       exactSvmPayload,
       requirements,
@@ -1013,6 +1027,7 @@ export class ExactSvmScheme implements SchemeNetworkFacilitator {
    * transfer details. Unchanged from the original implementation.
    *
    * @param transaction - Decoded transaction to verify
+   * @param compiled - Compiled message, whose version selects the layout and budget checks
    * @param decompiled - Pre-decompiled message (lookups already resolved)
    * @param exactSvmPayload - The raw SVM payload containing the base64 transaction
    * @param requirements - Payment requirements to verify against
@@ -1021,22 +1036,49 @@ export class ExactSvmScheme implements SchemeNetworkFacilitator {
    */
   private async verifyStaticPath(
     transaction: ReturnType<typeof decodeTransactionFromPayload>,
+    compiled: ReturnType<typeof compiledMessageDecoder.decode>,
     decompiled: ReturnType<typeof decompileTransactionMessage>,
     exactSvmPayload: ExactSvmPayloadV2,
     requirements: PaymentRequirements,
     signerAddresses: string[],
   ): Promise<VerifyResponse> {
     const instructions = decompiled.instructions ?? [];
+    const transferIndex = staticTransferIndex(compiled.version);
 
-    // Allow 3-7 instructions:
-    // - 3 instructions: ComputeLimit + ComputePrice + TransferChecked
-    // - 4 instructions: ComputeLimit + ComputePrice + TransferChecked + Lighthouse or Memo
-    // - 5 instructions: ComputeLimit + ComputePrice + TransferChecked + Lighthouse + Lighthouse or Memo
-    // - 6 instructions: ComputeLimit + ComputePrice + TransferChecked + Lighthouse + Lighthouse + Memo
-    // - 7 instructions: + a third wallet-injected Lighthouse (Phantom, see #2097)
+    // Version 1 carries its compute budget in the message config, so it is
+    // checked there, and a ComputeBudget instruction anywhere is rejected.
+    if (compiled.version === 1) {
+      const violation = checkTransactionV1Budget(
+        readTransactionV1Config(compiled),
+        (instructions as ReadonlyArray<{ programAddress: Address }>).map(ix =>
+          ix.programAddress.toString(),
+        ),
+        {
+          maxComputeUnits: this.options?.maxComputeUnits,
+          maxPriceMicroLamports:
+            this.options?.maxPriorityFeeMicroLamports ?? MAX_COMPUTE_UNIT_PRICE_MICROLAMPORTS,
+        },
+      );
+      if (violation) {
+        return {
+          isValid: false,
+          invalidReason: Errors.TRANSACTION_V1_BUDGET_REASONS[violation],
+          payer: "",
+        };
+      }
+    }
+
+    // Allow the transfer plus up to four optional instructions. Legacy and
+    // version 0 put a ComputeLimit + ComputePrice prefix before the transfer
+    // (3-7 instructions); version 1 has no prefix (1-5 instructions).
+    // - transfer alone
+    // - + Lighthouse or Memo
+    // - + Lighthouse + Lighthouse or Memo
+    // - + Lighthouse + Lighthouse + Memo
+    // - + a third wallet-injected Lighthouse (Phantom, see #2097)
     // See: https://github.com/x402-foundation/x402/issues/828
     //  and: https://github.com/x402-foundation/x402/issues/2097
-    if (instructions.length < 3 || instructions.length > 7) {
+    if (instructions.length < transferIndex + 1 || instructions.length > transferIndex + 5) {
       return {
         isValid: false,
         invalidReason: Errors.ErrTransactionInstructionsLength,
@@ -1045,16 +1087,18 @@ export class ExactSvmScheme implements SchemeNetworkFacilitator {
     }
 
     // Step 3: Verify Compute Budget Instructions
-    try {
-      this.verifyComputeLimitInstruction(instructions[0] as never);
-      this.verifyComputePriceInstruction(instructions[1] as never);
-    } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      return {
-        isValid: false,
-        invalidReason: errorMessage,
-        payer: "",
-      };
+    if (transferIndex === 2) {
+      try {
+        this.verifyComputeLimitInstruction(instructions[0] as never);
+        this.verifyComputePriceInstruction(instructions[1] as never);
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        return {
+          isValid: false,
+          invalidReason: errorMessage,
+          payer: "",
+        };
+      }
     }
 
     const payer = getTokenPayerFromTransaction(transaction);
@@ -1067,7 +1111,7 @@ export class ExactSvmScheme implements SchemeNetworkFacilitator {
     }
 
     // Step 4: Verify Transfer Instruction
-    const transferIx = instructions[2];
+    const transferIx = instructions[transferIndex];
     const programAddress = transferIx.programAddress.toString();
 
     if (
@@ -1167,7 +1211,7 @@ export class ExactSvmScheme implements SchemeNetworkFacilitator {
 
     // Step 5: Verify optional instructions (if present)
     // Allowed optional programs: Lighthouse (wallet protection) and Memo (uniqueness)
-    const optionalInstructions = instructions.slice(3);
+    const optionalInstructions = instructions.slice(transferIndex + 1);
     const invalidReasonByIndex = [
       Errors.ErrUnknownFourthInstruction,
       Errors.ErrUnknownFifthInstruction,

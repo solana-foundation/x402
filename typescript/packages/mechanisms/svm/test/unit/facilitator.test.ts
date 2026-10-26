@@ -137,7 +137,7 @@ describe("ExactSvmScheme", () => {
     it("advertises the accepted transaction message versions in getExtra", () => {
       const facilitator = new ExactSvmScheme(mockSigner);
       const extra = facilitator.getExtra(SOLANA_DEVNET_CAIP2);
-      expect(extra!.transactionVersions).toEqual([0]);
+      expect(extra!.transactionVersions).toEqual([0, 1]);
       expect(extra!.transactionVersions).not.toContain("legacy");
     });
   });
