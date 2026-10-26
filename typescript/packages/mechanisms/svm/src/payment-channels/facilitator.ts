@@ -19,6 +19,7 @@ import {
   addSignersToInstruction,
   appendTransactionMessageInstructions,
   type Blockhash,
+  compileTransaction,
   compileTransactionMessage,
   createNoopSigner,
   createTransactionMessage,
@@ -28,7 +29,7 @@ import {
   getBase64Codec,
   getBase64EncodedWireTransaction,
   getCompiledTransactionMessageDecoder,
-  getCompiledTransactionMessageEncoder,
+  getTransactionEncoder,
   getTransactionDecoder,
   type Instruction,
   type MessagePartialSigner,
@@ -642,8 +643,9 @@ export function facilitatorV1TransactionFits(
     ) {
       return false;
     }
-    const messageSize = getCompiledTransactionMessageEncoder().encode(compiled).length;
-    const wireSize = messageSize + compiled.header.numSignerAccounts * 64;
+    // Measure the fully serialized transaction, as Go does, rather than
+    // summing message and signature sizes by hand.
+    const wireSize = getTransactionEncoder().encode(compileTransaction(message)).length;
     return wireSize <= V1_MAX_TRANSACTION_SIZE;
   } catch {
     return false;
