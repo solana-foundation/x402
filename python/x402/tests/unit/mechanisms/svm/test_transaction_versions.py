@@ -134,7 +134,7 @@ class TestResolveTransactionVersion:
         with pytest.raises(ValueError, match=f"^{ERR_UNSUPPORTED_TRANSACTION_VERSION}"):
             resolve_transaction_version({"transactionVersions": advertised})
 
-    @pytest.mark.parametrize("advertised", [[0], [0, 1], [2, 1, 0], ["legacy", 0], [1, 0]])
+    @pytest.mark.parametrize("advertised", [[0], [0, 1], [1, 0]])
     def test_picks_v0_when_advertised(self, advertised):
         assert resolve_transaction_version({"transactionVersions": advertised}) == 0
 
@@ -143,10 +143,24 @@ class TestResolveTransactionVersion:
             "x402.mechanisms.svm.utils.CLIENT_SUPPORTED_TRANSACTION_VERSIONS",
             [0, 1],
         )
-        assert resolve_transaction_version({"transactionVersions": [0, 2, 1]}) == 1
+        assert resolve_transaction_version({"transactionVersions": [0, 1]}) == 1
 
-    @pytest.mark.parametrize("advertised", [[1], ["legacy"], [], [False], ["0"]])
-    def test_raises_when_v0_not_advertised(self, advertised):
+    @pytest.mark.parametrize(
+        "advertised",
+        [
+            [1],
+            ["legacy"],
+            [],
+            [False],
+            ["0"],
+            ["legacy", 0],
+            ["1", 0],
+            [None, 0],
+            [2, 1, 0],
+            [True, 0],
+        ],
+    )
+    def test_raises_when_v0_not_advertised_or_field_invalid(self, advertised):
         with pytest.raises(ValueError, match=f"^{ERR_UNSUPPORTED_TRANSACTION_VERSION}"):
             resolve_transaction_version({"transactionVersions": advertised})
 

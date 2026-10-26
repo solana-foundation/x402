@@ -143,9 +143,13 @@ func TestResolveTransactionVersion(t *testing.T) {
 		{name: "absent field selects v0", extra: map[string]interface{}{"feePayer": "x"}},
 		{name: "malformed field is unsupported", extra: map[string]interface{}{ExtraTransactionVersions: "0"}, wantErr: true},
 		{name: "JSON-decoded [0] selects v0", extra: map[string]interface{}{ExtraTransactionVersions: []interface{}{float64(0)}}},
-		{name: "JSON-decoded [\"legacy\",0] selects v0", extra: map[string]interface{}{ExtraTransactionVersions: []interface{}{"legacy", float64(0)}}},
+		{name: "JSON-decoded [\"legacy\",0] fails closed", extra: map[string]interface{}{ExtraTransactionVersions: []interface{}{"legacy", float64(0)}}, wantErr: true},
+		{name: "JSON-decoded [\"1\",0] fails closed", extra: map[string]interface{}{ExtraTransactionVersions: []interface{}{"1", float64(0)}}, wantErr: true},
+		{name: "JSON-decoded [null,0] fails closed", extra: map[string]interface{}{ExtraTransactionVersions: []interface{}{nil, float64(0)}}, wantErr: true},
+		{name: "JSON-decoded [0.5,0] fails closed", extra: map[string]interface{}{ExtraTransactionVersions: []interface{}{0.5, float64(0)}}, wantErr: true},
+		{name: "in-process []int{2,0} fails closed", extra: map[string]interface{}{ExtraTransactionVersions: []int{2, 0}}, wantErr: true},
 		{name: "JSON-decoded [1,0] selects v0", extra: map[string]interface{}{ExtraTransactionVersions: []interface{}{float64(1), float64(0)}}},
-		{name: "highest mutually supported version wins", extra: map[string]interface{}{ExtraTransactionVersions: []interface{}{float64(2), float64(1), float64(0)}}},
+		{name: "unknown version 2 fails closed", extra: map[string]interface{}{ExtraTransactionVersions: []interface{}{float64(2), float64(1), float64(0)}}, wantErr: true},
 		{name: "in-process []int{0} selects v0", extra: map[string]interface{}{ExtraTransactionVersions: []int{0}}},
 		{name: "in-process []interface{}{0} selects v0", extra: map[string]interface{}{ExtraTransactionVersions: []interface{}{0}}},
 		{name: "advertised value selects v0", extra: map[string]interface{}{ExtraTransactionVersions: AdvertisedTransactionVersions}},
@@ -174,7 +178,7 @@ func TestResolveTransactionVersionSelectsHighestMutualVersion(t *testing.T) {
 	defer func() { ClientSupportedTransactionVersions = original }()
 
 	version, err := ResolveTransactionVersion(map[string]interface{}{
-		ExtraTransactionVersions: []interface{}{float64(0), float64(2), float64(1)},
+		ExtraTransactionVersions: []interface{}{float64(0), float64(1)},
 	})
 	require.NoError(t, err)
 	assert.Equal(t, solana.MessageVersion(2), version)

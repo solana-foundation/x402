@@ -287,13 +287,17 @@ def resolve_transaction_version(extra: dict | None) -> int:
         raise ValueError(
             f"{ERR_UNSUPPORTED_TRANSACTION_VERSION}: transactionVersions must be a list"
         )
+    # The field holds only the integers 0 and 1. Any other entry, including
+    # Wallet Standard's "legacy" or a stringified version, invalidates the
+    # whole field rather than being skipped.
+    for offered in advertised:
+        if isinstance(offered, bool) or not isinstance(offered, int) or offered not in (0, 1):
+            raise ValueError(
+                f"{ERR_UNSUPPORTED_TRANSACTION_VERSION}: transactionVersions entries must be "
+                f"the integers 0 or 1, got {offered!r}"
+            )
     mutually_supported = [
-        version
-        for version in CLIENT_SUPPORTED_TRANSACTION_VERSIONS
-        if any(
-            isinstance(offered, int) and not isinstance(offered, bool) and offered == version
-            for offered in advertised
-        )
+        version for version in CLIENT_SUPPORTED_TRANSACTION_VERSIONS if version in advertised
     ]
     if mutually_supported:
         return max(mutually_supported)

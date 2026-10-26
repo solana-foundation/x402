@@ -325,40 +325,33 @@ func ResolveTransactionVersion(extra map[string]interface{}) (solana.MessageVers
 			raw = value
 		}
 	}
-	var advertised []int
-	list, ok := raw.([]interface{})
-	if !ok {
-		// Typed slices appear when the requirements were built in-process
-		// rather than decoded from JSON.
-		switch typed := raw.(type) {
-		case []int:
-			advertised = append(advertised, typed...)
-		case []float64:
-			for _, v := range typed {
-				if v >= 0 && v == float64(int(v)) {
-					advertised = append(advertised, int(v))
-				}
-			}
-		default:
-			return 0, fmt.Errorf("%s: transactionVersions must be an array, got %T", ErrUnsupportedTransactionVersion, raw)
+	// The field holds only the integers 0 and 1. Any other entry, including
+	// Wallet Standard's "legacy" or a stringified version, invalidates the
+	// whole field rather than being skipped.
+	var entries []interface{}
+	switch typed := raw.(type) {
+	case []interface{}:
+		entries = typed
+	// Typed slices appear when the requirements were built in-process
+	// rather than decoded from JSON.
+	case []int:
+		for _, v := range typed {
+			entries = append(entries, v)
 		}
-	} else {
-		for _, entry := range list {
-			switch v := entry.(type) {
-			case float64:
-				if v >= 0 && v == float64(int(v)) {
-					advertised = append(advertised, int(v))
-				}
-			case int:
-				if v >= 0 {
-					advertised = append(advertised, v)
-				}
-			case int64:
-				if v >= 0 && uint64(v) <= uint64(^uint(0)>>1) {
-					advertised = append(advertised, int(v))
-				}
-			}
+	case []float64:
+		for _, v := range typed {
+			entries = append(entries, v)
 		}
+	default:
+		return 0, fmt.Errorf("%s: transactionVersions must be an array, got %T", ErrUnsupportedTransactionVersion, raw)
+	}
+	advertised := make([]int, 0, len(entries))
+	for _, entry := range entries {
+		version, ok := transactionVersionEntry(entry)
+		if !ok {
+			return 0, fmt.Errorf("%s: transactionVersions entries must be the integers 0 or 1, got %v (%T)", ErrUnsupportedTransactionVersion, entry, entry)
+		}
+		advertised = append(advertised, version)
 	}
 	selected := -1
 	for _, supported := range ClientSupportedTransactionVersions {
@@ -372,6 +365,26 @@ func ResolveTransactionVersion(extra map[string]interface{}) (solana.MessageVers
 		return solana.MessageVersion(selected + 1), nil
 	}
 	return 0, fmt.Errorf("%s: facilitator accepts none of the transaction versions this client can build: %v", ErrUnsupportedTransactionVersion, raw)
+}
+
+// transactionVersionEntry reports whether entry is the integer 0 or 1. JSON
+// decoding yields float64, so an integral float64 is accepted.
+func transactionVersionEntry(entry interface{}) (int, bool) {
+	switch v := entry.(type) {
+	case float64:
+		if v == 0 || v == 1 {
+			return int(v), true
+		}
+	case int:
+		if v == 0 || v == 1 {
+			return v, true
+		}
+	case int64:
+		if v == 0 || v == 1 {
+			return int(v), true
+		}
+	}
+	return 0, false
 }
 
 // GetTokenPayerFromTransaction extracts the token payer (owner) address from a transaction

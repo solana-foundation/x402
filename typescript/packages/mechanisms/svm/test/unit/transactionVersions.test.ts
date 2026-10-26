@@ -155,10 +155,18 @@ describe("resolveTransactionVersion", () => {
 
   it("builds version 0 whenever it is advertised", () => {
     expect(resolveTransactionVersion({ transactionVersions: [0] })).toBe(0);
-    expect(resolveTransactionVersion({ transactionVersions: ["legacy", 0] })).toBe(0);
     expect(resolveTransactionVersion({ transactionVersions: [0, 1] })).toBe(0);
     expect(resolveTransactionVersion({ transactionVersions: [1, 0] })).toBe(0);
   });
+
+  it.each([[["legacy", 0]], [["1", 0]], [[null, 0]], [[2, 1, 0]], [[0.5, 0]], [[true, 0]]])(
+    "fails closed when any entry is not the integer 0 or 1 (%j)",
+    advertised => {
+      expect(() => resolveTransactionVersion({ transactionVersions: advertised })).toThrow(
+        /^unsupported_transaction_version/,
+      );
+    },
+  );
 
   it("selects the highest mutually supported version", () => {
     expect(selectHighestMutuallySupportedTransactionVersion([0, 2, 1], [0, 1])).toBe(1);
@@ -207,12 +215,12 @@ describe("exact client honours extra.transactionVersions", () => {
     expect(wireVersion((payload as { transaction: string }).transaction)).toBe(0);
   });
 
-  it("builds a version 0 transaction when 0 is advertised alongside newer versions", async () => {
+  it("builds a version 0 transaction when 0 is advertised alongside version 1", async () => {
     const payer = await generateKeyPairSigner();
     const client = new ExactSvmClientScheme(payer);
     const { payload } = await client.createPaymentPayload(
       2,
-      requirements({ transactionVersions: [2, 1, 0] }),
+      requirements({ transactionVersions: [1, 0] }),
     );
     expect(wireVersion((payload as { transaction: string }).transaction)).toBe(0);
   });

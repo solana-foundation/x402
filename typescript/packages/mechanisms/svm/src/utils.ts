@@ -119,6 +119,15 @@ export function resolveTransactionVersion(extra: Record<string, unknown> | undef
   if (!Array.isArray(advertised)) {
     throw new Error(`${ErrUnsupportedTransactionVersion}: transactionVersions must be an array`);
   }
+  // The field holds only the integers 0 and 1. Any other entry, including
+  // Wallet Standard's "legacy" or a stringified version, invalidates the
+  // whole field rather than being skipped.
+  const invalidIndex = advertised.findIndex(version => version !== 0 && version !== 1);
+  if (invalidIndex !== -1) {
+    throw new Error(
+      `${ErrUnsupportedTransactionVersion}: transactionVersions entries must be the integers 0 or 1 (got ${JSON.stringify(advertised[invalidIndex]) ?? "undefined"})`,
+    );
+  }
   const selected = selectHighestMutuallySupportedTransactionVersion(
     advertised,
     CLIENT_SUPPORTED_TRANSACTION_VERSIONS,

@@ -43,7 +43,7 @@ func TestCreatePaymentPayloadHonorsAdvertisedTransactionVersions(t *testing.T) {
 	}{
 		{name: "absent field builds v0", versions: nil},
 		{name: "[0] builds v0", versions: []interface{}{float64(0)}},
-		{name: "[\"legacy\",0] still builds v0: clients never build legacy", versions: []interface{}{"legacy", float64(0)}},
+		{name: "[1,0] builds v0: this client does not build v1 yet", versions: []interface{}{float64(1), float64(0)}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			client := NewExactSvmScheme(&mockClientSigner{keypair: solana.NewWallet().PrivateKey}, &svm.ClientConfig{RPCURL: server.URL})
