@@ -55,6 +55,7 @@ from ...utils import (
     get_token_payer_from_transaction,
     get_transaction_version,
     is_accepted_transaction_version,
+    peek_wire_transaction_version,
     transaction_message_hash,
 )
 
@@ -161,6 +162,14 @@ class ExactSvmSchemeV1:
             )
 
         # Parse and Validate Transaction Structure
+        # Read the version from the raw bytes first so a newer wire format is
+        # reported as unsupported however the installed solders handles it.
+        wire_version = peek_wire_transaction_version(svm_payload.transaction)
+        if wire_version is not None and not is_accepted_transaction_version(wire_version):
+            return VerifyResponse(
+                is_valid=False, invalid_reason=ERR_UNSUPPORTED_TRANSACTION_VERSION, payer=""
+            )
+
         try:
             tx = decode_transaction_from_payload(svm_payload)
         except Exception:

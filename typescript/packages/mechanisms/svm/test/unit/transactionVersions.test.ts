@@ -42,6 +42,7 @@ import type { FacilitatorSvmSigner } from "../../src/signer";
 import {
   decodeTransactionFromPayload,
   isAcceptedTransactionVersion,
+  peekWireTransactionVersion,
   resolveTransactionVersion,
   selectHighestMutuallySupportedTransactionVersion,
   transactionMessageHash,
@@ -396,6 +397,111 @@ describe("verifier version gates", () => {
 
     reportedVersionOverride = undefined;
     expect(() => validateComputeBudgetLimits(decoded)).not.toThrow();
+  });
+
+  /**
+   * Re-encode a signed version 0 transaction with its message version prefix
+   * replaced, as the Go facilitator tests do. No decoder override is active,
+   * so this exercises what the installed decoder does with the bytes.
+   */
+  function retagMessageVersion(transactionBase64: string, prefix: number): string {
+    const bytes = new Uint8Array(getBase64Codec().encode(transactionBase64));
+    const offset = 1 + 64 * bytes[0];
+    expect(bytes[offset]).toBe(0x80);
+    bytes[offset] = prefix;
+    return getBase64Codec().decode(bytes);
+  }
+
+  /** A version 1 wire transaction in the SIMD-0385 layout: message first, signatures last. */
+  function realVersion1Transaction(): string {
+    const bytes = new Uint8Array(1 + 3 + 4 + 32 + 1 + 1 + 32 + 64);
+    bytes.set([0x81, 1, 0, 0], 0);
+    bytes[40] = 0; // NumInstructions
+    bytes[41] = 1; // NumAddresses (the fee payer)
+    bytes.fill(7, 42, 74);
+    return getBase64Codec().decode(bytes);
+  }
+
+  const version1Wires: Array<[string, () => Promise<string>]> = [
+    [
+      "retagged 0x81 prefix",
+      async () => retagMessageVersion((await exactPayment()).transaction, 0x81),
+    ],
+    ["SIMD-0385 layout", async () => realVersion1Transaction()],
+  ];
+
+  it.each(version1Wires)("peeks version 1 from a %s", async (_name, build) => {
+    expect(peekWireTransactionVersion(await build())).toBe(1);
+  });
+
+  it.each(version1Wires)(
+    "exact verify and settle reject a %s before any signing",
+    async (_name, build) => {
+      const { requirements } = await exactPayment();
+      const transaction = await build();
+      const payload: PaymentPayload = {
+        x402Version: 2,
+        resource: { url: "http://example.com/p", description: "", mimeType: "application/json" },
+        accepted: requirements,
+        payload: { transaction },
+      };
+      const signer = facilitatorSigner();
+      const facilitator = new ExactSvmFacilitatorScheme(signer);
+
+      const verified = await facilitator.verify(payload, requirements);
+      expect(verified.isValid).toBe(false);
+      expect(verified.invalidReason).toBe(Errors.ErrUnsupportedTransactionVersion);
+
+      const settled = await facilitator.settle(payload, requirements);
+      expect(settled.success).toBe(false);
+      expect(settled.errorReason).toBe(Errors.ErrUnsupportedTransactionVersion);
+      expect(signer.signTransactions).not.toHaveBeenCalled();
+      expect(signer.getRpcForNetwork).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(version1Wires)(
+    "legacy x402 v1 exact verify and settle reject a %s before any signing",
+    async (_name, build) => {
+      const transaction = await build();
+      const requirements: PaymentRequirementsV1 = {
+        scheme: "exact",
+        network: "solana-devnet",
+        asset: USDC_DEVNET_ADDRESS,
+        maxAmountRequired: "100000",
+        payTo,
+        maxTimeoutSeconds: 3600,
+        resource: "http://example.com/p",
+        description: "",
+        mimeType: "application/json",
+        extra: { feePayer: FEE_PAYER },
+      };
+      const payload: PaymentPayloadV1 = {
+        x402Version: 1,
+        scheme: "exact",
+        network: "solana-devnet",
+        payload: { transaction },
+      };
+      const signer = facilitatorSigner();
+      const facilitator = new ExactSvmSchemeV1(signer);
+
+      const verified = await facilitator.verify(payload, requirements);
+      expect(verified.isValid).toBe(false);
+      expect(verified.invalidReason).toBe(Errors.ErrUnsupportedTransactionVersion);
+
+      const settled = await facilitator.settle(payload, requirements);
+      expect(settled.success).toBe(false);
+      expect(settled.errorReason).toBe(Errors.ErrUnsupportedTransactionVersion);
+      expect(signer.signTransactions).not.toHaveBeenCalled();
+      expect(signer.getRpcForNetwork).not.toHaveBeenCalled();
+    },
+  );
+
+  it("peeks legacy and version 0 from real wire transactions", async () => {
+    const { transaction } = await exactPayment();
+    expect(peekWireTransactionVersion(transaction)).toBe(0);
+    expect(peekWireTransactionVersion(retagMessageVersion(transaction, 0x01))).toBe("legacy");
+    expect(peekWireTransactionVersion("")).toBeUndefined();
   });
 
   it("a real version 0 wire transaction reports version 0", async () => {

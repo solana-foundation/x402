@@ -42,6 +42,7 @@ import {
   decodeTransactionFromPayload,
   getTokenPayerFromTransaction,
   isAcceptedTransactionVersion,
+  peekWireTransactionVersion,
   recordPendingOrTerminal,
   transactionMessageHash,
   TransactionOnchainFailureError,
@@ -762,6 +763,20 @@ export class ExactSvmScheme implements SchemeNetworkFacilitator {
     }
 
     // Step 2: Parse and Validate Transaction Structure
+    // Read the version from the raw bytes first so a newer wire format is
+    // reported as unsupported however the installed decoder handles it.
+    const wireVersion = peekWireTransactionVersion(exactSvmPayload.transaction);
+    if (wireVersion !== undefined && !isAcceptedTransactionVersion(wireVersion)) {
+      return {
+        response: {
+          isValid: false,
+          invalidReason: Errors.ErrUnsupportedTransactionVersion,
+          payer: "",
+        },
+        verificationPath: null,
+      };
+    }
+
     let transaction;
     try {
       transaction = decodeTransactionFromPayload(exactSvmPayload);

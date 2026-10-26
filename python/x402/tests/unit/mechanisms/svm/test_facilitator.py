@@ -308,7 +308,7 @@ class TestSettle:
                 mime_type="application/json",
             ),
             accepted=requirements,
-            payload={"transaction": "pendingTransaction=="},
+            payload={"transaction": "AAAA"},
         )
 
         with patch(
@@ -326,9 +326,7 @@ class TestSettle:
         assert result.error_reason == "settlement_pending"
         assert result.transaction == "mockSignature123"
         assert (
-            facilitator._pending_store.get(
-                transaction_message_hash(_FakeTx("pendingTransaction=="))
-            )
+            facilitator._pending_store.get(transaction_message_hash(_FakeTx("AAAA")))
             == "mockSignature123"
         )
 

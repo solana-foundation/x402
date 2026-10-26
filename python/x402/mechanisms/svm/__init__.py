@@ -94,6 +94,7 @@ from .utils import (
     is_accepted_transaction_version,
     normalize_network,
     parse_amount,
+    peek_wire_transaction_version,
     resolve_transaction_version,
     validate_svm_address,
 )
@@ -182,6 +183,7 @@ __all__ = [
     "get_token_payer_from_transaction",
     "get_transaction_version",
     "is_accepted_transaction_version",
+    "peek_wire_transaction_version",
     "resolve_transaction_version",
     "extract_transaction_info",
     "derive_ata",

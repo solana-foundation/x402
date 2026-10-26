@@ -319,6 +319,29 @@ func IsAcceptedTransactionVersion(version solana.MessageVersion) bool {
 // set. An absent field means the facilitator predates advertisement and
 // accepts v0.
 func ResolveTransactionVersion(extra map[string]interface{}) (solana.MessageVersion, error) {
+	selected, err := selectTransactionVersion(extra)
+	if err != nil {
+		return 0, err
+	}
+	return messageVersionForWire(selected)
+}
+
+// messageVersionForWire maps a wire version number to solana-go's
+// MessageVersion. The two do not line up (MessageVersionLegacy is 0 and
+// MessageVersionV0 is 1), and SetVersion panics on a value solana-go does not
+// model, so every buildable version is mapped explicitly.
+func messageVersionForWire(version int) (solana.MessageVersion, error) {
+	switch version {
+	case 0:
+		return solana.MessageVersionV0, nil
+	default:
+		return 0, fmt.Errorf("%s: this client cannot build transaction version %d", ErrUnsupportedTransactionVersion, version)
+	}
+}
+
+// selectTransactionVersion returns the highest wire version shared by the
+// advertisement in extra and ClientSupportedTransactionVersions.
+func selectTransactionVersion(extra map[string]interface{}) (int, error) {
 	raw := interface{}([]int{0})
 	if extra != nil {
 		if value, ok := extra[ExtraTransactionVersions]; ok {
@@ -362,7 +385,7 @@ func ResolveTransactionVersion(extra map[string]interface{}) (solana.MessageVers
 		}
 	}
 	if selected >= 0 {
-		return solana.MessageVersion(selected + 1), nil
+		return selected, nil
 	}
 	return 0, fmt.Errorf("%s: facilitator accepts none of the transaction versions this client can build: %v", ErrUnsupportedTransactionVersion, raw)
 }

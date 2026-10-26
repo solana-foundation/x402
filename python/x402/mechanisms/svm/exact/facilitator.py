@@ -62,6 +62,7 @@ from ..utils import (
     get_token_payer_from_transaction,
     get_transaction_version,
     is_accepted_transaction_version,
+    peek_wire_transaction_version,
     transaction_message_hash,
 )
 
@@ -187,6 +188,14 @@ class ExactSvmScheme:
             )
 
         # Step 2: Parse and Validate Transaction Structure
+        # Read the version from the raw bytes first so a newer wire format is
+        # reported as unsupported however the installed solders handles it.
+        wire_version = peek_wire_transaction_version(svm_payload.transaction)
+        if wire_version is not None and not is_accepted_transaction_version(wire_version):
+            return VerifyResponse(
+                is_valid=False, invalid_reason=ERR_UNSUPPORTED_TRANSACTION_VERSION, payer=""
+            )
+
         try:
             tx = decode_transaction_from_payload(svm_payload)
         except Exception:
@@ -407,6 +416,15 @@ class ExactSvmScheme:
 
         # Parse and decode the transaction up front (no RPC calls) so we can key the
         # PendingSettlementStore on the message hash before doing any verify/sign/send work.
+        wire_version = peek_wire_transaction_version(svm_payload.transaction)
+        if wire_version is not None and not is_accepted_transaction_version(wire_version):
+            return SettleResponse(
+                success=False,
+                error_reason=ERR_UNSUPPORTED_TRANSACTION_VERSION,
+                network=network,
+                payer="",
+                transaction="",
+            )
         try:
             tx = decode_transaction_from_payload(svm_payload)
             if not is_accepted_transaction_version(get_transaction_version(tx.message)):

@@ -221,6 +221,74 @@ def decode_transaction_from_payload(payload: ExactSvmPayload) -> VersionedTransa
         raise ValueError("invalid_exact_svm_payload_transaction") from e
 
 
+def peek_wire_transaction_version(transaction_b64: str) -> int | str | None:
+    """Read a wire transaction's message version from its raw bytes.
+
+    Legacy and version-0 transactions start with the compact-u16 signature
+    count (always below ``0x80`` within the size limit), then the signatures,
+    then the message, whose first byte carries the version prefix when its
+    high bit is set. Version 1 (SIMD-0385) puts the message first, so its first
+    byte is the version byte itself (``0x81``).
+
+    Verifiers call this before decoding so a newer format is reported as
+    ``unsupported_transaction_version`` whether the installed solders rejects
+    it, misreads it, or decodes it.
+
+    Args:
+        transaction_b64: The base64-encoded wire transaction.
+
+    Returns:
+        The message version (``"legacy"`` or an int), or None when the bytes
+        cannot be read or are too short to tell.
+    """
+    try:
+        raw = base64.b64decode(transaction_b64, validate=True)
+    except (ValueError, TypeError):
+        return None
+    if not raw:
+        return None
+    if raw[0] & 0x80:
+        return raw[0] & 0x7F
+    prefix_offset = 1 + 64 * raw[0]
+    if prefix_offset >= len(raw):
+        return None
+    prefix = raw[prefix_offset]
+    return prefix & 0x7F if prefix & 0x80 else "legacy"
+
+
+def compile_payment_message(
+    version: int,
+    payer: Pubkey,
+    instructions: list,
+    recent_blockhash: Hash,
+) -> MessageV0:
+    """Compile a client payment message in the negotiated transaction version.
+
+    Args:
+        version: Version returned by ``resolve_transaction_version``.
+        payer: Fee payer for the message.
+        instructions: Instructions to compile.
+        recent_blockhash: Transaction lifetime.
+
+    Returns:
+        The compiled message.
+
+    Raises:
+        ValueError: If this client has no builder for ``version``.
+    """
+    if version == 0:
+        return MessageV0.try_compile(
+            payer=payer,
+            instructions=instructions,
+            address_lookup_table_accounts=[],
+            recent_blockhash=recent_blockhash,
+        )
+    raise ValueError(
+        f"{ERR_UNSUPPORTED_TRANSACTION_VERSION}: this client cannot build transaction "
+        f"version {version!r}"
+    )
+
+
 def get_transaction_version(message: object) -> int | str:
     """Return the version of a decoded transaction message.
 

@@ -177,11 +177,18 @@ func TestResolveTransactionVersionSelectsHighestMutualVersion(t *testing.T) {
 	ClientSupportedTransactionVersions = []int{0, 1}
 	defer func() { ClientSupportedTransactionVersions = original }()
 
-	version, err := ResolveTransactionVersion(map[string]interface{}{
+	extra := map[string]interface{}{
 		ExtraTransactionVersions: []interface{}{float64(0), float64(1)},
-	})
+	}
+	selected, err := selectTransactionVersion(extra)
 	require.NoError(t, err)
-	assert.Equal(t, solana.MessageVersion(2), version)
+	assert.Equal(t, 1, selected)
+
+	// Version 1 has no solana-go mapping yet, so resolution fails closed
+	// instead of handing SetVersion a value it would panic on.
+	_, err = ResolveTransactionVersion(extra)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), ErrUnsupportedTransactionVersion)
 }
 
 // solana-go 1.14 reads any first message byte >= 0x7f as a versioned prefix and

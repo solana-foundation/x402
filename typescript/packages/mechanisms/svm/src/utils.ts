@@ -92,6 +92,38 @@ export function decodeTransactionFromPayload(svmPayload: ExactSvmPayloadV1): Tra
 }
 
 /**
+ * Read a wire transaction's message version from its raw bytes, without
+ * trusting an SDK decoder. Legacy and version 0 transactions start with the
+ * compact-u16 signature count (always below 0x80 within the size limit), then
+ * the signatures, then the message, whose first byte carries the version
+ * prefix when its high bit is set. Version 1 (SIMD-0385) puts the message
+ * first, so its first byte is the version byte itself (`0x81`).
+ *
+ * Verifiers call this before decoding so a newer format is reported as
+ * `unsupported_transaction_version` whether the installed decoder rejects it,
+ * misreads it, or decodes it.
+ *
+ * @param transactionBase64 - The base64-encoded wire transaction
+ * @returns The message version, or undefined when the bytes are too short to tell
+ */
+export function peekWireTransactionVersion(
+  transactionBase64: string,
+): number | "legacy" | undefined {
+  let bytes: Uint8Array;
+  try {
+    bytes = new Uint8Array(getBase64Encoder().encode(transactionBase64));
+  } catch {
+    return undefined;
+  }
+  if (bytes.length === 0) return undefined;
+  if (bytes[0] & 0x80) return bytes[0] & 0x7f;
+  const prefixOffset = 1 + 64 * bytes[0];
+  if (prefixOffset >= bytes.length) return undefined;
+  const prefix = bytes[prefixOffset];
+  return prefix & 0x80 ? prefix & 0x7f : "legacy";
+}
+
+/**
  * Whether a decoded transaction message's version is one the SVM verifiers
  * model. Verifiers call this before any signature or instruction check so a
  * version whose compute budget lives elsewhere (e.g. transaction v1's

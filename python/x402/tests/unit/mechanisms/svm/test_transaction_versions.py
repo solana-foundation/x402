@@ -26,6 +26,7 @@ from x402.mechanisms.svm import (
     USDC_DEVNET_ADDRESS,
     get_transaction_version,
     is_accepted_transaction_version,
+    peek_wire_transaction_version,
     resolve_transaction_version,
 )
 from x402.mechanisms.svm.exact import (
@@ -35,7 +36,7 @@ from x402.mechanisms.svm.exact import (
 )
 from x402.mechanisms.svm.exact.v1 import ExactSvmSchemeV1Client, ExactSvmSchemeV1Facilitator
 from x402.mechanisms.svm.signers import KeypairSigner
-from x402.mechanisms.svm.utils import transaction_message_hash
+from x402.mechanisms.svm.utils import compile_payment_message, transaction_message_hash
 from x402.pending_settlement_store import InMemoryPendingSettlementStore
 from x402.schemas import PaymentPayload, PaymentRequirements, ResourceInfo, SupportedKind
 from x402.schemas.v1 import PaymentPayloadV1, PaymentRequirementsV1
@@ -86,6 +87,39 @@ def _v0_tx() -> VersionedTransaction:
 
 def _tx_base64(tx: VersionedTransaction) -> str:
     return base64.b64encode(bytes(tx)).decode()
+
+
+def _retagged_v1_wire() -> str:
+    """A signed v0 transaction with its message prefix replaced by 0x81, as the Go tests do."""
+    raw = bytearray(bytes(_v0_tx()))
+    offset = 1 + 64 * raw[0]
+    assert raw[offset] == 0x80
+    raw[offset] = 0x81
+    return base64.b64encode(bytes(raw)).decode()
+
+
+def _simd0385_v1_wire() -> str:
+    """A version 1 wire transaction in the SIMD-0385 layout: message first, signatures last."""
+    raw = bytearray(1 + 3 + 4 + 32 + 1 + 1 + 32 + 64)
+    raw[0:4] = bytes([0x81, 1, 0, 0])
+    raw[40] = 0  # NumInstructions
+    raw[41] = 1  # NumAddresses (the fee payer)
+    raw[42:74] = bytes([7] * 32)
+    return base64.b64encode(bytes(raw)).decode()
+
+
+class CountingFacilitatorSigner(MockFacilitatorSigner):
+    def __init__(self):
+        super().__init__()
+        self.sign_calls = 0
+        self.simulate_calls = 0
+
+    def sign_transaction(self, tx_base64: str, fee_payer: str, network: str) -> str:
+        self.sign_calls += 1
+        return tx_base64
+
+    def simulate_transaction(self, tx_base64: str, network: str) -> None:
+        self.simulate_calls += 1
 
 
 class TestConstants:
@@ -163,6 +197,28 @@ class TestResolveTransactionVersion:
     def test_raises_when_v0_not_advertised_or_field_invalid(self, advertised):
         with pytest.raises(ValueError, match=f"^{ERR_UNSUPPORTED_TRANSACTION_VERSION}"):
             resolve_transaction_version({"transactionVersions": advertised})
+
+
+class TestCompilePaymentMessage:
+    def test_compiles_v0(self):
+        kp = Keypair()
+        message = compile_payment_message(
+            0,
+            payer=kp.pubkey(),
+            instructions=[_noop_instruction(kp.pubkey())],
+            recent_blockhash=Hash.from_string(FIXED_BLOCKHASH),
+        )
+        assert get_transaction_version(message) == 0
+
+    def test_refuses_a_version_it_cannot_build(self):
+        kp = Keypair()
+        with pytest.raises(ValueError, match=f"^{ERR_UNSUPPORTED_TRANSACTION_VERSION}"):
+            compile_payment_message(
+                1,
+                payer=kp.pubkey(),
+                instructions=[_noop_instruction(kp.pubkey())],
+                recent_blockhash=Hash.from_string(FIXED_BLOCKHASH),
+            )
 
 
 class TestFacilitatorSupportedExtra:
@@ -334,12 +390,13 @@ class TestClientBuildsAdvertisedVersion:
 class TestFacilitatorGate:
     """The verifier rejects any message version it does not model.
 
-    solders 0.27 cannot decode a real version 1 wire transaction, so the
-    reported version is patched to simulate an SDK that can.
+    Real version 1 wire bytes are rejected from their raw version byte before
+    solders decodes them. The patched tests simulate an SDK that decodes the
+    message and reports an unmodelled version.
     """
 
     @staticmethod
-    def _v2_pair(tx: VersionedTransaction) -> tuple[PaymentPayload, PaymentRequirements]:
+    def _v2_pair(tx: VersionedTransaction | str) -> tuple[PaymentPayload, PaymentRequirements]:
         requirements = PaymentRequirements(
             scheme="exact",
             network=SOLANA_DEVNET_CAIP2,
@@ -357,12 +414,14 @@ class TestFacilitatorGate:
                 mime_type="application/json",
             ),
             accepted=requirements,
-            payload={"transaction": _tx_base64(tx)},
+            payload={"transaction": tx if isinstance(tx, str) else _tx_base64(tx)},
         )
         return payload, requirements
 
     @staticmethod
-    def _v1_pair(tx: VersionedTransaction) -> tuple[PaymentPayloadV1, PaymentRequirementsV1]:
+    def _v1_pair(
+        tx: VersionedTransaction | str,
+    ) -> tuple[PaymentPayloadV1, PaymentRequirementsV1]:
         requirements = PaymentRequirementsV1(
             scheme="exact",
             network="solana-devnet",
@@ -379,7 +438,7 @@ class TestFacilitatorGate:
             x402_version=1,
             scheme="exact",
             network="solana-devnet",
-            payload={"transaction": _tx_base64(tx)},
+            payload={"transaction": tx if isinstance(tx, str) else _tx_base64(tx)},
         )
         return payload, requirements
 
@@ -442,6 +501,41 @@ class TestFacilitatorGate:
             result = facilitator.settle(payload, requirements)
         assert result.success is False
         assert result.error_reason == ERR_UNSUPPORTED_TRANSACTION_VERSION
+
+    @pytest.mark.parametrize(
+        "wire", [_retagged_v1_wire, _simd0385_v1_wire], ids=["retagged-0x81", "simd-0385"]
+    )
+    def test_real_v1_wire_reports_unsupported_before_signing(self, wire):
+        transaction = wire()
+        assert peek_wire_transaction_version(transaction) == 1
+
+        signer = CountingFacilitatorSigner()
+        facilitator = ExactSvmFacilitatorScheme(signer)
+        payload, requirements = self._v2_pair(transaction)
+        verified = facilitator.verify(payload, requirements)
+        assert verified.is_valid is False
+        assert verified.invalid_reason == ERR_UNSUPPORTED_TRANSACTION_VERSION
+        settled = facilitator.settle(payload, requirements)
+        assert settled.success is False
+        assert settled.error_reason == ERR_UNSUPPORTED_TRANSACTION_VERSION
+
+        v1_facilitator = ExactSvmSchemeV1Facilitator(signer)
+        v1_payload, v1_requirements = self._v1_pair(transaction)
+        verified = v1_facilitator.verify(v1_payload, v1_requirements)
+        assert verified.is_valid is False
+        assert verified.invalid_reason == ERR_UNSUPPORTED_TRANSACTION_VERSION
+        settled = v1_facilitator.settle(v1_payload, v1_requirements)
+        assert settled.success is False
+        assert settled.error_reason == ERR_UNSUPPORTED_TRANSACTION_VERSION
+
+        assert signer.sign_calls == 0
+        assert signer.simulate_calls == 0
+
+    def test_peek_reads_legacy_and_v0(self):
+        assert peek_wire_transaction_version(_tx_base64(_v0_tx())) == 0
+        assert peek_wire_transaction_version(_tx_base64(_legacy_tx())) == "legacy"
+        assert peek_wire_transaction_version("") is None
+        assert peek_wire_transaction_version("not base64!") is None
 
     @pytest.mark.parametrize("build", [_legacy_tx, _v0_tx], ids=["legacy", "v0"])
     def test_v1_verify_passes_gate_for_accepted_versions(self, build):
