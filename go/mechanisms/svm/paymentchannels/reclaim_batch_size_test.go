@@ -27,7 +27,7 @@ func TestReclaimBatchUsesEveryAvailableV1Account(t *testing.T) {
 	t.Parallel()
 
 	// fee payer + program id + one distinct channel per instruction = 64 keys.
-	feePayer, instructions := buildReclaimBatch(t, 62)
+	feePayer, instructions := buildReclaimBatch(t, DefaultMaxReclaimsPerTxV1)
 	limit := ReclaimComputeUnitLimit(len(instructions))
 	loadedLimit := ReclaimLoadedAccountsDataSizeLimit(len(instructions))
 	opts := SubmitSettleOptions{
@@ -47,7 +47,7 @@ func TestReclaimBatchUsesEveryAvailableV1Account(t *testing.T) {
 func TestReclaimBatchRejectsTheFirstAccountOverTheV1Limit(t *testing.T) {
 	t.Parallel()
 
-	feePayer, instructions := buildReclaimBatch(t, 63)
+	feePayer, instructions := buildReclaimBatch(t, DefaultMaxReclaimsPerTxV1+1)
 	limit := ReclaimComputeUnitLimit(len(instructions))
 	loadedLimit := ReclaimLoadedAccountsDataSizeLimit(len(instructions))
 	require.False(t, FacilitatorV1TransactionFits(feePayer, instructions, SubmitSettleOptions{
@@ -86,8 +86,11 @@ func TestCleanupOptionsV1ReclaimLimits(t *testing.T) {
 		opts, _ := (RentCleanupOptions{MaxReclaimsPerTx: value}).withDefaults(nil, true)
 		expected := value
 		if value <= 0 {
-			expected = DefaultMaxReclaimsPerTx
+			expected = DefaultMaxReclaimsPerTxV1
 		}
 		require.Equal(t, expected, opts.MaxReclaimsPerTx)
 	}
+
+	v0, _ := (RentCleanupOptions{}).withDefaults(nil, false)
+	require.Equal(t, DefaultMaxReclaimsPerTx, v0.MaxReclaimsPerTx)
 }

@@ -25,8 +25,14 @@ const (
 	// no facilitator-visible activity is abandon-closed. Seven days.
 	DefaultMaxIdleSecs int64 = 7 * 24 * 60 * 60
 
-	// DefaultMaxReclaimsPerTx preserves the established cleanup batch size.
+	// DefaultMaxReclaimsPerTx preserves the established v0 cleanup batch size.
 	DefaultMaxReclaimsPerTx = 8
+
+	// DefaultMaxReclaimsPerTxV1 is the v1 default: 62 reclaims sharing one
+	// fee payer and rent payer fill the 64 static-account budget (fee payer,
+	// program, one channel PDA each) within 4,096 bytes. The packer still
+	// splits a batch that exceeds the wire, account, or instruction limits.
+	DefaultMaxReclaimsPerTxV1 = 62
 
 	// MaxSafeReclaimsPerTx is the largest reclaim batch that serializes under
 	// Solana's v0 packet data size. V0 MaxReclaimsPerTx is clamped to this;
@@ -114,9 +120,12 @@ func (o RentCleanupOptions) withDefaults(configuredIdle *int64, useTransactionV1
 	if o.AbandonGraceSecs <= 0 {
 		o.AbandonGraceSecs = DefaultAbandonGraceSecs
 	}
-	if o.MaxReclaimsPerTx <= 0 {
+	switch {
+	case o.MaxReclaimsPerTx <= 0 && useTransactionV1:
+		o.MaxReclaimsPerTx = DefaultMaxReclaimsPerTxV1
+	case o.MaxReclaimsPerTx <= 0:
 		o.MaxReclaimsPerTx = DefaultMaxReclaimsPerTx
-	} else if !useTransactionV1 && o.MaxReclaimsPerTx > MaxSafeReclaimsPerTx {
+	case !useTransactionV1 && o.MaxReclaimsPerTx > MaxSafeReclaimsPerTx:
 		o.MaxReclaimsPerTx = MaxSafeReclaimsPerTx
 	}
 	if o.MaxTxsPerRun <= 0 {

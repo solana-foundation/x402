@@ -16,6 +16,10 @@ const (
 	// one cleanup transaction.
 	DefaultMaxReclaimsPerTx = paymentchannels.DefaultMaxReclaimsPerTx
 
+	// DefaultMaxReclaimsPerTxV1 is the reclaim ceiling for v1 cleanup
+	// transactions.
+	DefaultMaxReclaimsPerTxV1 = paymentchannels.DefaultMaxReclaimsPerTxV1
+
 	// MaxSafeReclaimsPerTx is the largest reclaim batch that serializes under
 	// Solana's v0 packet data size. V1 cleanup uses the actual transaction
 	// packer instead of this fixed cap.
