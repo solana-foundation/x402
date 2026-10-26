@@ -14,6 +14,7 @@ import {
   createNoopSigner,
   createTransactionMessage,
   getBase64EncodedWireTransaction,
+  getTransactionEncoder,
   partiallySignTransactionMessageWithSigners,
   pipe,
   prependTransactionMessageInstruction,
@@ -27,6 +28,7 @@ import {
   DEFAULT_COMPUTE_UNIT_LIMIT,
   DEFAULT_COMPUTE_UNIT_PRICE_MICROLAMPORTS,
   MAX_MEMO_BYTES,
+  MAX_TRANSACTION_BYTES,
   MEMO_PROGRAM_ADDRESS,
   SPLIT_TRANSFER_COMPUTE_UNITS,
 } from "../../constants";
@@ -201,6 +203,14 @@ export class ExactSvmScheme implements SchemeNetworkClient {
     );
 
     const signedTransaction = await partiallySignTransactionMessageWithSigners(tx);
+    // Each split adds a transfer and possibly an ATA creation (§5.2); fail
+    // here with the reason rather than send a transaction that cannot land.
+    const size = getTransactionEncoder().encode(signedTransaction).byteLength;
+    if (size > MAX_TRANSACTION_BYTES) {
+      throw new Error(
+        `Transaction is ${size} bytes, over the ${MAX_TRANSACTION_BYTES}-byte limit; reduce extra.splits or ATA creations`,
+      );
+    }
     const base64EncodedWireTransaction = getBase64EncodedWireTransaction(signedTransaction);
 
     const payload: ExactSvmPayloadV2 = {

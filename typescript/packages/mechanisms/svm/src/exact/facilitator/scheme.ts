@@ -1413,12 +1413,16 @@ export class ExactSvmScheme implements SchemeNetworkFacilitator {
       const transferIx = instructions[firstTransfer + i];
       const programAddress = transferIx.programAddress.toString();
       const ixData = transferIx.data;
+      // Exactly 10 data bytes and 4 accounts: trailing multisig signer
+      // accounts would let the transfer's authority be something other than
+      // the account the payer signed with.
       if (
         (programAddress !== TOKEN_PROGRAM_ADDRESS.toString() &&
           programAddress !== TOKEN_2022_PROGRAM_ADDRESS.toString()) ||
         !ixData ||
-        ixData.length < 10 ||
-        ixData[0] !== IX_TOKEN_TRANSFER_CHECKED
+        ixData.length !== 10 ||
+        ixData[0] !== IX_TOKEN_TRANSFER_CHECKED ||
+        (transferIx.accounts ?? []).length !== 4
       ) {
         return fail(Errors.ErrNoTransferInstruction, payer);
       }
@@ -1478,6 +1482,7 @@ export class ExactSvmScheme implements SchemeNetworkFacilitator {
         {
           asset: requirements.asset,
           markedOwners: new Set(legs.filter(l => l.ataCreationRequired).map(l => l.owner)),
+          tokenProgram,
         },
       );
     } catch (error) {

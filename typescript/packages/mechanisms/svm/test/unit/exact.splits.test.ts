@@ -10,6 +10,7 @@ import {
   getTransferCheckedInstruction,
 } from "@solana-program/token-2022";
 import {
+  AccountRole,
   appendTransactionMessageInstructions,
   createNoopSigner,
   createTransactionMessage,
@@ -45,6 +46,7 @@ import {
   ASSOCIATED_TOKEN_PROGRAM_ADDRESS,
   MEMO_PROGRAM_ADDRESS,
   SOLANA_DEVNET_CAIP2,
+  TOKEN_2022_PROGRAM_ADDRESS,
   TOKEN_PROGRAM_ADDRESS,
 } from "../../src/constants";
 import { USDC_DEVNET_ADDRESS } from "../../src/defaultAssets";
@@ -558,6 +560,90 @@ describe("exact facilitator with splits", () => {
     expect(await facilitator.verify(payment(req, shortSplit), req)).toMatchObject({
       isValid: false,
       invalidReason: Errors.ErrAmountMismatch,
+    });
+  });
+
+  it("fits and verifies eight splits, and refuses a charge over the size limit", async () => {
+    const p = await parties();
+    const recipients = await Promise.all(Array.from({ length: 8 }, () => generateKeyPairSigner()));
+    const eight = requirements(p, {
+      splits: recipients.map(r => ({ payTo: r.address, amount: "1000" })),
+    });
+    const tx = await clientTransaction(p, eight);
+    const facilitator = new ExactSvmFacilitator(facilitatorSigner(p.feePayer.address), undefined, {
+      maxSplits: 8,
+      ataCreationSponsored: true,
+    });
+    expect(await facilitator.verify(payment(eight, tx), eight)).toMatchObject({ isValid: true });
+
+    const withCreates = requirements(p, {
+      ataCreationRequired: true,
+      splits: recipients.map(r => ({
+        payTo: r.address,
+        amount: "1000",
+        ataCreationRequired: true,
+      })),
+    });
+    const client = new ExactSvmClient(p.payer, { approveSplits: () => true });
+    await expect(client.createPaymentPayload(2, withCreates)).rejects.toThrow(/1232-byte limit/);
+  });
+
+  it("rejects a CreateIdempotent under a different token program than the transfers", async () => {
+    const p = await parties();
+    const req = requirements(p, { ataCreationRequired: true });
+    const [ata2022] = await findAssociatedTokenPda({
+      owner: p.merchant.address,
+      mint: USDC_DEVNET_ADDRESS as Address,
+      tokenProgram: TOKEN_2022_PROGRAM_ADDRESS as Address,
+    });
+    const create = getCreateAssociatedTokenIdempotentInstruction({
+      payer: createNoopSigner(p.feePayer.address),
+      ata: ata2022,
+      owner: p.merchant.address,
+      mint: USDC_DEVNET_ADDRESS as Address,
+      tokenProgram: TOKEN_2022_PROGRAM_ADDRESS as Address,
+    });
+    const tx = await buildTransaction(p, [
+      create,
+      await transfer(p, p.merchant.address, 1_000_000n),
+      await transfer(p, p.platform.address, 40_000n),
+      await transfer(p, p.referrer.address, 10_000n),
+      memo("nonce"),
+    ]);
+    const facilitator = new ExactSvmFacilitator(facilitatorSigner(p.feePayer.address), undefined, {
+      maxSplits: 8,
+      ataCreationSponsored: true,
+    });
+    expect(await facilitator.verify(payment(req, tx), req)).toMatchObject({
+      isValid: false,
+      invalidReason: Errors.ErrSplitAtaCreationNotAuthorized,
+    });
+  });
+
+  it("rejects a split transfer carrying trailing multisig signer accounts", async () => {
+    const p = await parties();
+    const req = requirements(p);
+    const extraSigner = await generateKeyPairSigner();
+    const base = await transfer(p, p.platform.address, 40_000n);
+    const withSigner: Instruction = {
+      ...base,
+      accounts: [
+        ...(base.accounts ?? []),
+        { address: extraSigner.address, role: AccountRole.READONLY_SIGNER, signer: extraSigner },
+      ] as never,
+    };
+    const tx = await buildTransaction(p, [
+      await transfer(p, p.merchant.address, 1_000_000n),
+      withSigner,
+      await transfer(p, p.referrer.address, 10_000n),
+      memo("nonce"),
+    ]);
+    const facilitator = new ExactSvmFacilitator(facilitatorSigner(p.feePayer.address), undefined, {
+      maxSplits: 8,
+    });
+    expect(await facilitator.verify(payment(req, tx), req)).toMatchObject({
+      isValid: false,
+      invalidReason: Errors.ErrNoTransferInstruction,
     });
   });
 

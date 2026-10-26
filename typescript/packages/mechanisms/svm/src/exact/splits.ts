@@ -299,6 +299,7 @@ export function isAtaProgramInstruction(ix: InstructionView): boolean {
  * @param ctx.feePayer - Facilitator fee payer, the only allowed funding payer
  * @param ctx.markedOwners - Owners marked `ataCreationRequired`
  * @param ctx.createdOwners - Owners already created in this transaction (mutated)
+ * @param ctx.tokenProgram - Token program the transfers use, when known
  * @returns The owner and token program of the created ATA
  * @throws SplitsError when the instruction is not an authorized creation
  */
@@ -309,6 +310,7 @@ export async function validateAtaCreation(
     feePayer: string;
     markedOwners: ReadonlySet<string>;
     createdOwners: Set<string>;
+    tokenProgram?: string;
   },
 ): Promise<{ owner: string; tokenProgram: string }> {
   const reject = (detail: string): never => {
@@ -338,6 +340,9 @@ export async function validateAtaCreation(
   if (systemProgram !== SYSTEM_PROGRAM_ADDRESS || !TOKEN_PROGRAMS.has(tokenProgram)) {
     reject("CreateIdempotent has unexpected program accounts");
   }
+  if (ctx.tokenProgram && tokenProgram !== ctx.tokenProgram) {
+    reject("CreateIdempotent token program differs from the transfers'");
+  }
   if (ata !== (await deriveAta(owner, ctx.asset, tokenProgram))) {
     reject("CreateIdempotent account is not the owner's ATA");
   }
@@ -356,13 +361,14 @@ export async function validateAtaCreation(
  * @param ctx - ATA creation context, see {@link validateAtaCreation}
  * @param ctx.asset - Required mint
  * @param ctx.markedOwners - Owners marked `ataCreationRequired`
+ * @param ctx.tokenProgram - Token program the transfers use, when known
  * @returns The owners whose ATAs the transaction creates
  * @throws SplitsError or Error when isolation is violated
  */
 export async function assertFeePayerIsolatedWithAtaCreation(
   instructions: ReadonlyArray<InstructionView>,
   feePayer: string,
-  ctx: { asset: string; markedOwners: ReadonlySet<string> },
+  ctx: { asset: string; markedOwners: ReadonlySet<string>; tokenProgram?: string },
 ): Promise<Set<string>> {
   const createdOwners = new Set<string>();
   for (const ix of instructions) {
