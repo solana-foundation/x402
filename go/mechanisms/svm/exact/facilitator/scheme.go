@@ -27,6 +27,20 @@ type Config struct {
 	MaxPriorityFeeMicroLamports            *uint64
 	MaxComputeUnits                        *uint32
 	MaxRequiredSignatures                  *uint8
+
+	// MaxSplits is the maximum number of extra.splits entries accepted
+	// (scheme_exact_svm.md §5), 0-8. Advertised as maxSplits in /supported;
+	// requirements with more splits are rejected with split_count_exceeded.
+	// Default 0: splits are neither accepted nor advertised.
+	MaxSplits int
+
+	// AtaCreationSponsored makes the fee payer fund CreateIdempotent for
+	// recipients marked ataCreationRequired (about 0.002 SOL of rent each).
+	// Advertised as ataCreationSponsored in /supported. Rent is not bounded
+	// over time: an owner can close its ATA and the next charge pays again, so
+	// operators enabling this should rate-limit or price sponsored creations.
+	// Default false.
+	AtaCreationSponsored bool
 }
 
 // ExactSvmScheme implements the SchemeNetworkFacilitator interface for SVM (Solana) exact payments (V2)
@@ -42,6 +56,12 @@ type verifyResult struct {
 	tx              *solana.Transaction
 	smartWallet     bool
 	matchedTransfer *transferCheckedInfo
+	// legs is set when the requirements use splits (§5).
+	legs []svm.PaymentLeg
+	// legTransfers is, with splits on Path 2, the transfer matched to each leg.
+	legTransfers []transferCheckedInfo
+	// topLevelTransfers is, with splits on Path 2, the top-level transfers.
+	topLevelTransfers []transferCheckedInfo
 }
 
 // NewExactSvmScheme creates a new ExactSvmScheme.
@@ -63,6 +83,9 @@ func NewExactSvmScheme(signer svm.FacilitatorSvmSigner, config ...*Config) *Exac
 	}
 	if cfg.SmartWalletMaxComputeUnits != nil {
 		assertPositive("smartWalletMaxComputeUnits", int64(*cfg.SmartWalletMaxComputeUnits))
+	}
+	if cfg.MaxSplits < 0 || cfg.MaxSplits > svm.MaxSplits {
+		panic(fmt.Sprintf("exact svm facilitator: maxSplits must be between 0 and %d, received %d", svm.MaxSplits, cfg.MaxSplits))
 	}
 
 	cache := cfg.SettlementCache
@@ -125,6 +148,13 @@ func (f *ExactSvmScheme) GetExtra(network x402.Network) map[string]interface{} {
 		extra["features"] = map[string]interface{}{
 			"smartWalletSupported": true,
 		}
+	}
+	// Split capabilities fail closed: absent keys mean no support (§5.5).
+	if f.config.MaxSplits > 0 {
+		extra["maxSplits"] = f.config.MaxSplits
+	}
+	if f.config.AtaCreationSponsored {
+		extra["ataCreationSponsored"] = true
 	}
 	return extra
 }
@@ -203,6 +233,23 @@ func (f *ExactSvmScheme) verify(
 		return nil, x402.NewVerifyError(ErrFeePayerNotManaged, "", fmt.Sprintf("feePayer not managed: %s", feePayerStr))
 	}
 
+	// Splits (§5): validate the terms and check them against what this
+	// facilitator advertises before looking at the transaction.
+	var legs []svm.PaymentLeg
+	if svm.UsesSplitTerms(requirements) {
+		parsed, err := svm.ParsePaymentLegs(requirements)
+		if err == nil {
+			err = svm.AssertWithinCapabilities(parsed, svm.SplitCapabilities{
+				MaxSplits:            f.config.MaxSplits,
+				AtaCreationSponsored: f.config.AtaCreationSponsored,
+			})
+		}
+		if err != nil {
+			return nil, splitVerifyError(err, "")
+		}
+		legs = parsed
+	}
+
 	// Parse payload
 	solanaPayload, err := svm.PayloadFromMap(payload.Payload)
 	if err != nil {
@@ -227,17 +274,30 @@ func (f *ExactSvmScheme) verify(
 		return nil, x402.NewVerifyError(err.Error(), "", err.Error())
 	}
 
-	staticErr := f.verifyStaticPath(ctx, tx, requirements, signerAddressStrs)
-	if staticErr == nil {
-		payer, _ := svm.GetTokenPayerFromTransaction(tx)
-		return &verifyResult{
-			response: &x402.VerifyResponse{IsValid: true, Payer: payer},
-			tx:       tx,
-		}, nil
+	var staticErr error
+	if legs != nil {
+		payer, err := f.verifyStaticSplitPath(ctx, tx, requirements, signerAddressStrs, legs)
+		if err == nil {
+			return &verifyResult{
+				response: &x402.VerifyResponse{IsValid: true, Payer: payer},
+				tx:       tx,
+				legs:     legs,
+			}, nil
+		}
+		staticErr = err
+	} else {
+		staticErr = f.verifyStaticPath(ctx, tx, requirements, signerAddressStrs)
+		if staticErr == nil {
+			payer, _ := svm.GetTokenPayerFromTransaction(tx)
+			return &verifyResult{
+				response: &x402.VerifyResponse{IsValid: true, Payer: payer},
+				tx:       tx,
+			}, nil
+		}
 	}
 
 	if f.config.EnableSmartWalletVerification && isLayoutRecoverable(staticErr) {
-		if err := f.assertSmartWalletAllowlist(tx); err != nil {
+		if err := f.assertSmartWalletAllowlist(tx, legs != nil); err != nil {
 			return nil, err
 		}
 		feePayer, err := solana.PublicKeyFromBase58(feePayerStr)
@@ -254,16 +314,19 @@ func (f *ExactSvmScheme) verify(
 			maxPriorityFee = *f.config.SmartWalletMaxPriorityFeeMicroLamports
 		}
 		matched, err := verifySmartWalletTransaction(
-			ctx, tx, requirements, caps, feePayer, signerAddressStrs, maxCU, maxPriorityFee,
+			ctx, tx, requirements, caps, feePayer, signerAddressStrs, maxCU, maxPriorityFee, legs,
 		)
 		if err != nil {
 			return nil, err
 		}
 		return &verifyResult{
-			response:        &x402.VerifyResponse{IsValid: true, Payer: matched.authority.String()},
-			tx:              tx,
-			smartWallet:     true,
-			matchedTransfer: matched,
+			response:          &x402.VerifyResponse{IsValid: true, Payer: matched.payer},
+			tx:                tx,
+			smartWallet:       true,
+			matchedTransfer:   matched.matched,
+			legs:              legs,
+			legTransfers:      matched.legTransfers,
+			topLevelTransfers: matched.topLevel,
 		}, nil
 	}
 
@@ -291,7 +354,11 @@ func isLayoutRecoverable(err error) bool {
 	}
 }
 
-func (f *ExactSvmScheme) assertSmartWalletAllowlist(tx *solana.Transaction) error {
+// assertSmartWalletAllowlist checks every top-level program against the
+// wallet-program allowlist. With splits, the ATA program is exempt too
+// (§2.2.2); every one of its instructions is then validated as a §5.4
+// CreateIdempotent by the fee payer isolation check.
+func (f *ExactSvmScheme) assertSmartWalletAllowlist(tx *solana.Transaction, allowAtaProgram bool) error {
 	allowed := defaultSmartWalletAllowedPrograms
 	if len(f.config.SmartWalletAllowedPrograms) > 0 {
 		allowed = f.config.SmartWalletAllowedPrograms
@@ -307,6 +374,9 @@ func (f *ExactSvmScheme) assertSmartWalletAllowlist(tx *solana.Transaction) erro
 			return x402.NewVerifyError(ErrSmartWalletProgramNotAllowed, "", err.Error())
 		}
 		if programID.Equals(solana.ComputeBudget) || programID.Equals(memoPubkey) {
+			continue
+		}
+		if allowAtaProgram && programID.Equals(solana.SPLAssociatedTokenAccountProgramID) {
 			continue
 		}
 		if _, ok := allowedSet[programID.String()]; !ok {
@@ -509,7 +579,7 @@ func (f *ExactSvmScheme) Settle(
 			// block reconciliation (the payload already broadcast successfully).
 			payer, _ := svm.GetTokenPayerFromTransaction(tx)
 			isSmartWallet := f.config.EnableSmartWalletVerification && !hasStaticTransferLayout(tx)
-			return f.reconcilePendingSettlement(ctx, txKey, sigStr, payer, network, string(requirements.Network), isSmartWallet, requirements)
+			return f.reconcilePendingSettlement(ctx, txKey, sigStr, payer, network, string(requirements.Network), isSmartWallet, requirements, tx)
 		}
 	}
 
@@ -557,6 +627,7 @@ func (f *ExactSvmScheme) Settle(
 		signErr       error
 		preBalance    uint64
 		hasPreBalance bool
+		legBalances   []legBalance
 	)
 	var wg sync.WaitGroup
 	wg.Add(1)
@@ -565,7 +636,16 @@ func (f *ExactSvmScheme) Settle(
 		// Sign with the feePayer's signer
 		signErr = f.signer.SignTransaction(ctx, tx, expectedFeePayer, string(requirements.Network))
 	}()
-	if result.smartWallet && result.matchedTransfer != nil {
+	if result.smartWallet && result.legTransfers != nil {
+		// With splits, snapshot every leg's ATA for the balance-delta fallback.
+		if caps, ok := f.signer.(svm.SmartWalletRPCCapabilities); ok {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				legBalances = snapshotLegBalances(ctx, caps, result.legTransfers, string(requirements.Network))
+			}()
+		}
+	} else if result.smartWallet && result.matchedTransfer != nil {
 		if caps, ok := f.signer.(svm.SmartWalletRPCCapabilities); ok {
 			wg.Add(1)
 			dest := result.matchedTransfer.destination
@@ -606,7 +686,15 @@ func (f *ExactSvmScheme) Settle(
 
 	if result.smartWallet {
 		caps, ok := f.signer.(svm.SmartWalletRPCCapabilities)
-		if !ok || !f.postSettlementVerified(ctx, caps, signature, string(requirements.Network), requirements, result, preBalance, hasPreBalance) {
+		verified := false
+		if ok {
+			if result.legs != nil {
+				verified = f.postSettlementLegsVerified(ctx, caps, signature, string(requirements.Network), requirements, result.legs, result.topLevelTransfers, legBalances)
+			} else {
+				verified = f.postSettlementVerified(ctx, caps, signature, string(requirements.Network), requirements, result, preBalance, hasPreBalance)
+			}
+		}
+		if !verified {
 			return nil, x402.NewSettleError(ErrPostSettlementTransferNotConfirmed, result.response.Payer, network, signature.String(), ErrPostSettlementTransferNotConfirmed)
 		}
 	}
@@ -641,6 +729,45 @@ func (f *ExactSvmScheme) postSettlementVerified(
 	return verifyPostSettlement(ctx, caps, signature, network, requirements, publicKeysToStrings(f.signer.GetAddresses(ctx, network)), balanceBefore, knownATA)
 }
 
+// snapshotLegBalances reads each matched leg ATA's balance before broadcast,
+// in leg order. A missing or unreadable account has a nil balance.
+func snapshotLegBalances(ctx context.Context, caps svm.SmartWalletRPCCapabilities, transfers []transferCheckedInfo, network string) []legBalance {
+	balances := make([]legBalance, len(transfers))
+	for i, t := range transfers {
+		balances[i] = legBalance{ata: t.destination}
+		if b, exists, err := caps.GetTokenAccountBalance(ctx, t.destination, network); err == nil && exists {
+			before := b
+			balances[i].before = &before
+		}
+	}
+	return balances
+}
+
+// postSettlementLegsVerified confirms every leg of a split charge landed
+// on-chain (§3.4).
+func (f *ExactSvmScheme) postSettlementLegsVerified(
+	ctx context.Context,
+	caps svm.SmartWalletRPCCapabilities,
+	signature solana.Signature,
+	network string,
+	requirements types.PaymentRequirements,
+	legs []svm.PaymentLeg,
+	topLevel []transferCheckedInfo,
+	balances []legBalance,
+) bool {
+	asset, err := solana.PublicKeyFromBase58(requirements.Asset)
+	if err != nil {
+		return false
+	}
+	destinations, err := deriveLegDestinations(legs, asset)
+	if err != nil {
+		return false
+	}
+	verified, _ := verifyPostSettlementLegs(ctx, caps, signature, network, destinations, asset,
+		publicKeysToStrings(f.signer.GetAddresses(ctx, network)), topLevel, balances)
+	return verified
+}
+
 func hasStaticTransferLayout(tx *solana.Transaction) bool {
 	n := len(tx.Message.Instructions)
 	if n < 3 || n > 7 {
@@ -672,6 +799,7 @@ func (f *ExactSvmScheme) reconcilePendingSettlement(
 	networkStr string,
 	isSmartWallet bool,
 	requirements types.PaymentRequirements,
+	tx *solana.Transaction,
 ) (*x402.SettleResponse, error) {
 	signature, err := solana.SignatureFromBase58(sigStr)
 	if err != nil {
@@ -688,7 +816,19 @@ func (f *ExactSvmScheme) reconcilePendingSettlement(
 
 	if isSmartWallet {
 		caps, ok := f.signer.(svm.SmartWalletRPCCapabilities)
-		if !ok || !verifyPostSettlement(ctx, caps, signature, networkStr, requirements, publicKeysToStrings(f.signer.GetAddresses(ctx, networkStr)), nil, nil) {
+		verified := false
+		if ok {
+			// No pre-broadcast balance snapshot is available here, so only the
+			// innerInstructions method applies; the balance-delta fallback is skipped.
+			if svm.UsesSplitTerms(requirements) {
+				legs, legsErr := svm.ParsePaymentLegs(requirements)
+				verified = legsErr == nil &&
+					f.postSettlementLegsVerified(ctx, caps, signature, networkStr, requirements, legs, topLevelTransfersOf(tx), nil)
+			} else {
+				verified = verifyPostSettlement(ctx, caps, signature, networkStr, requirements, publicKeysToStrings(f.signer.GetAddresses(ctx, networkStr)), nil, nil)
+			}
+		}
+		if !verified {
 			return nil, x402.NewSettleError(ErrPostSettlementTransferNotConfirmed, payer, network, sigStr, ErrPostSettlementTransferNotConfirmed)
 		}
 	}
@@ -831,4 +971,15 @@ func (f *ExactSvmScheme) verifyTransferInstruction(
 	}
 
 	return nil
+}
+
+// topLevelTransfersOf returns the top-level TransferChecked instructions of
+// a decoded transaction. A transaction using Address Lookup Tables that are
+// not resolved locally yields only the transfers whose accounts resolve, so
+// callers fall back to the confirmed CPI trace for the rest.
+func topLevelTransfersOf(tx *solana.Transaction) []transferCheckedInfo {
+	if tx == nil {
+		return nil
+	}
+	return extractTopLevelTransfers(tx)
 }
