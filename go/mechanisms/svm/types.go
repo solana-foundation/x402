@@ -395,6 +395,19 @@ type AssetInfo struct {
 // ClientConfig contains optional client configuration
 type ClientConfig struct {
 	RPCURL string // Custom RPC URL
+	// TransactionVersions narrows the transaction message versions this client
+	// builds (entries 0 and/or 1), for a signer that cannot sign version 1.
+	// Nil means ClientSupportedTransactionVersions.
+	TransactionVersions []int
+}
+
+// ClientTransactionVersions returns the configured client version set, or nil
+// for the default.
+func (c *ClientConfig) ClientTransactionVersions() []int {
+	if c == nil {
+		return nil
+	}
+	return c.TransactionVersions
 }
 
 // ServerConfig contains optional server configuration.

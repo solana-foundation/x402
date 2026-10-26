@@ -5,7 +5,6 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
-	"math"
 	"time"
 
 	solana "github.com/gagliardetto/solana-go"
@@ -39,7 +38,7 @@ const (
 	// budget for normal settlement. Four MiB covers the mainnet Token-2022
 	// program-data account (about 1.4 MiB) with room for the remaining programs
 	// and accounts loaded by a settlement.
-	DefaultSettleLoadedAccountsDataSizeLimit uint32 = 4_194_304
+	DefaultSettleLoadedAccountsDataSizeLimit = svm.DefaultLoadedAccountsDataSizeLimit
 
 	ReclaimLoadedAccountsDataSizeBase       uint32 = 262_144
 	ReclaimLoadedAccountsDataSizePerChannel uint32 = 1_024
@@ -250,12 +249,9 @@ func BroadcastOpen(
 	openTransactionBase64 string,
 	hooks ChannelBroadcastHooks,
 ) (string, error) {
-	tx, err := svm.DecodeTransaction(openTransactionBase64)
+	tx, err := decodeChannelTransaction(openTransactionBase64, "")
 	if err != nil {
 		return "", err
-	}
-	if !svm.IsAcceptedTransactionVersion(tx.Message.GetVersion()) {
-		return "", fmt.Errorf("%s: unsupported transaction message version %d", svm.ErrUnsupportedTransactionVersion, int(tx.Message.GetVersion())-1)
 	}
 	if err := signer.SignTransaction(ctx, tx, feePayer, network); err != nil {
 		return "", err
@@ -316,12 +312,9 @@ func SimulateOpenSettleDistribute(
 	openTransactionBase64 string,
 	channel SettlementSimChannel,
 ) error {
-	openTx, err := svm.DecodeTransaction(openTransactionBase64)
+	openTx, err := decodeChannelTransaction(openTransactionBase64, "")
 	if err != nil {
 		return err
-	}
-	if !svm.IsAcceptedTransactionVersion(openTx.Message.GetVersion()) {
-		return fmt.Errorf("%s: unsupported transaction message version %d", svm.ErrUnsupportedTransactionVersion, int(openTx.Message.GetVersion())-1)
 	}
 	computeLimitIx, err := computebudget.NewSetComputeUnitLimitInstructionBuilder().
 		SetUnits(maxTransactionComputeUnits).
@@ -648,20 +641,6 @@ func buildSettleComputeBudget(opts SubmitSettleOptions) ([]solana.Instruction, e
 	return append(instructions, priceIx), nil
 }
 
-func priorityFeeLamports(computeUnitLimit uint32, microLamports uint64) (uint64, error) {
-	whole := microLamports / 1_000_000
-	if computeUnitLimit > 0 && whole > math.MaxUint64/uint64(computeUnitLimit) {
-		return 0, fmt.Errorf("priority fee overflows uint64")
-	}
-	fee := whole * uint64(computeUnitLimit)
-	remainder := microLamports % 1_000_000
-	fraction := (remainder*uint64(computeUnitLimit) + 999_999) / 1_000_000
-	if fee > math.MaxUint64-fraction {
-		return 0, fmt.Errorf("priority fee overflows uint64")
-	}
-	return fee + fraction, nil
-}
-
 func buildSettleTransactionConfig(opts SubmitSettleOptions) (solana.TransactionConfig, error) {
 	limit := DefaultSettleComputeUnitLimit
 	if opts.ComputeUnitLimit != nil {
@@ -681,7 +660,7 @@ func buildSettleTransactionConfig(opts SubmitSettleOptions) (solana.TransactionC
 	if price == 0 {
 		return config, nil
 	}
-	fee, err := priorityFeeLamports(limit, price)
+	fee, err := svm.PriorityFeeLamports(limit, price)
 	if err != nil {
 		return solana.TransactionConfig{}, err
 	}

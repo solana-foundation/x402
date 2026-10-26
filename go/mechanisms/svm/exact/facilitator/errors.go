@@ -26,15 +26,21 @@ const (
 	ErrComputePriceInstruction        = "invalid_exact_solana_payload_transaction_instructions_compute_price_instruction"
 	ErrComputePriceInstructionTooHigh = "invalid_exact_solana_payload_transaction_instructions_compute_price_instruction_too_high"
 	ErrNoTransferInstruction          = "invalid_exact_solana_payload_no_transfer_instruction"
-	ErrFeePayerTransferringFunds      = "invalid_exact_solana_payload_transaction_fee_payer_transferring_funds"
-	ErrMintMismatch                   = "invalid_exact_solana_payload_mint_mismatch"
-	ErrRecipientMismatch              = "invalid_exact_solana_payload_recipient_mismatch"
-	ErrAmountMismatch                 = "invalid_exact_solana_payload_amount_mismatch"
-	ErrInvalidFeePayer                = "invalid_exact_solana_invalid_fee_payer"
-	ErrTransactionSigningFailed       = "invalid_exact_solana_transaction_signing_failed"
-	ErrTransactionSimulationFailed    = "invalid_exact_solana_transaction_simulation_failed"
-	ErrRecipientATAMissing            = "invalid_exact_solana_recipient_ata_missing"
-	ErrRecipientATAWrongProgramOwner  = "invalid_exact_solana_recipient_ata_wrong_program_owner"
+	// Version-1 (SIMD-0385) message config errors. A missing or excessive
+	// computeUnitLimit and an excessive priorityFee reuse the compute limit and
+	// compute price codes above.
+	ErrLoadedAccountsDataSizeLimitMissing = "invalid_exact_solana_payload_transaction_loaded_accounts_data_size_limit_missing"
+	ErrTransactionV1ComputeBudgetIx       = "invalid_exact_solana_payload_transaction_v1_compute_budget_instruction"
+	ErrTransactionV1HeapSize              = "invalid_exact_solana_payload_transaction_v1_heap_size"
+	ErrFeePayerTransferringFunds          = "invalid_exact_solana_payload_transaction_fee_payer_transferring_funds"
+	ErrMintMismatch                       = "invalid_exact_solana_payload_mint_mismatch"
+	ErrRecipientMismatch                  = "invalid_exact_solana_payload_recipient_mismatch"
+	ErrAmountMismatch                     = "invalid_exact_solana_payload_amount_mismatch"
+	ErrInvalidFeePayer                    = "invalid_exact_solana_invalid_fee_payer"
+	ErrTransactionSigningFailed           = "invalid_exact_solana_transaction_signing_failed"
+	ErrTransactionSimulationFailed        = "invalid_exact_solana_transaction_simulation_failed"
+	ErrRecipientATAMissing                = "invalid_exact_solana_recipient_ata_missing"
+	ErrRecipientATAWrongProgramOwner      = "invalid_exact_solana_recipient_ata_wrong_program_owner"
 
 	// Memo verification errors
 	ErrMemoMismatch = "invalid_exact_solana_payload_memo_mismatch"

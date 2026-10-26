@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"math"
 	"math/rand/v2"
 	"strconv"
 	"sync"
@@ -223,6 +224,11 @@ func (f *ExactSvmScheme) verify(
 	}
 
 	// Step 2: Parse and Validate Transaction Structure
+	// Read the version from the raw bytes first so a newer wire format is
+	// reported as unsupported however the installed decoder handles it.
+	if wireVersion, ok := svm.PeekWireTransactionVersion(solanaPayload.Transaction); ok && !svm.IsAcceptedWireTransactionVersion(wireVersion) {
+		return nil, x402.NewVerifyError(ErrUnsupportedTransactionVersion, "", fmt.Sprintf("unsupported transaction message version %d", wireVersion))
+	}
 	tx, err := svm.DecodeTransaction(solanaPayload.Transaction)
 	if err != nil {
 		return nil, x402.NewVerifyError(ErrTransactionCouldNotBeDecoded, "", err.Error())
@@ -231,7 +237,7 @@ func (f *ExactSvmScheme) verify(
 	// Message version gate, before any signature or instruction check: every
 	// check below reads its sponsorship policy from version-specific structure.
 	if !svm.IsAcceptedTransactionVersion(tx.Message.GetVersion()) {
-		return nil, x402.NewVerifyError(ErrUnsupportedTransactionVersion, "", fmt.Sprintf("unsupported transaction message version %d", int(tx.Message.GetVersion())-1))
+		return nil, x402.NewVerifyError(ErrUnsupportedTransactionVersion, "", fmt.Sprintf("unsupported transaction message version %d", svm.WireTransactionVersion(tx.Message.GetVersion())))
 	}
 
 	if f.config.MaxRequiredSignatures != nil && tx.Message.Header.NumRequiredSignatures > *f.config.MaxRequiredSignatures {
@@ -369,7 +375,7 @@ func (f *ExactSvmScheme) verifyStaticPath(
 	requirements types.PaymentRequirements,
 	signerAddressStrs []string,
 ) error {
-	// Allow 3-7 instructions:
+	// Legacy and version 0 allow 3-7 instructions:
 	// - 3 instructions: ComputeLimit + ComputePrice + TransferChecked
 	// - 4 instructions: ComputeLimit + ComputePrice + TransferChecked + Lighthouse or Memo
 	// - 5 instructions: ComputeLimit + ComputePrice + TransferChecked + Lighthouse + Lighthouse or Memo
@@ -377,18 +383,28 @@ func (f *ExactSvmScheme) verifyStaticPath(
 	// - 7 instructions: + a third wallet-injected Lighthouse (Phantom, see #2097)
 	// See: https://github.com/x402-foundation/x402/issues/828
 	//  and: https://github.com/x402-foundation/x402/issues/2097
+	// Version 1 carries the compute budget in its message config, so the same
+	// layout starts at the TransferChecked: 1-5 instructions.
+	transferIndex := staticTransferIndex(tx)
 	numInstructions := len(tx.Message.Instructions)
-	if numInstructions < 3 || numInstructions > 7 {
-		return x402.NewVerifyError(ErrTransactionInstructionsLength, "", fmt.Sprintf("transaction instructions length mismatch: %d < 3 or %d > 7", numInstructions, numInstructions))
+	minInstructions, maxInstructions := transferIndex+1, transferIndex+5
+	if numInstructions < minInstructions || numInstructions > maxInstructions {
+		return x402.NewVerifyError(ErrTransactionInstructionsLength, "", fmt.Sprintf("transaction instructions length mismatch: %d < %d or %d > %d", numInstructions, minInstructions, numInstructions, maxInstructions))
 	}
 
-	// Step 3: Verify Compute Budget Instructions
-	if err := f.verifyComputeLimitInstruction(tx, tx.Message.Instructions[0]); err != nil {
-		return x402.NewVerifyError(err.Error(), "", err.Error())
-	}
+	// Step 3: Verify the compute budget
+	if transferIndex == 0 {
+		if err := f.verifyTransactionV1Config(tx); err != nil {
+			return x402.NewVerifyError(err.Error(), "", err.Error())
+		}
+	} else {
+		if err := f.verifyComputeLimitInstruction(tx, tx.Message.Instructions[0]); err != nil {
+			return x402.NewVerifyError(err.Error(), "", err.Error())
+		}
 
-	if err := f.verifyComputePriceInstruction(tx, tx.Message.Instructions[1]); err != nil {
-		return x402.NewVerifyError(err.Error(), "", err.Error())
+		if err := f.verifyComputePriceInstruction(tx, tx.Message.Instructions[1]); err != nil {
+			return x402.NewVerifyError(err.Error(), "", err.Error())
+		}
 	}
 
 	// Extract payer from transaction
@@ -411,17 +427,17 @@ func (f *ExactSvmScheme) verifyStaticPath(
 	}
 
 	// Step 4: Verify Transfer Instruction
-	transfer, err := f.verifyTransferInstruction(tx, tx.Message.Instructions[2], reqStruct, signerAddressStrs)
+	transfer, err := f.verifyTransferInstruction(tx, tx.Message.Instructions[transferIndex], reqStruct, signerAddressStrs)
 	if err != nil {
 		return x402.NewVerifyError(err.Error(), payer, err.Error())
 	}
 
 	// Step 5: Verify optional instructions (if present)
 	// Allowed optional programs: Lighthouse (wallet protection) and Memo (uniqueness)
-	if numInstructions >= 4 {
+	if numInstructions > transferIndex+1 {
 		lighthousePubkey := solana.MustPublicKeyFromBase58(svm.LighthouseProgramAddress)
 		memoPubkey := solana.MustPublicKeyFromBase58(svm.MemoProgramAddress)
-		optionalInstructions := tx.Message.Instructions[3:]
+		optionalInstructions := tx.Message.Instructions[transferIndex+1:]
 		invalidReasons := []string{
 			ErrUnknownFourthInstruction,
 			ErrUnknownFifthInstruction,
@@ -518,12 +534,15 @@ func (f *ExactSvmScheme) Settle(
 	if err != nil {
 		return nil, x402.NewSettleError(ErrInvalidPayloadTransaction, "", network, "", err.Error())
 	}
+	if wireVersion, ok := svm.PeekWireTransactionVersion(solanaPayload.Transaction); ok && !svm.IsAcceptedWireTransactionVersion(wireVersion) {
+		return nil, x402.NewSettleError(ErrUnsupportedTransactionVersion, "", network, "", fmt.Sprintf("unsupported transaction message version %d", wireVersion))
+	}
 	tx, err := svm.DecodeTransaction(solanaPayload.Transaction)
 	if err != nil {
 		return nil, x402.NewSettleError(ErrInvalidPayloadTransaction, "", network, "", err.Error())
 	}
 	if !svm.IsAcceptedTransactionVersion(tx.Message.GetVersion()) {
-		return nil, x402.NewSettleError(ErrUnsupportedTransactionVersion, "", network, "", fmt.Sprintf("unsupported transaction message version %d", int(tx.Message.GetVersion())-1))
+		return nil, x402.NewSettleError(ErrUnsupportedTransactionVersion, "", network, "", fmt.Sprintf("unsupported transaction message version %d", svm.WireTransactionVersion(tx.Message.GetVersion())))
 	}
 	// Keyed on message hash (immune to mutable fee-payer sig at slot 0); shared
 	// by the duplicate-settlement check and the PendingSettlementStore below.
@@ -682,12 +701,22 @@ func (f *ExactSvmScheme) postSettlementVerified(
 	return verifyPostSettlement(ctx, caps, signature, network, requirements, publicKeysToStrings(f.signer.GetAddresses(ctx, network)), balanceBefore, knownATA)
 }
 
+// staticTransferIndex is the Path 1 position of the TransferChecked: after the
+// two ComputeBudget instructions on legacy and version 0, first on version 1.
+func staticTransferIndex(tx *solana.Transaction) int {
+	if tx.Message.GetVersion() == solana.MessageVersionV1 {
+		return 0
+	}
+	return 2
+}
+
 func hasStaticTransferLayout(tx *solana.Transaction) bool {
 	n := len(tx.Message.Instructions)
-	if n < 3 || n > 7 {
+	transferIndex := staticTransferIndex(tx)
+	if n < transferIndex+1 || n > transferIndex+5 {
 		return false
 	}
-	transfer := tx.Message.Instructions[2]
+	transfer := tx.Message.Instructions[transferIndex]
 	programID, err := tx.Message.Program(transfer.ProgramIDIndex)
 	if err != nil {
 		return false
@@ -740,6 +769,41 @@ func (f *ExactSvmScheme) reconcilePendingSettlement(
 		Network:     network,
 		Payer:       payer,
 	}, nil
+}
+
+// verifyTransactionV1Config applies the Path 1 compute caps to a version-1
+// message config (SIMD-0385), which replaces the ComputeBudget instructions.
+func (f *ExactSvmScheme) verifyTransactionV1Config(tx *solana.Transaction) error {
+	maxComputeUnits := uint32(math.MaxUint32)
+	if f.config.MaxComputeUnits != nil {
+		maxComputeUnits = *f.config.MaxComputeUnits
+	}
+	maxPrice := uint64(svm.MaxComputeUnitPriceMicrolamports)
+	if f.config.MaxPriorityFeeMicroLamports != nil {
+		maxPrice = *f.config.MaxPriorityFeeMicroLamports
+	}
+	return staticV1ConfigError(svm.ValidateTransactionV1Config(&tx.Message, maxComputeUnits, maxPrice))
+}
+
+// staticV1ConfigError maps a version-1 config violation to the Path 1 reason
+// codes the same rule carries on legacy and version 0.
+func staticV1ConfigError(violation svm.TransactionV1ConfigViolation) error {
+	switch violation {
+	case svm.TransactionV1ConfigOK:
+		return nil
+	case svm.TransactionV1ComputeBudgetInstruction:
+		return errors.New(ErrTransactionV1ComputeBudgetIx)
+	case svm.TransactionV1HeapSize:
+		return errors.New(ErrTransactionV1HeapSize)
+	case svm.TransactionV1ComputeUnitLimitMissing:
+		return errors.New(ErrComputeLimitInstruction)
+	case svm.TransactionV1ComputeUnitLimitTooHigh:
+		return errors.New(ErrComputeLimitInstructionTooHigh)
+	case svm.TransactionV1LoadedAccountsDataSizeLimitMissing:
+		return errors.New(ErrLoadedAccountsDataSizeLimitMissing)
+	default:
+		return errors.New(ErrComputePriceInstructionTooHigh)
+	}
 }
 
 // verifyComputeLimitInstruction verifies the compute unit limit instruction

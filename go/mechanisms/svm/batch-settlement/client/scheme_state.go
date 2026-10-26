@@ -114,6 +114,10 @@ func (s *BatchSvmScheme) createRefundPayload(
 	if existing == nil {
 		return types.PaymentPayload{}, ErrNoBatchChannelToRefund
 	}
+	transactionVersion, err := s.transactionVersion(requirements)
+	if err != nil {
+		return types.PaymentPayload{}, err
+	}
 	var blockhash *solana.Hash
 	if options.WithTransaction {
 		rpcClient, err := s.rpcClient(lookup.Network)
@@ -141,14 +145,15 @@ func (s *BatchSvmScheme) createRefundPayload(
 		return types.PaymentPayload{}, err
 	}
 	payload, err := BuildRefundPayload(ctx, BuildRefundArgs{
-		Payer:         s.signer,
-		FeePayer:      terms.feePayer,
-		ChannelID:     existing.tracker.ChannelID,
-		ChannelConfig: existing.tracker.ChannelConfig,
-		Voucher:       credential.voucher,
-		Authorization: credential.authorization,
-		Blockhash:     blockhash,
-		Memo:          terms.memo,
+		Payer:              s.signer,
+		FeePayer:           terms.feePayer,
+		ChannelID:          existing.tracker.ChannelID,
+		ChannelConfig:      existing.tracker.ChannelConfig,
+		Voucher:            credential.voucher,
+		Authorization:      credential.authorization,
+		Blockhash:          blockhash,
+		Memo:               terms.memo,
+		TransactionVersion: transactionVersion,
 	})
 	if err != nil {
 		return types.PaymentPayload{}, err

@@ -751,6 +751,35 @@ func TestBatchFacilitatorLifecycle(t *testing.T) {
 		}
 	})
 
+	t.Run("validates a real version-1 open deposit", func(t *testing.T) {
+		builtV1, err := batchclient.BuildDepositPayload(ctx, batchclient.BuildDepositArgs{
+			Payer:              payer,
+			Receiver:           receiver,
+			ReceiverAuthorizer: receiverAuthorizerAddr,
+			Mint:               mint,
+			FeePayer:           feePayerKey.PublicKey().String(),
+			TokenProgram:       solana.TokenProgramID.String(),
+			Blockhash:          solana.MustHashFromBase58(svm.USDCMainnetAddress),
+			OpenSlot:           123,
+			DepositAmount:      10_000,
+			FirstCharge:        1_000,
+			WithdrawDelay:      900,
+			TransactionVersion: solana.MessageVersionV1,
+		})
+		require.NoError(t, err)
+		openTx, err := svm.DecodeTransaction(builtV1.Payload.Deposit.Transaction)
+		require.NoError(t, err)
+		require.Equal(t, solana.MessageVersionV1, openTx.Message.GetVersion())
+
+		scheme := newScheme(t, newSigner(t), &Config{ChannelStorage: paymentchannels.NewInMemoryPaymentChannelStorage()})
+		scheme.hooks.readChannel = func(context.Context, string, string) (*generated.Channel, error) { return nil, nil }
+		req := requirements()
+		result, err := scheme.Verify(ctx, payment(builtV1.Payload, req), req, nil)
+		require.NoError(t, err)
+		require.True(t, result.IsValid, "reason=%s message=%s", result.InvalidReason, result.InvalidMessage)
+		require.Equal(t, builtV1.ChannelID, result.Extra["channelId"])
+	})
+
 	t.Run("validates real open, voucher, and refund transactions", func(t *testing.T) {
 		storage := paymentchannels.NewInMemoryPaymentChannelStorage()
 		scheme := newScheme(t, newSigner(t), &Config{ChannelStorage: storage})

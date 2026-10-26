@@ -59,9 +59,6 @@ const (
 	// OpenAccountCount is the exact number of accounts in a canonical open.
 	OpenAccountCount = 14
 
-	// maxTransactionBytes is the Solana packet limit for a serialized transaction.
-	maxTransactionBytes = 1232
-
 	// maxTransactionComputeUnits is the Solana per-transaction compute-unit maximum.
 	maxTransactionComputeUnits uint32 = 1_400_000
 )
