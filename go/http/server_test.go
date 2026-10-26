@@ -203,6 +203,13 @@ func TestProcessHTTPRequestPaymentRequired(t *testing.T) {
 	if result.Response.Headers["Cache-Control"] != "no-store" {
 		t.Errorf("Expected Cache-Control no-store, got %q", result.Response.Headers["Cache-Control"])
 	}
+	if result.Response.IsHTML {
+		t.Error("Expected non-HTML response")
+	}
+	body, ok := result.Response.Body.(map[string]string)
+	if !ok || body["error"] != "Payment required" {
+		t.Errorf("Expected body {error: Payment required}, got %#v", result.Response.Body)
+	}
 }
 
 func TestProcessHTTPRequestMalformedPaymentSignature(t *testing.T) {
@@ -775,9 +782,9 @@ func TestProcessSettlement_MechanismErrorPreservesReasonAndTransaction(t *testin
 	if result.Response.Status != 402 {
 		t.Errorf("Expected status 402, got %d", result.Response.Status)
 	}
-	body, ok := result.Response.Body.(map[string]interface{})
-	if !ok || len(body) != 0 {
-		t.Errorf("Expected empty body {}, got %v", result.Response.Body)
+	body, ok := result.Response.Body.(map[string]string)
+	if !ok || body["error"] != x402.ErrCodeSettlementFailed {
+		t.Errorf("Expected body {error: settlement_failed}, got %#v", result.Response.Body)
 	}
 	if result.Response.Headers["Cache-Control"] != "no-store" {
 		t.Errorf("Expected Cache-Control no-store, got %q", result.Response.Headers["Cache-Control"])
@@ -1328,6 +1335,73 @@ func TestDecodedPathDivergenceBypass(t *testing.T) {
 	})
 }
 
+func TestHeadRouteMatching(t *testing.T) {
+	t.Run("HEAD falls back to GET", func(t *testing.T) {
+		server := Newx402HTTPResourceServer(RoutesConfig{
+			"GET /api/premium": {Accepts: PaymentOptions{}},
+		})
+
+		if !server.RequiresPayment(HTTPRequestContext{Path: "/api/premium", Method: "HEAD"}) {
+			t.Error("expected HEAD to require payment for a GET-only route")
+		}
+	})
+
+	t.Run("explicit HEAD route takes precedence", func(t *testing.T) {
+		server := Newx402HTTPResourceServer(RoutesConfig{
+			"GET /api/premium": {
+				Accepts:     PaymentOptions{},
+				Description: "GET route",
+			},
+			"HEAD /api/premium": {
+				Accepts:     PaymentOptions{},
+				Description: "HEAD route",
+			},
+		})
+
+		config, _ := server.getRouteConfig("/api/premium", "HEAD", "")
+		if config == nil || config.Description != "HEAD route" {
+			t.Errorf("expected explicit HEAD route, got %#v", config)
+		}
+	})
+
+	t.Run("HEAD does not fall back to non-GET methods", func(t *testing.T) {
+		server := Newx402HTTPResourceServer(RoutesConfig{
+			"POST /api/premium": {Accepts: PaymentOptions{}},
+		})
+
+		if server.RequiresPayment(HTTPRequestContext{Path: "/api/premium", Method: "HEAD"}) {
+			t.Error("did not expect HEAD to match a POST-only route")
+		}
+	})
+}
+
+func TestCorsPreflightNotPaid(t *testing.T) {
+	serverFor := func(pattern string) *x402HTTPResourceServer {
+		return Newx402HTTPResourceServer(RoutesConfig{
+			pattern: {Accepts: PaymentOptions{}},
+		})
+	}
+	reqCtx := func(method string) HTTPRequestContext {
+		return HTTPRequestContext{Path: "/api/premium", Method: method}
+	}
+
+	t.Run("method-less route does not gate OPTIONS", func(t *testing.T) {
+		server := serverFor("/api/premium")
+		if server.RequiresPayment(reqCtx("OPTIONS")) {
+			t.Error("expected OPTIONS not to require payment")
+		}
+		if !server.RequiresPayment(reqCtx("GET")) {
+			t.Error("expected GET to require payment")
+		}
+	})
+
+	t.Run("explicit OPTIONS route requires payment", func(t *testing.T) {
+		if !serverFor("OPTIONS /api/premium").RequiresPayment(reqCtx("OPTIONS")) {
+			t.Error("expected explicit OPTIONS route to require payment")
+		}
+	})
+}
+
 func TestGetDisplayAmount(t *testing.T) {
 	server := Newx402HTTPResourceServer(RoutesConfig{})
 
@@ -1728,6 +1802,95 @@ func TestProcessHTTPRequest_VerifyFailureRunsEnricherWithPayload(t *testing.T) {
 	}
 	if !enricher.lastPayloadSeen {
 		t.Fatal("expected enricher to receive non-nil PaymentPayload")
+	}
+}
+
+func TestProcessHTTPRequest_VerifyFailureIncludesInvalidReasonInJSONBody(t *testing.T) {
+	ctx := context.Background()
+
+	routes := RoutesConfig{
+		"GET /api/test": {
+			Accepts: PaymentOptions{
+				{Scheme: "exact", PayTo: "0xabc", Price: "$1.00", Network: "eip155:8453"},
+			},
+		},
+	}
+
+	mockClient := &mockFacilitatorClient{
+		verify: func(context.Context, []byte, []byte) (*x402.VerifyResponse, error) {
+			return &x402.VerifyResponse{IsValid: false, InvalidReason: "insufficient_funds"}, nil
+		},
+		supported: func(context.Context) (x402.SupportedResponse, error) {
+			return x402.SupportedResponse{
+				Kinds: []x402.SupportedKind{
+					{X402Version: 2, Scheme: "exact", Network: "eip155:8453"},
+				},
+				Extensions: []string{},
+				Signers:    map[string][]string{},
+			}, nil
+		},
+	}
+
+	server := Newx402HTTPResourceServer(
+		routes,
+		x402.WithFacilitatorClient(mockClient),
+		x402.WithSchemeServer("eip155:8453", &mockSchemeServer{scheme: "exact"}),
+	)
+	_ = server.Initialize(ctx)
+
+	accepted := x402.PaymentRequirements{
+		Scheme:            "exact",
+		Network:           "eip155:8453",
+		Asset:             "USDC",
+		Amount:            "1000000",
+		PayTo:             "0xabc",
+		MaxTimeoutSeconds: 300,
+		Extra: map[string]interface{}{
+			"resourceUrl": "https://example.com/api/test",
+		},
+	}
+	payload := x402.PaymentPayload{
+		X402Version: 2,
+		Accepted:    accepted,
+		Payload:     map[string]interface{}{},
+	}
+	encoded := base64.StdEncoding.EncodeToString(mustMarshal(t, payload))
+
+	result := server.ProcessHTTPRequest(ctx, HTTPRequestContext{
+		Adapter: &mockHTTPAdapter{
+			method:  "GET",
+			path:    "/api/test",
+			url:     "https://example.com/api/test",
+			accept:  "application/json",
+			agent:   "Vitest",
+			headers: map[string]string{"PAYMENT-SIGNATURE": encoded},
+		},
+		Path:   "/api/test",
+		Method: "GET",
+	}, nil)
+
+	if result.Type != ResultPaymentError {
+		t.Fatalf("expected payment-error, got %s", result.Type)
+	}
+	if result.Response == nil {
+		t.Fatal("expected response")
+	}
+	if result.Response.Status != 402 {
+		t.Fatalf("expected status 402, got %d", result.Response.Status)
+	}
+	if result.Response.IsHTML {
+		t.Fatal("expected non-HTML response")
+	}
+	body, ok := result.Response.Body.(map[string]string)
+	if !ok || body["error"] != "insufficient_funds" {
+		t.Fatalf("expected body {error: insufficient_funds}, got %#v", result.Response.Body)
+	}
+	decoded, err := decodePaymentRequiredHeader(result.Response.Headers["PAYMENT-REQUIRED"])
+	if err != nil {
+		t.Fatalf("decode PAYMENT-REQUIRED: %v", err)
+	}
+	if decoded.Error != "insufficient_funds" {
+		t.Fatalf("expected header error insufficient_funds, got %q", decoded.Error)
 	}
 }
 

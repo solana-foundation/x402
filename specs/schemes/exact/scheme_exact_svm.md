@@ -128,7 +128,7 @@ The `SettlementResponse` for the exact scheme on Solana:
   "success": true,
   "transaction": "base58 encoded transaction signature",
   "network": "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
-  "payer": "base58 encoded public address of the transaction fee payer"
+  "payer": "base58 encoded public address of the payer's wallet"
 }
 ```
 

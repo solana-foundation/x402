@@ -1271,6 +1271,7 @@ func TestResolveSettlementOverrideAmount(t *testing.T) {
 	}
 
 	t.Run("raw atomic units", func(t *testing.T) {
+		reqs := types.PaymentRequirements{Amount: "999999"}
 		tests := []struct {
 			input    string
 			expected string
@@ -1280,7 +1281,7 @@ func TestResolveSettlementOverrideAmount(t *testing.T) {
 			{"999999", "999999"},
 		}
 		for _, tt := range tests {
-			result, err := ResolveSettlementOverrideAmount(tt.input, baseReqs, 6)
+			result, err := ResolveSettlementOverrideAmount(tt.input, reqs, 6)
 			if err != nil {
 				t.Errorf("ResolveSettlementOverrideAmount(%q) error: %v", tt.input, err)
 			}
@@ -1305,9 +1306,6 @@ func TestResolveSettlementOverrideAmount(t *testing.T) {
 			{"33.33%", "3000", "999"},
 			{"10.5%", "1000", "105"},
 			{"50%", "3", "1"},
-			{"999999999999999999999%", "1000000", "9999999999999999999990000"},
-			{"92233720368547758.08%", "1000000", "922337203685477580800"},
-			{"184467440737095516.16%", "1000000", "1844674407370955161600"},
 			{"50%", "18446744073709551616", "9223372036854775808"},
 		}
 		for _, tt := range tests {
@@ -1331,6 +1329,7 @@ func TestResolveSettlementOverrideAmount(t *testing.T) {
 	})
 
 	t.Run("dollar price with default 6 decimals", func(t *testing.T) {
+		reqs := types.PaymentRequirements{Amount: "10000000"}
 		tests := []struct {
 			input    string
 			expected string
@@ -1345,7 +1344,7 @@ func TestResolveSettlementOverrideAmount(t *testing.T) {
 			{"$0.00", "0"},
 		}
 		for _, tt := range tests {
-			result, err := ResolveSettlementOverrideAmount(tt.input, baseReqs, 6)
+			result, err := ResolveSettlementOverrideAmount(tt.input, reqs, 6)
 			if err != nil {
 				t.Errorf("ResolveSettlementOverrideAmount(%q) error: %v", tt.input, err)
 			}
@@ -1356,7 +1355,7 @@ func TestResolveSettlementOverrideAmount(t *testing.T) {
 	})
 
 	t.Run("dollar price with 8 decimals", func(t *testing.T) {
-		reqs := types.PaymentRequirements{Amount: "2000"}
+		reqs := types.PaymentRequirements{Amount: "10000000"}
 		result, err := ResolveSettlementOverrideAmount("$0.05", reqs, 8)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
@@ -1379,7 +1378,7 @@ func TestResolveSettlementOverrideAmount(t *testing.T) {
 	})
 
 	t.Run("dollar price with 6 decimals", func(t *testing.T) {
-		reqs := types.PaymentRequirements{Amount: "2000", Asset: "0xUnknownToken"}
+		reqs := types.PaymentRequirements{Amount: "10000000", Asset: "0xUnknownToken"}
 		result, err := ResolveSettlementOverrideAmount("$0.05", reqs, 6)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
@@ -1387,6 +1386,50 @@ func TestResolveSettlementOverrideAmount(t *testing.T) {
 		if result != "50000" {
 			t.Errorf("expected 50000 (6 decimals), got %s", result)
 		}
+	})
+
+	t.Run("authorized maximum enforcement", func(t *testing.T) {
+		assertExceeds := func(t *testing.T, rawAmount string, reqs types.PaymentRequirements, decimals int) {
+			t.Helper()
+			_, err := ResolveSettlementOverrideAmount(rawAmount, reqs, decimals)
+			if err == nil || !strings.Contains(err.Error(), "exceeds the authorized maximum") {
+				t.Fatalf("ResolveSettlementOverrideAmount(%q, amount=%s) error = %v, want authorized maximum", rawAmount, reqs.Amount, err)
+			}
+		}
+
+		t.Run("raw atomic-unit override exceeds requirements amount", func(t *testing.T) {
+			assertExceeds(t, "2001", baseReqs, 6)
+		})
+
+		t.Run("percent override resolves above requirements amount", func(t *testing.T) {
+			assertExceeds(t, "500%", baseReqs, 6)
+			assertExceeds(t, "999999999999999999999%", types.PaymentRequirements{Amount: "1000000"}, 6)
+			assertExceeds(t, "92233720368547758.08%", types.PaymentRequirements{Amount: "1000000"}, 6)
+			assertExceeds(t, "184467440737095516.16%", types.PaymentRequirements{Amount: "1000000"}, 6)
+		})
+
+		t.Run("dollar override resolves above requirements amount", func(t *testing.T) {
+			reqs := types.PaymentRequirements{Amount: "999999"}
+			assertExceeds(t, "$1.00", reqs, 6)
+		})
+
+		t.Run("resolved amount equals requirements amount", func(t *testing.T) {
+			result, err := ResolveSettlementOverrideAmount("100%", baseReqs, 6)
+			if err != nil {
+				t.Fatalf("ResolveSettlementOverrideAmount(%q) error: %v", "100%", err)
+			}
+			if result != baseReqs.Amount {
+				t.Errorf("ResolveSettlementOverrideAmount(%q) = %q, want %q", "100%", result, baseReqs.Amount)
+			}
+
+			result, err = ResolveSettlementOverrideAmount(baseReqs.Amount, baseReqs, 6)
+			if err != nil {
+				t.Fatalf("ResolveSettlementOverrideAmount(%q) error: %v", baseReqs.Amount, err)
+			}
+			if result != baseReqs.Amount {
+				t.Errorf("ResolveSettlementOverrideAmount(%q) = %q, want %q", baseReqs.Amount, result, baseReqs.Amount)
+			}
+		})
 	})
 }
 

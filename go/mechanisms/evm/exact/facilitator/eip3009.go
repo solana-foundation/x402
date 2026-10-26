@@ -104,6 +104,14 @@ func (f *ExactEvmScheme) verifyEIP3009(
 		}
 	}
 
+	nonCanonical, err := IsPlainNonCanonicalECDSASignature(ctx, f.signer, evmPayload.Authorization.From, signatureBytes)
+	if err != nil {
+		return nil, nil, x402.NewVerifyError(ErrFailedToVerifySignature, evmPayload.Authorization.From, err.Error())
+	}
+	if nonCanonical {
+		return nil, nil, x402.NewVerifyError(ErrInvalidSignatureS, evmPayload.Authorization.From, "invalid signature s")
+	}
+
 	classification, err := ClassifyEIP3009Signature(
 		ctx,
 		f.signer,
@@ -144,23 +152,34 @@ func (f *ExactEvmScheme) verifyEIP3009(
 	}
 
 	if simulate {
-		simulationSucceeded, err := awaitSimulation(simulationCh, func() (bool, error) {
+		simulationSucceeded, simErr := awaitSimulation(simulationCh, func() (bool, error) {
 			return SimulateEIP3009Transfer(ctx, f.signer, tokenAddress, parsedAuthorization, classification.SigData)
 		})
-		if err != nil {
-			return nil, nil, x402.NewVerifyError(ErrEip3009SimulationFailed, evmPayload.Authorization.From, err.Error())
-		}
-		if !simulationSucceeded {
-			reason := DiagnoseEIP3009SimulationFailure(
-				ctx,
-				f.signer,
-				tokenAddress,
-				evmPayload.Authorization,
-				requiredValue,
-				tokenName,
-				tokenVersion,
-			)
-			return nil, nil, x402.NewVerifyError(reason, evmPayload.Authorization.From, "")
+		if simErr != nil || !simulationSucceeded {
+			reason := ErrEip3009SimulationFailed
+			reverted := evm.IsContractRevert(simErr)
+			if reverted {
+				if mapped := parseEIP3009TransferError(simErr); mapped != ErrFailedToExecuteTransfer {
+					reason = mapped
+				}
+			}
+			// Probe unclassified failures only when the node answered, not after transport errors.
+			if reason == ErrEip3009SimulationFailed && (reverted || simErr == nil) {
+				reason = DiagnoseEIP3009SimulationFailure(
+					ctx,
+					f.signer,
+					tokenAddress,
+					evmPayload.Authorization,
+					requiredValue,
+					tokenName,
+					tokenVersion,
+				)
+			}
+			message := ""
+			if simErr != nil {
+				message = simErr.Error()
+			}
+			return nil, nil, x402.NewVerifyError(reason, evmPayload.Authorization.From, message)
 		}
 	}
 

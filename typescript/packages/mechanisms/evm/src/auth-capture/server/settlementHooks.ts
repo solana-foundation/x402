@@ -1,5 +1,9 @@
-import type { PaymentPayload, PaymentRequirements, SettleResponse } from "@x402/core/types";
-import type { DeepReadonly } from "@x402/core/types";
+import type {
+  DeepReadonly,
+  PaymentPayload,
+  PaymentRequirements,
+  SettleResponse,
+} from "@x402/core/types";
 import type {
   SettleContext,
   SettleResultContext,

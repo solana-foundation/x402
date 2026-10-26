@@ -1891,8 +1891,8 @@ importers:
   ../typescript/packages/mechanisms/stellar:
     dependencies:
       '@stellar/stellar-sdk':
-        specifier: ^16.3.0
-        version: 16.3.0
+        specifier: ^16.4.1
+        version: 16.4.1
       '@x402/core':
         specifier: workspace:~
         version: link:../../core
@@ -6783,8 +6783,8 @@ packages:
     resolution: {integrity: sha512-+NmNa7Tk5BI5XFdy/6xGTqAN4J9a9KgCrCGhj2uEUTCBhLkch0M+QbKzNH8zEnejWe0p8w+0q5hUVX6L3OzoVA==}
     engines: {node: '>=20.0.0', pnpm: '>=9.0.0'}
 
-  '@stellar/stellar-sdk@16.3.0':
-    resolution: {integrity: sha512-pnB1t4bdnkN8M7tRIcLXnNboq+Hof62NzPMnQrl5MWBNC/d1vUbdrzXgy7yw8I+0hbfz5YN64uVb84BqzIpYiQ==}
+  '@stellar/stellar-sdk@16.4.1':
+    resolution: {integrity: sha512-0kT+ShOUE6dc0smLEsajuizss1hvlGDsCooM88FqgxNOCKpY8IuQPzCs75RNKMSMITz+dX7KZ5qGhQ2EWGMTTg==}
     engines: {node: '>=22.0.0'}
     hasBin: true
 
@@ -7802,9 +7802,6 @@ packages:
 
   axios@1.12.2:
     resolution: {integrity: sha512-vMJzPewAlRyOgxV2dU0Cuz2O8zzzx9VYtbJOaBgXFeLc4IV/Eg50n4LowmehOOR61S8ZMpc2K5Sa7g6A4jfkUw==}
-
-  axios@1.18.0:
-    resolution: {integrity: sha512-E32NzpYKp++W7XRe52rHiXV2ehxmh3wbdgO7MHeFM+vqxLBYHzt0ElkiImtOBxtOmyp0yoC8C6uESVV84Y2/hw==}
 
   axios@1.20.0:
     resolution: {integrity: sha512-r8aOh8j9cGKpgQAqpzrUHnSIc6a59Y3Xf/cv8sy1DrHCkZHzQGEuoq1tARk6qSyDdtQGSDgpb9kFlruzPvrgwg==}
@@ -18095,12 +18092,12 @@ snapshots:
 
   '@stellar/js-xdr@4.0.0': {}
 
-  '@stellar/stellar-sdk@16.3.0':
+  '@stellar/stellar-sdk@16.4.1':
     dependencies:
       '@noble/ed25519': 3.1.0
-      '@noble/hashes': 2.2.0
+      '@noble/hashes': 2.3.0
       '@stellar/js-xdr': 4.0.0
-      axios: 1.18.0
+      axios: 1.20.0
       base32.js: 0.1.0
       bignumber.js: 11.1.4
       buffer: 6.0.3
@@ -20587,16 +20584,6 @@ snapshots:
       proxy-from-env: 1.1.0
     transitivePeerDependencies:
       - debug
-
-  axios@1.18.0:
-    dependencies:
-      follow-redirects: 1.16.0
-      form-data: 4.0.6
-      https-proxy-agent: 5.0.1
-      proxy-from-env: 2.1.0
-    transitivePeerDependencies:
-      - debug
-      - supports-color
 
   axios@1.20.0:
     dependencies:
