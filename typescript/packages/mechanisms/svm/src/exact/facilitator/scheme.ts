@@ -31,6 +31,7 @@ import {
 } from "@x402/core/facilitator";
 import {
   ASSOCIATED_TOKEN_PROGRAM_ADDRESS,
+  ADVERTISED_TRANSACTION_VERSIONS,
   LIGHTHOUSE_PROGRAM_ADDRESS,
   MAX_COMPUTE_UNIT_PRICE_MICROLAMPORTS,
   MAX_SPLITS,
@@ -42,6 +43,8 @@ import type { ExactSvmPayloadV2 } from "../../types";
 import {
   decodeTransactionFromPayload,
   getTokenPayerFromTransaction,
+  isAcceptedTransactionVersion,
+  peekWireTransactionVersion,
   recordPendingOrTerminal,
   transactionMessageHash,
   TransactionOnchainFailureError,
@@ -331,7 +334,10 @@ export class ExactSvmScheme implements SchemeNetworkFacilitator {
     const addresses = this.signer.getAddresses();
     const randomIndex = Math.floor(Math.random() * addresses.length);
 
-    const extra: Record<string, unknown> = { feePayer: addresses[randomIndex] };
+    const extra: Record<string, unknown> = {
+      feePayer: addresses[randomIndex],
+      transactionVersions: [...ADVERTISED_TRANSACTION_VERSIONS],
+    };
     if (this.options?.enableSmartWalletVerification) {
       extra.features = { smartWalletSupported: true };
     }
@@ -397,6 +403,24 @@ export class ExactSvmScheme implements SchemeNetworkFacilitator {
       txKey = transactionMessageHash(decodedTransaction);
     } catch {
       txKey = undefined;
+    }
+    if (decodedTransaction) {
+      try {
+        const compiled = compiledMessageDecoder.decode(decodedTransaction.messageBytes);
+        if (!isAcceptedTransactionVersion(compiled.version)) {
+          return {
+            success: false,
+            network: payload.accepted.network,
+            transaction: "",
+            errorReason: Errors.ErrUnsupportedTransactionVersion,
+            payer: "",
+          };
+        }
+      } catch {
+        // Verification below owns the canonical malformed-message error. Keep
+        // the cache key so decode stubs and future decoder failures do not
+        // accidentally disable deduplication.
+      }
     }
 
     // Duplicate settlement check keyed on message hash (immune to mutable fee-payer sig at slot
@@ -883,6 +907,20 @@ export class ExactSvmScheme implements SchemeNetworkFacilitator {
     }
 
     // Step 2: Parse and Validate Transaction Structure
+    // Read the version from the raw bytes first so a newer wire format is
+    // reported as unsupported however the installed decoder handles it.
+    const wireVersion = peekWireTransactionVersion(exactSvmPayload.transaction);
+    if (wireVersion !== undefined && !isAcceptedTransactionVersion(wireVersion)) {
+      return {
+        response: {
+          isValid: false,
+          invalidReason: Errors.ErrUnsupportedTransactionVersion,
+          payer: "",
+        },
+        verificationPath: null,
+      };
+    }
+
     let transaction;
     try {
       transaction = decodeTransactionFromPayload(exactSvmPayload);
@@ -905,6 +943,22 @@ export class ExactSvmScheme implements SchemeNetworkFacilitator {
         response: {
           isValid: false,
           invalidReason: Errors.ErrTransactionCouldNotBeDecoded,
+          payer: "",
+        },
+        verificationPath: null,
+      };
+    }
+
+    // Transaction message version is checked before any signature or
+    // instruction check: every check below reads its sponsorship policy from
+    // version-specific structure (the ComputeBudget instruction pair), so a
+    // version this code does not model must be rejected outright rather than
+    // handed to checks that would find nothing to scan and pass vacuously.
+    if (!isAcceptedTransactionVersion(compiled.version)) {
+      return {
+        response: {
+          isValid: false,
+          invalidReason: Errors.ErrUnsupportedTransactionVersion,
           payer: "",
         },
         verificationPath: null,

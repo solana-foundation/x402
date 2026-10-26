@@ -169,6 +169,14 @@ class ExactSvmScheme:
                 parse_payment_legs(requirements), get_split_capabilities(extra)
             )
 
+        # Copy the transaction message versions the facilitator advertises so
+        # the client builds one of them (absent means version 0).
+        if "transactionVersions" in extra:
+            versions = extra["transactionVersions"]
+            requirements.extra["transactionVersions"] = (
+                list(versions) if isinstance(versions, list) else versions
+            )
+
         if self._rpc_client:
             try:
                 blockhash = self._rpc_client.get_latest_blockhash().value

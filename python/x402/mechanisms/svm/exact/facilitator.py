@@ -21,6 +21,7 @@ from ....schemas import (
     VerifyResponse,
 )
 from ..constants import (
+    ADVERTISED_TRANSACTION_VERSIONS,
     COMPUTE_BUDGET_PROGRAM_ADDRESS,
     ERR_ALT_RESOLUTION_NOT_AVAILABLE,
     ERR_AMOUNT_INSUFFICIENT,
@@ -50,6 +51,7 @@ from ..constants import (
     ERR_UNKNOWN_OPTIONAL_INSTRUCTION,
     ERR_UNKNOWN_SIXTH_INSTRUCTION,
     ERR_UNSUPPORTED_SCHEME,
+    ERR_UNSUPPORTED_TRANSACTION_VERSION,
     LIGHTHOUSE_PROGRAM_ADDRESS,
     MAX_COMPUTE_UNIT_PRICE_MICROLAMPORTS,
     MAX_SPLITS,
@@ -65,6 +67,9 @@ from ..utils import (
     decode_transaction_from_payload,
     derive_ata,
     get_token_payer_from_transaction,
+    get_transaction_version,
+    is_accepted_transaction_version,
+    peek_wire_transaction_version,
     transaction_message_hash,
 )
 from .splits import (
@@ -194,21 +199,26 @@ class ExactSvmScheme:
     def get_extra(self, network: Network) -> dict[str, Any] | None:
         """Get mechanism-specific extra data for the supported kinds endpoint.
 
-        For SVM, this includes a randomly selected fee payer address.
+        For SVM, this includes a randomly selected fee payer address and the
+        transaction message versions this facilitator advertises (version 0;
+        legacy is still accepted on the wire but is deprecated).
         Random selection distributes load across multiple signers.
 
         Args:
             network: Network identifier (unused for SVM).
 
         Returns:
-            Extra data with feePayer address.
+            Extra data with feePayer address and transactionVersions.
         """
         _ = network  # Unused
         # Randomly select from available signers to distribute load
         addresses = self._signer.get_addresses()
         fee_payer = random.choice(addresses)
 
-        extra: dict[str, Any] = {"feePayer": fee_payer}
+        extra: dict[str, Any] = {
+            "feePayer": fee_payer,
+            "transactionVersions": list(ADVERTISED_TRANSACTION_VERSIONS),
+        }
         # Split capabilities fail closed: absent keys mean no support (§5.5).
         if self._max_splits > 0:
             extra["maxSplits"] = self._max_splits
@@ -296,11 +306,26 @@ class ExactSvmScheme:
                 )
 
         # Step 2: Parse and Validate Transaction Structure
+        # Read the version from the raw bytes first so a newer wire format is
+        # reported as unsupported however the installed solders handles it.
+        wire_version = peek_wire_transaction_version(svm_payload.transaction)
+        if wire_version is not None and not is_accepted_transaction_version(wire_version):
+            return VerifyResponse(
+                is_valid=False, invalid_reason=ERR_UNSUPPORTED_TRANSACTION_VERSION, payer=""
+            )
+
         try:
             tx = decode_transaction_from_payload(svm_payload)
         except Exception:
             return VerifyResponse(
                 is_valid=False, invalid_reason=ERR_TRANSACTION_DECODE_FAILED, payer=""
+            )
+
+        # Version allowlist, checked before any signature or instruction check:
+        # every check below reads its fee policy from version-specific structure.
+        if not is_accepted_transaction_version(get_transaction_version(tx.message)):
+            return VerifyResponse(
+                is_valid=False, invalid_reason=ERR_UNSUPPORTED_TRANSACTION_VERSION, payer=""
             )
 
         if legs is not None:
@@ -610,8 +635,25 @@ class ExactSvmScheme:
 
         # Parse and decode the transaction up front (no RPC calls) so we can key the
         # PendingSettlementStore on the message hash before doing any verify/sign/send work.
+        wire_version = peek_wire_transaction_version(svm_payload.transaction)
+        if wire_version is not None and not is_accepted_transaction_version(wire_version):
+            return SettleResponse(
+                success=False,
+                error_reason=ERR_UNSUPPORTED_TRANSACTION_VERSION,
+                network=network,
+                payer="",
+                transaction="",
+            )
         try:
             tx = decode_transaction_from_payload(svm_payload)
+            if not is_accepted_transaction_version(get_transaction_version(tx.message)):
+                return SettleResponse(
+                    success=False,
+                    error_reason=ERR_UNSUPPORTED_TRANSACTION_VERSION,
+                    network=network,
+                    payer="",
+                    transaction="",
+                )
             tx_key = transaction_message_hash(tx)
         except Exception as e:
             return SettleResponse(

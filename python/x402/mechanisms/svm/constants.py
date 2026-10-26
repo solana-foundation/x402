@@ -50,6 +50,24 @@ SYSTEM_PROGRAM_ADDRESS = "11111111111111111111111111111111"
 SPLIT_TRANSFER_COMPUTE_UNITS = 15_000
 ATA_CREATION_COMPUTE_UNITS = 40_000
 
+# Transaction message versions, in the Wallet Standard
+# ``supportedTransactionVersions`` vocabulary ("legacy" | 0 | 1).
+#
+# ADVERTISED_TRANSACTION_VERSIONS is what facilitators publish as
+# ``extra.transactionVersions`` in ``/supported``; servers copy it into
+# ``PaymentRequirements.extra`` and clients build one of the advertised versions.
+# Legacy is deprecated and never advertised.
+ADVERTISED_TRANSACTION_VERSIONS: list[str | int] = [0]
+# Versions the current client implementation can construct. Negotiation picks
+# the highest value shared with the facilitator's advertised set.
+CLIENT_SUPPORTED_TRANSACTION_VERSIONS: list[int] = [0]
+# ACCEPTED_TRANSACTION_VERSIONS is what verifiers tolerate on the wire. Legacy
+# stays accepted for backward compatibility. Every verifier derives its fee
+# policy from version-specific structure (ComputeBudget instructions on
+# legacy/v0, ``message.config`` on v1), so any version outside this allowlist is
+# rejected before instructions are inspected.
+ACCEPTED_TRANSACTION_VERSIONS: list[str | int] = ["legacy", 0]
+
 # Solana address validation regex (base58, 32-44 characters)
 SVM_ADDRESS_REGEX = r"^[1-9A-HJ-NP-Za-km-z]{32,44}$"
 
@@ -118,6 +136,8 @@ ERR_SPLIT_REMAINDER_NOT_POSITIVE = "split_remainder_not_positive"
 ERR_SPLIT_LEG_UNMATCHED = "split_leg_unmatched"
 ERR_SPLIT_UNEXPECTED_TRANSFER = "split_unexpected_transfer"
 ERR_SPLIT_AUTHORITY_MISMATCH = "invalid_exact_svm_payload_split_authority_mismatch"
+
+ERR_UNSUPPORTED_TRANSACTION_VERSION = "unsupported_transaction_version"
 
 # Non-terminal settle error reason meaning a transaction was broadcast but
 # ConfirmTransaction could not observe its confirmation in time — mirrors

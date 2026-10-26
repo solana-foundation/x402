@@ -231,13 +231,30 @@ scheme.
   set; it does not read `PaymentRequirements.extra.transactionVersions`.
 - A legacy or version-0 transaction MUST NOT exceed 1232 serialized bytes; a version-1
   transaction MUST NOT exceed 4096 serialized bytes.
-- A version-1 transaction carries its compute budget in the message
-  `TransactionConfig`. It MUST set `computeUnitLimit` and
-  `loadedAccountsDataSizeLimit` (a version-1 transaction that omits either is
-  budgeted zero and cannot execute), it MUST NOT contain Compute Budget program
-  instructions, and its `priorityFee` is a total in lamports, evaluated against
-  a per-compute-unit cap as `priorityFee * 1000000 <= capMicroLamports *
-  computeUnitLimit`. `capMicroLamports` is the compute unit price cap, in
+- A version-1 transaction carries its compute budget in the message's
+  `TransactionConfigMask` and the config values that follow it
+  ([SIMD-0385](https://github.com/solana-foundation/solana-improvement-documents/blob/main/proposals/0385-transaction-v1.md#transactionconfigmask)).
+  This spec names the values by the bits that carry them:
+  - bits 0 and 1: `priorityFee`, the total priority fee in lamports (u64). The
+    two bits are set together; a transaction with only one set is invalid.
+  - bit 2: `computeUnitLimit` (u32).
+  - bit 3: `loadedAccountsDataSizeLimit` (u32).
+  - bit 4: the requested heap size (u32).
+
+  SDKs expose these as a config object (for example `config` on a
+  `@solana/kit` message or `TransactionConfig` in solana-go). An unset value
+  takes its minimum: an unset `priorityFee` is 0, an unset `computeUnitLimit`
+  requests 0 compute units, and an unset `loadedAccountsDataSizeLimit` requests
+  0 bytes of loaded account data. (The cost model still reserves 32 KiB of
+  loaded account data for scheduling, but the transaction's own budget is 0.)
+  A transaction that leaves bit 2 or bit 3 unset therefore cannot execute its
+  instructions, so a client-built version-1 transaction MUST set both.
+- The runtime ignores Compute Budget program instructions in a version-1
+  transaction: they configure nothing and execute as no-ops that still consume
+  compute units. As an x402 sponsor rule, a client-built version-1 transaction
+  MUST NOT contain them, and the sponsor MUST reject one that does.
+- A version-1 `priorityFee` is evaluated against a per-compute-unit cap as
+  `priorityFee * 1000000 <= capMicroLamports * computeUnitLimit`. `capMicroLamports` is the compute unit price cap, in
   microlamports per compute unit, of the verification path that accepts the
   transaction. It is the same cap that path applies to `SetComputeUnitPrice` in
   a legacy or version-0 transaction: `maxPriorityFeeMicroLamports` on Path 1
@@ -313,14 +330,15 @@ standard-wallet layout and applies `maxPriorityFeeMicroLamports`. Path 2 (§3.2)
 admits arbitrary allowlisted programs and applies the stricter
 `smartWalletMaxPriorityFeeMicroLamports`.
 
-In a version-1 transaction the same caps apply to the message
-`TransactionConfig` instead: `computeUnitLimit` MUST be present and MUST NOT
-exceed the configured maximum, `loadedAccountsDataSizeLimit` MUST be present, and
-`priorityFee` (total lamports) MUST satisfy
+In a version-1 transaction the same caps apply to the message config values
+instead (§1.5): `computeUnitLimit` (bit 2) MUST be set and MUST NOT exceed the
+configured maximum, `loadedAccountsDataSizeLimit` (bit 3) MUST be set, and
+`priorityFee` (bits 0 and 1, total lamports) MUST satisfy
 `priorityFee * 1000000 <= capMicroLamports * computeUnitLimit`, where
 `capMicroLamports` is the price cap of the accepting path, evaluated without
 overflow as specified in §1.5. A version-1 transaction that contains a Compute
-Budget instruction MUST be rejected.
+Budget instruction MUST be rejected (an x402 sponsor rule; the runtime treats
+such instructions as no-ops).
 
 #### 2.2.2 Program Allow/Deny Lists (SHOULD)
 
