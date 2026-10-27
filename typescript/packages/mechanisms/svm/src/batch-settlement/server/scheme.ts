@@ -163,7 +163,7 @@ export class BatchSvmScheme implements SchemeNetworkServer {
       let voucher: BatchVoucher;
       if (raw.voucher) {
         if (BigInt(raw.voucher.maxClaimableAmount) !== cumulative) {
-          throw new Error(BatchError.CUMULATIVE_AMOUNT_MISMATCH);
+          throw new Error(BatchError.CLOSE_STATE);
         }
         voucher = raw.voucher;
       } else if (!serverMode) {
@@ -534,6 +534,16 @@ export class BatchSvmScheme implements SchemeNetworkServer {
       if (state) {
         this.assertStoredConfig(state, raw.channelConfig, ctx.requirements);
       }
+      // Once the payer has started a forced close, `settle` is unavailable, so
+      // a further paid request is refused (spec 4.5: a voucher or
+      // authorization against a Closing channel fails with channel_closing).
+      if (
+        (raw.type === "voucher" || raw.type === "authorization") &&
+        state !== undefined &&
+        (state.status === "closing" || state.closeRequestedAt !== undefined)
+      ) {
+        throw new Error(BatchError.CHANNEL_CLOSING);
+      }
       if (raw.type === "deposit" && !state) {
         const extra = ctx.requirements.extra!;
         const receiverAuthorizer = extra.receiverAuthorizer;
@@ -634,8 +644,12 @@ export class BatchSvmScheme implements SchemeNetworkServer {
           });
         } else {
           if (!raw.voucher) throw new Error(BatchError.VOUCHER_SIGNATURE);
+          // A cooperative close settles at the accepted cumulative; a voucher
+          // at any other watermark cannot close the channel (spec 7: close_state).
           if (BigInt(raw.voucher.maxClaimableAmount) !== state.chargedCumulativeAmount) {
-            throw new Error(BatchError.CUMULATIVE_AMOUNT_MISMATCH);
+            throw new Error(
+              `${BatchError.CLOSE_STATE}: refund voucher ${raw.voucher.maxClaimableAmount} is not the accepted cumulative ${state.chargedCumulativeAmount}`,
+            );
           }
           this.requestContexts.set(ctx.paymentPayload, { channelId });
         }

@@ -21,6 +21,7 @@ import type {
 } from "@x402/core/types";
 
 import { verifyRequestCloseTransaction } from "../../payment-channels/close";
+import { ErrUnsupportedTransactionVersion } from "../../exact/facilitator/errors";
 import type { Channel } from "../../payment-channels/generated/accounts/channel";
 import {
   buildSettleAndSealInstructions,
@@ -65,6 +66,8 @@ export type CloseIntent = "seal" | "refund";
 export interface RefundLimits {
   maxComputeUnits?: number | undefined;
   maxPriorityFeeMicroLamports?: number | undefined;
+  /** Accepted `request_close` message versions; unset accepts `[0, 1]`. */
+  transactionVersions?: readonly number[] | undefined;
 }
 
 /** A validated refund; `requestClose` is set only on the sponsored fallback path. */
@@ -413,6 +416,7 @@ export async function prepareRefund(
   }
   try {
     await verifyRequestCloseTransaction(payload.transaction, {
+      acceptedTransactionVersions: limits.transactionVersions,
       channelId,
       feePayer: terms.feePayer,
       maxComputeUnits: limits.maxComputeUnits,
@@ -422,6 +426,8 @@ export async function prepareRefund(
     });
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
+    // A version outside the accepted set keeps its own reason (§1.5).
+    if (detail.startsWith(ErrUnsupportedTransactionVersion)) throw new Error(detail);
     throw new Error(`${BatchError.REFUND_TRANSACTION}: ${detail}`);
   }
   return { channelId, requestClose: payload.transaction, terms };

@@ -31,7 +31,8 @@ import {
   type PendingSettlementStore,
 } from "@x402/core/facilitator";
 import {
-  ADVERTISED_TRANSACTION_VERSIONS,
+  DEFAULT_MAX_COMPUTE_UNITS,
+  DEFAULT_MAX_REQUIRED_SIGNATURES,
   LIGHTHOUSE_PROGRAM_ADDRESS,
   MAX_COMPUTE_UNIT_PRICE_MICROLAMPORTS,
   MEMO_PROGRAM_ADDRESS,
@@ -43,6 +44,7 @@ import {
   decodeTransactionFromPayload,
   getTokenPayerFromTransaction,
   isAcceptedTransactionVersion,
+  normalizeAcceptedTransactionVersions,
   peekWireTransactionVersion,
   recordPendingOrTerminal,
   transactionMessageHash,
@@ -191,22 +193,37 @@ export type ExactSvmSchemeOptions = {
   maxPriorityFeeMicroLamports?: number;
 
   /**
-   * Maximum compute unit limit accepted on the static path. An SPL transfer
-   * with a memo uses ~20k CU, so a low ceiling still leaves ample headroom for
-   * wallet-injected instructions.
+   * Maximum compute unit limit accepted on the static path, for a version-0
+   * `SetComputeUnitLimit` and a version-1 header `computeUnitLimit` alike
+   * (scheme_exact_svm.md §2.2.1). An SPL transfer with a memo uses ~20k CU, so
+   * a low ceiling still leaves ample headroom for wallet-injected instructions.
    *
-   * Default: unset (no limit, preserving existing behavior)
+   * Default: {@link DEFAULT_MAX_COMPUTE_UNITS} (400,000, the spec's reference default)
    */
   maxComputeUnits?: number;
 
   /**
    * Maximum number of required signatures. Every signature adds 5,000 lamports
-   * of base fee, paid by the facilitator. A typical x402 payment needs two
-   * (payer + fee payer).
+   * of base fee, paid by the facilitator. An x402 payment needs exactly two
+   * (payer + fee payer): the transaction MUST NOT require any other signer
+   * (scheme_exact_svm.md §2.1.4). Raise it only for a wallet whose authority
+   * is itself several signers.
    *
-   * Default: unset (no limit, preserving existing behavior)
+   * Default: {@link DEFAULT_MAX_REQUIRED_SIGNATURES} (2)
    */
   maxRequiredSignatures?: number;
+
+  /**
+   * Transaction message versions this facilitator accepts, advertised as
+   * `extra.transactionVersions` in `/supported`. A message of any other
+   * version is rejected with `unsupported_transaction_version` before any
+   * instruction is inspected (scheme_exact_svm.md §1.5); a legacy message is
+   * accepted exactly when version 0 is. Narrow it to `[0]` for a sponsor
+   * whose signer or RPC does not yet handle version 1.
+   *
+   * Default: `[0, 1]`
+   */
+  transactionVersions?: readonly (0 | 1)[];
 
   /**
    * Lets a retried settle for the same transaction reconcile against an
@@ -259,6 +276,9 @@ export class ExactSvmScheme implements SchemeNetworkFacilitator {
 
   private readonly settlementCache: SettlementCache;
   private readonly pendingStore: PendingSettlementStore;
+  private readonly transactionVersions: readonly (0 | 1)[];
+  private readonly maxComputeUnits: number;
+  private readonly maxRequiredSignatures: number;
 
   /**
    * Creates a new ExactSvmScheme instance.
@@ -283,6 +303,12 @@ export class ExactSvmScheme implements SchemeNetworkFacilitator {
     // A ceiling below 1 would reject every transaction: the fee payer alone
     // always requires one signature.
     assertLimit("maxRequiredSignatures", this.options?.maxRequiredSignatures, 1);
+    this.transactionVersions = normalizeAcceptedTransactionVersions(
+      this.options?.transactionVersions,
+    );
+    this.maxComputeUnits = this.options?.maxComputeUnits ?? DEFAULT_MAX_COMPUTE_UNITS;
+    this.maxRequiredSignatures =
+      this.options?.maxRequiredSignatures ?? DEFAULT_MAX_REQUIRED_SIGNATURES;
 
     if (this.options?.enableSmartWalletVerification) {
       assertSmartWalletLimits({
@@ -308,7 +334,7 @@ export class ExactSvmScheme implements SchemeNetworkFacilitator {
 
     const extra: Record<string, unknown> = {
       feePayer: addresses[randomIndex],
-      transactionVersions: [...ADVERTISED_TRANSACTION_VERSIONS],
+      transactionVersions: [...this.transactionVersions],
     };
     if (this.options?.enableSmartWalletVerification) {
       extra.features = { smartWalletSupported: true };
@@ -372,7 +398,7 @@ export class ExactSvmScheme implements SchemeNetworkFacilitator {
     if (decodedTransaction) {
       try {
         const compiled = compiledMessageDecoder.decode(decodedTransaction.messageBytes);
-        if (!isAcceptedTransactionVersion(compiled.version)) {
+        if (!isAcceptedTransactionVersion(compiled.version, this.transactionVersions)) {
           return {
             success: false,
             network: payload.accepted.network,
@@ -784,7 +810,10 @@ export class ExactSvmScheme implements SchemeNetworkFacilitator {
     // Read the version from the raw bytes first so a newer wire format is
     // reported as unsupported however the installed decoder handles it.
     const wireVersion = peekWireTransactionVersion(exactSvmPayload.transaction);
-    if (wireVersion !== undefined && !isAcceptedTransactionVersion(wireVersion)) {
+    if (
+      wireVersion !== undefined &&
+      !isAcceptedTransactionVersion(wireVersion, this.transactionVersions)
+    ) {
       return {
         response: {
           isValid: false,
@@ -828,7 +857,7 @@ export class ExactSvmScheme implements SchemeNetworkFacilitator {
     // version-specific structure (the ComputeBudget instruction pair), so a
     // version this code does not model must be rejected outright rather than
     // handed to checks that would find nothing to scan and pass vacuously.
-    if (!isAcceptedTransactionVersion(compiled.version)) {
+    if (!isAcceptedTransactionVersion(compiled.version, this.transactionVersions)) {
       return {
         response: {
           isValid: false,
@@ -856,19 +885,15 @@ export class ExactSvmScheme implements SchemeNetworkFacilitator {
     // path dispatch: it bounds the base fee the facilitator pays regardless of
     // which verification strategy accepts the transaction, and it must not be
     // recoverable via the Path 2 fallthrough.
-    const maxRequiredSignatures = this.options?.maxRequiredSignatures;
-    if (maxRequiredSignatures !== undefined) {
-      const numRequiredSignatures = compiled.header.numSignerAccounts;
-      if (numRequiredSignatures > maxRequiredSignatures) {
-        return {
-          response: {
-            isValid: false,
-            invalidReason: Errors.ErrExcessiveSigners,
-            payer: "",
-          },
-          verificationPath: null,
-        };
-      }
+    if (compiled.header.numSignerAccounts > this.maxRequiredSignatures) {
+      return {
+        response: {
+          isValid: false,
+          invalidReason: Errors.ErrExcessiveSigners,
+          payer: "",
+        },
+        verificationPath: null,
+      };
     }
 
     const signatureCheck = await verifyRequiredSignatures(
@@ -1071,7 +1096,7 @@ export class ExactSvmScheme implements SchemeNetworkFacilitator {
           ix.programAddress.toString(),
         ),
         {
-          maxComputeUnits: this.options?.maxComputeUnits,
+          maxComputeUnits: this.maxComputeUnits,
           maxPriceMicroLamports:
             this.options?.maxPriorityFeeMicroLamports ?? MAX_COMPUTE_UNIT_PRICE_MICROLAMPORTS,
         },
@@ -1340,8 +1365,7 @@ export class ExactSvmScheme implements SchemeNetworkFacilitator {
     try {
       const parsedInstruction = parseSetComputeUnitLimitInstruction(instruction as never);
 
-      const maxComputeUnits = this.options?.maxComputeUnits;
-      if (maxComputeUnits !== undefined && parsedInstruction.data.units > maxComputeUnits) {
+      if (parsedInstruction.data.units > this.maxComputeUnits) {
         throw new Error(Errors.ErrComputeLimitInstructionTooHigh);
       }
     } catch (error) {

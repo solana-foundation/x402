@@ -2,6 +2,7 @@ import { findAssociatedTokenPda } from "@solana-program/token-2022";
 import { address, generateKeyPairSigner, type Signature } from "@solana/kit";
 import type { PaymentPayload, PaymentRequirements } from "@x402/core/types";
 import { beforeAll, describe, expect, it, vi } from "vitest";
+import { settlementAtaReader } from "./helpers/tokenAccount";
 
 import { signBatchAuthorization } from "../../src/batch-settlement/authorization";
 import {
@@ -30,7 +31,7 @@ import {
 } from "../../src/constants";
 import { USDC_DEVNET_ADDRESS, USDC_MAINNET_ADDRESS } from "../../src/defaultAssets";
 import type { Channel } from "../../src/payment-channels/generated/accounts/channel";
-import { ChannelStatus } from "../../src/payment-channels/onchain";
+import { ChannelStatus, getPaymentChannelsTreasuryOwner } from "../../src/payment-channels/onchain";
 import { getChannelDistributionHash } from "../../src/payment-channels/facilitator";
 import { ChannelBroadcastConfirmationError } from "../../src/payment-channels/facilitator";
 import { TransactionOnchainFailureError } from "../../src/utils";
@@ -125,7 +126,12 @@ function channel(overrides: Partial<Channel> = {}): Channel {
 function signer(overrides: Record<string, unknown> = {}) {
   return {
     confirmTransaction: vi.fn().mockResolvedValue(undefined),
-    getAccountInfo: vi.fn().mockResolvedValue({ owner: TOKEN_PROGRAM_ADDRESS }),
+    getAccountInfo: vi.fn().mockImplementation(
+      settlementAtaReader({
+        mint: MINT,
+        owners: () => [payer.address, RECEIVER, getPaymentChannelsTreasuryOwner(NETWORK)],
+      }),
+    ),
     getConfirmedTransaction: vi.fn(() => payoutEvidence()),
     getAddresses: vi.fn(() => [feePayer.address]),
     getLatestBlockhash: vi.fn(),
@@ -198,6 +204,7 @@ type FacilitatorInternals = {
     requirements: PaymentRequirements,
     payer: string,
     tokenProgram: string,
+    deposit: bigint,
   ): Promise<void>;
   readChannel: ReturnType<typeof vi.fn>;
   settlementCache: {
@@ -241,10 +248,14 @@ describe("batch facilitator lifecycle", () => {
     ["payment-channel treasury", 2],
   ])("identifies a missing %s settlement ATA", async (label, missingIndex) => {
     let readIndex = 0;
-    const getAccountInfo = vi.fn().mockImplementation(async () => {
+    const healthy = settlementAtaReader({
+      mint: MINT,
+      owners: () => [payer.address, RECEIVER, getPaymentChannelsTreasuryOwner(NETWORK)],
+    });
+    const getAccountInfo = vi.fn().mockImplementation(async (ata: string) => {
       const exists = readIndex !== missingIndex;
       readIndex += 1;
-      return exists ? { owner: TOKEN_PROGRAM_ADDRESS } : null;
+      return exists ? healthy(ata) : null;
     });
     const api = internals(
       new BatchSvmScheme(signer({ getAccountInfo }) as never, {
@@ -253,7 +264,7 @@ describe("batch facilitator lifecycle", () => {
     );
 
     await expect(
-      api.assertSettlementAccounts(requirements(), payer.address, TOKEN_PROGRAM_ADDRESS),
+      api.assertSettlementAccounts(requirements(), payer.address, TOKEN_PROGRAM_ADDRESS, 1n),
     ).rejects.toThrow(`missing ${label} ATA`);
     expect(getAccountInfo).toHaveBeenCalledTimes(missingIndex + 1);
   });
@@ -269,8 +280,8 @@ describe("batch facilitator lifecycle", () => {
     );
 
     await expect(
-      api.assertSettlementAccounts(requirements(), payer.address, TOKEN_PROGRAM_ADDRESS),
-    ).rejects.toThrow(`payer ATA is not owned by ${TOKEN_PROGRAM_ADDRESS}`);
+      api.assertSettlementAccounts(requirements(), payer.address, TOKEN_PROGRAM_ADDRESS, 1n),
+    ).rejects.toThrow(new RegExp(`payer ATA \\w+ is not owned by ${TOKEN_PROGRAM_ADDRESS}`));
   });
 
   it("requires account reads for settlement-path preflight", async () => {

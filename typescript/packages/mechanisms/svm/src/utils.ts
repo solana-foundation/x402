@@ -30,6 +30,7 @@ import type { PendingSettlementStore } from "@x402/core/facilitator";
 import type { Network, PaymentRequirements, SettleResponse } from "@x402/core/types";
 import {
   ACCEPTED_TRANSACTION_VERSIONS,
+  ADVERTISED_TRANSACTION_VERSIONS,
   CLIENT_SUPPORTED_TRANSACTION_VERSIONS,
   SVM_ADDRESS_REGEX,
   DEVNET_RPC_URL,
@@ -126,16 +127,46 @@ export function peekWireTransactionVersion(
 }
 
 /**
- * Whether a decoded transaction message's version is one the SVM verifiers
- * model. Verifiers call this before any signature or instruction check so a
- * version whose compute budget lives somewhere they do not read cannot pass
- * the compute-budget checks vacuously.
+ * Whether a decoded transaction message's version is in a facilitator's
+ * accepted set. Verifiers call this before any signature or instruction check
+ * so a version whose compute budget lives somewhere they do not read cannot
+ * pass the compute-budget checks vacuously, and so a version the operator
+ * does not accept is refused before any instruction is inspected.
+ *
+ * A legacy message is policed as version 0: it is accepted exactly when
+ * version 0 is (the deprecated legacy tolerance of the SVM schemes).
  *
  * @param version - The `version` field of a compiled or decompiled transaction message
- * @returns Whether the version is legacy, 0, or 1
+ * @param accepted - The facilitator's accepted versions; defaults to {@link ADVERTISED_TRANSACTION_VERSIONS}
+ * @returns Whether the version is accepted
  */
-export function isAcceptedTransactionVersion(version: number | string): boolean {
-  return ACCEPTED_TRANSACTION_VERSIONS.includes(version);
+export function isAcceptedTransactionVersion(
+  version: number | string,
+  accepted: readonly number[] = ADVERTISED_TRANSACTION_VERSIONS,
+): boolean {
+  if (version === "legacy") return accepted.includes(0);
+  return ACCEPTED_TRANSACTION_VERSIONS.includes(version) && accepted.includes(version as number);
+}
+
+/**
+ * Validate a facilitator's `transactionVersions` option: the message versions
+ * it accepts and advertises as `extra.transactionVersions`.
+ *
+ * @param versions - The configured versions, or undefined for the default
+ * @returns The accepted versions, deduplicated and ascending
+ * @throws Error when the list is empty or holds anything but 0 and 1
+ */
+export function normalizeAcceptedTransactionVersions(
+  versions: readonly number[] | undefined,
+): readonly BuildableTransactionVersion[] {
+  if (versions === undefined)
+    return ADVERTISED_TRANSACTION_VERSIONS as BuildableTransactionVersion[];
+  if (versions.length === 0 || versions.some(version => version !== 0 && version !== 1)) {
+    throw new Error(
+      `transactionVersions must be a non-empty list of 0 and/or 1 (got ${JSON.stringify(versions)})`,
+    );
+  }
+  return [...new Set(versions)].sort((a, b) => a - b) as BuildableTransactionVersion[];
 }
 
 /**

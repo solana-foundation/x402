@@ -37,6 +37,7 @@ import {
   type BuildableTransactionVersion,
 } from "../../src/transactionV1";
 import { resolveTransactionVersion } from "../../src/utils";
+import { PAYMENT_CHANNELS_PROGRAM_ID } from "../../src/payment-channels/onchain";
 
 const DUMMY_BLOCKHASH = USDC_DEVNET_ADDRESS;
 
@@ -292,5 +293,54 @@ describe("payment-channel verifiers enforce the size limit of the message versio
     await expect(verifyRequestCloseTransaction(oversized, closeExpected)).rejects.toThrow(
       /verifyRequestCloseTransaction: transaction is \d+ bytes, above the 4096-byte limit for version 1/,
     );
+  });
+});
+
+describe("payment-channel verifiers enforce the facilitator's accepted versions", () => {
+  it("refuses a version 1 open, top-up and request_close when only version 0 is accepted", async () => {
+    const { open, expected } = await openTransaction([0, 1]);
+    await expect(
+      verifyOpenTransaction(open.transaction, { ...expected, acceptedTransactionVersions: [0] }),
+    ).rejects.toThrow(/^unsupported_transaction_version: .*accepted versions: legacy, 0$/);
+    const { topUp, topUpExpected } = await topUpTransaction(1);
+    await expect(
+      verifyTopUpTransaction(topUp.transaction, {
+        ...topUpExpected,
+        acceptedTransactionVersions: [0],
+      }),
+    ).rejects.toThrow(/^unsupported_transaction_version/);
+    const { transaction, closeExpected } = await closeTransaction(1);
+    await expect(
+      verifyRequestCloseTransaction(transaction, {
+        ...closeExpected,
+        acceptedTransactionVersions: [0],
+      }),
+    ).rejects.toThrow(/^unsupported_transaction_version/);
+  });
+
+  it("refuses a version 0 open when only version 1 is accepted", async () => {
+    const { open, expected } = await openTransaction([0]);
+    await expect(
+      verifyOpenTransaction(open.transaction, { ...expected, acceptedTransactionVersions: [1] }),
+    ).rejects.toThrow(/^unsupported_transaction_version: .*accepted versions: 1$/);
+  });
+});
+
+describe("verifyOpenTransaction decodes the open args in full", () => {
+  it("refuses a byte after the open args", async () => {
+    const { open, expected, payer } = await openTransaction([0]);
+    const message = decompileTransactionMessage(compiled(open.transaction));
+    const instructions = message.instructions.map(instruction =>
+      instruction.programAddress === PAYMENT_CHANNELS_PROGRAM_ID
+        ? { ...instruction, data: new Uint8Array([...(instruction.data ?? []), 0]) }
+        : instruction,
+    );
+    const signed = await partiallySignTransaction(
+      [payer.keyPair],
+      compileTransaction({ ...message, instructions } as never),
+    );
+    await expect(
+      verifyOpenTransaction(getBase64EncodedWireTransaction(signed), expected),
+    ).rejects.toThrow(/1 trailing bytes after the open args/);
   });
 });

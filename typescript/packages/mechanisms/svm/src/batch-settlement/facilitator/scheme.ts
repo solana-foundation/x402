@@ -11,7 +11,8 @@ import type {
   VerifyResponse,
 } from "@x402/core/types";
 
-import { ADVERTISED_TRANSACTION_VERSIONS, MEMO_PROGRAM_ADDRESS } from "../../constants";
+import { MEMO_PROGRAM_ADDRESS } from "../../constants";
+import { SLOT_COMMITMENT } from "../../payment-channels/commitments";
 import {
   discoverChannelsByRentPayer,
   type DiscoveredChannel,
@@ -86,7 +87,11 @@ import {
   verifyFailure,
 } from "./responses";
 
-import { recordPendingOrTerminal, TransactionOnchainFailureError } from "../../utils";
+import {
+  normalizeAcceptedTransactionVersions,
+  recordPendingOrTerminal,
+  TransactionOnchainFailureError,
+} from "../../utils";
 import { ErrSettlementPending } from "../../exact/facilitator/errors";
 import {
   assertNotClosing,
@@ -121,6 +126,7 @@ import {
   COMPLETED_BROADCAST_SUFFIX,
 } from "./constants";
 import { type RedemptionPolicy, redemptionPolicy, submitRedemptionTransaction } from "./redemption";
+import { assertSettlementAccounts } from "./settlementAccounts";
 import type {
   BatchDelegatedReceiverAuth,
   BatchReceiverBindingHistoryReader,
@@ -178,6 +184,7 @@ export class BatchSvmScheme implements SchemeNetworkFacilitator {
   private readonly receiverBindingHistoryReader: BatchReceiverBindingHistoryReader | undefined;
   private readonly delegatedReceiverAuth: BatchDelegatedReceiverAuth | undefined;
   private readonly redemption: RedemptionPolicy;
+  private readonly transactionVersions: readonly (0 | 1)[];
 
   constructor(
     signer: FacilitatorSvmSigner,
@@ -196,6 +203,7 @@ export class BatchSvmScheme implements SchemeNetworkFacilitator {
     this.maxIdleSecs = assertMaxIdleSecs(config.maxIdleSecs);
     this.receiverBindingHistoryReader = config.receiverBindingHistoryReader;
     this.redemption = redemptionPolicy(config.redemptionTransactionVersion);
+    this.transactionVersions = normalizeAcceptedTransactionVersions(config.transactionVersions);
     assertTreasuryOwner(config);
   }
 
@@ -203,7 +211,7 @@ export class BatchSvmScheme implements SchemeNetworkFacilitator {
     const addresses = this.signer.getAddresses();
     return {
       feePayer: addresses[Math.floor(Math.random() * addresses.length)],
-      transactionVersions: [...ADVERTISED_TRANSACTION_VERSIONS],
+      transactionVersions: [...this.transactionVersions],
       maxClaimChannels: this.redemption.maxClaimChannels,
       maxSettleChannels: this.redemption.maxSettleChannels,
       // Copied into the 402: how long servers have to claim before an idle close.
@@ -824,6 +832,7 @@ export class BatchSvmScheme implements SchemeNetworkFacilitator {
         settled: existing.settlement.settled,
       });
       await verifyTopUpTransaction(payload.deposit.transaction, {
+        acceptedTransactionVersions: this.transactionVersions,
         amount: deposit,
         channelId,
         feePayer: terms.feePayer,
@@ -838,6 +847,7 @@ export class BatchSvmScheme implements SchemeNetworkFacilitator {
         requirements,
         payload.channelConfig.payer,
         terms.tokenProgram,
+        deposit,
       );
       return {
         channelId,
@@ -851,7 +861,14 @@ export class BatchSvmScheme implements SchemeNetworkFacilitator {
       };
     }
     assertDepositProof(proof.signer, { charge, deposit, proof: proofAmount });
+    // The program accepts an open only within its slot window of the cluster
+    // slot it lands at, so the window is judged against the challenge's
+    // `recentSlot` or, without one, the cluster's own slot.
+    const recentSlot =
+      parseOptionalSlot(requirements.extra?.recentSlot) ??
+      (await this.signer.getSlot(requirements.network, SLOT_COMMITMENT));
     const open = await verifyOpenTransaction(payload.deposit.transaction, {
+      acceptedTransactionVersions: this.transactionVersions,
       authorizedSigner: payload.channelConfig.payerAuthorizer,
       expectedBindingMemo: encodeReceiverBindingMemo(terms.receiverAuthorizer),
       feePayer: terms.feePayer,
@@ -864,7 +881,7 @@ export class BatchSvmScheme implements SchemeNetworkFacilitator {
       mint: requirements.asset,
       openSlot: BigInt(payload.channelConfig.openSlot),
       payee: terms.feePayer,
-      recentSlot: parseOptionalSlot(requirements.extra?.recentSlot),
+      recentSlot,
       recipients: [{ bps: FULL_SPLIT_BPS, recipient: requirements.payTo }],
       tokenProgram: terms.tokenProgram,
       withdrawDelay: terms.withdrawDelay,
@@ -876,6 +893,7 @@ export class BatchSvmScheme implements SchemeNetworkFacilitator {
       requirements,
       payload.channelConfig.payer,
       terms.tokenProgram,
+      deposit,
     );
     return {
       channelId,
@@ -1048,36 +1066,14 @@ export class BatchSvmScheme implements SchemeNetworkFacilitator {
     requirements: PaymentRequirements,
     payer: string,
     tokenProgram: string,
+    deposit: bigint,
   ): Promise<void> {
-    const mint = address(requirements.asset);
-    const tokenProgramAddress = address(tokenProgram);
-    const required = [
-      { label: "payer", owner: address(payer) },
-      { label: "recipient", owner: address(requirements.payTo) },
-      {
-        label: "payment-channel treasury",
-        owner: treasuryOwnerOf(this.config, requirements.network),
-      },
-    ] as const;
-    for (const { label, owner } of required) {
-      const [ata] = await findAssociatedTokenPda({
-        mint,
-        owner,
-        tokenProgram: tokenProgramAddress,
-      });
-      const account = await this.signer.getAccountInfo(ata, requirements.network, {
-        commitment: "confirmed",
-        encoding: "base64",
-      });
-      if (!account) {
-        throw new Error(`${BatchError.SETTLEMENT_SIMULATION}: missing ${label} ATA: ${ata}`);
-      }
-      if (account.owner.toString() !== tokenProgram) {
-        throw new Error(
-          `${BatchError.SETTLEMENT_SIMULATION}: ${label} ATA is not owned by ${tokenProgram}: ${ata}`,
-        );
-      }
-    }
+    await assertSettlementAccounts(this.signer, requirements, {
+      deposit,
+      payer,
+      tokenProgram,
+      treasuryOwner: treasuryOwnerOf(this.config, requirements.network),
+    });
   }
 
   private async settleVoucher(

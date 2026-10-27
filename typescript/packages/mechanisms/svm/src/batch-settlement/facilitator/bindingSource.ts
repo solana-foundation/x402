@@ -81,6 +81,15 @@ export interface BatchSvmFacilitatorConfig {
   maxComputeUnits?: number | undefined;
   maxRequiredSignatures?: number | undefined;
   /**
+   * Transaction message versions this facilitator accepts for client-built
+   * setup transactions (`open`, `top_up`, `request_close`), advertised as
+   * `extra.transactionVersions` in `/supported`. A transaction of any other
+   * version is rejected with `unsupported_transaction_version` before any
+   * instruction is inspected; a legacy message is accepted exactly when
+   * version 0 is. Defaults to `[0, 1]`.
+   */
+  transactionVersions?: readonly (0 | 1)[] | undefined;
+  /**
    * Optional fallback for a channel row with no receiver-authorizer binding.
    * Reads the open transaction's binding memo and writes it back through
    * `recordOpen` when the row is absent. Used only when set here: the

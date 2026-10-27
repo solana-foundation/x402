@@ -48,6 +48,7 @@ import {
 import {
   decodeTransactionFromPayload,
   isAcceptedTransactionVersion,
+  normalizeAcceptedTransactionVersions,
   normalizeClientTransactionVersions,
   peekWireTransactionVersion,
   resolveTransactionVersion,
@@ -111,6 +112,25 @@ describe("isAcceptedTransactionVersion", () => {
     expect(isAcceptedTransactionVersion("0")).toBe(false);
     expect(isAcceptedTransactionVersion("1")).toBe(false);
     expect(isAcceptedTransactionVersion("v0")).toBe(false);
+  });
+});
+
+describe("configured accepted transaction-version sets", () => {
+  it("polices legacy as version 0", () => {
+    expect(isAcceptedTransactionVersion("legacy", [0])).toBe(true);
+    expect(isAcceptedTransactionVersion("legacy", [1])).toBe(false);
+    expect(isAcceptedTransactionVersion(0, [1])).toBe(false);
+    expect(isAcceptedTransactionVersion(1, [0])).toBe(false);
+    expect(isAcceptedTransactionVersion(1, [0, 1])).toBe(true);
+    expect(isAcceptedTransactionVersion(2, [0, 1, 2])).toBe(false);
+  });
+
+  it("normalizes a facilitator's transactionVersions option", () => {
+    expect(normalizeAcceptedTransactionVersions(undefined)).toEqual([0, 1]);
+    expect(normalizeAcceptedTransactionVersions([1, 0, 1])).toEqual([0, 1]);
+    expect(normalizeAcceptedTransactionVersions([0])).toEqual([0]);
+    expect(() => normalizeAcceptedTransactionVersions([])).toThrow(/non-empty/);
+    expect(() => normalizeAcceptedTransactionVersions([0, 2])).toThrow(/non-empty/);
   });
 });
 
@@ -395,6 +415,63 @@ describe("verifier version gates", () => {
         }),
       ).resolves.toBe(true);
     }
+  });
+
+  it("exact facilitator advertises and enforces its configured accepted set", async () => {
+    const facilitator = new ExactSvmFacilitatorScheme(facilitatorSigner(), undefined, {
+      transactionVersions: [0],
+    });
+    expect(facilitator.getExtra(SOLANA_DEVNET_CAIP2)?.transactionVersions).toEqual([0]);
+
+    // A sponsor accepting [0] refuses a valid version 1 payment before any
+    // instruction check (scheme_exact_svm.md §1.5), and still takes version 0
+    // and legacy (policed as version 0) past the gate.
+    const v1 = await exactPayment(1);
+    await expect(
+      facilitator.verify(v2Payload(v1.transaction, v1.requirements), v1.requirements),
+    ).resolves.toMatchObject({
+      isValid: false,
+      invalidReason: Errors.ErrUnsupportedTransactionVersion,
+    });
+    for (const version of [0, "legacy"] as const) {
+      const { transaction, requirements } = await exactPayment(version);
+      const result = await facilitator.verify(v2Payload(transaction, requirements), requirements);
+      expect(result.invalidReason).not.toBe(Errors.ErrUnsupportedTransactionVersion);
+    }
+  });
+
+  it("exact facilitator accepting [1] only refuses version 0 and legacy", async () => {
+    const facilitator = new ExactSvmFacilitatorScheme(facilitatorSigner(), undefined, {
+      transactionVersions: [1],
+    });
+    for (const version of [0, "legacy"] as const) {
+      const { transaction, requirements } = await exactPayment(version);
+      await expect(
+        facilitator.verify(v2Payload(transaction, requirements), requirements),
+      ).resolves.toMatchObject({ invalidReason: Errors.ErrUnsupportedTransactionVersion });
+    }
+  });
+
+  it("exact facilitator rejects an invalid transactionVersions option at construction", () => {
+    for (const transactionVersions of [[], [2], ["legacy"]] as unknown as (0 | 1)[][]) {
+      expect(
+        () =>
+          new ExactSvmFacilitatorScheme(facilitatorSigner(), undefined, { transactionVersions }),
+      ).toThrow(/transactionVersions must be a non-empty list of 0 and\/or 1/);
+    }
+  });
+
+  it("exact facilitator caps a version 1 compute unit limit at the 400,000 default", async () => {
+    const facilitator = new ExactSvmFacilitatorScheme(facilitatorSigner());
+    const { transaction, requirements } = await exactPayment(1, {
+      v1Config: { computeUnitLimit: 400_001, loadedAccountsDataSizeLimit: 4_194_304 },
+    });
+    await expect(
+      facilitator.verify(v2Payload(transaction, requirements), requirements),
+    ).resolves.toMatchObject({
+      isValid: false,
+      invalidReason: Errors.ErrComputeLimitInstructionTooHigh,
+    });
   });
 
   it("exact facilitator still accepts a real legacy message past the gate", async () => {

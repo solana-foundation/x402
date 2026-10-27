@@ -47,10 +47,10 @@ import {
 } from "../../payment-channels/voucher";
 import { SettlementCache } from "../../settlement-cache";
 import type { FacilitatorSigningCapabilities, FacilitatorSvmSigner } from "../../signer";
-import { ADVERTISED_TRANSACTION_VERSIONS } from "../../constants";
 import { isUptoSvmPayload, type UptoSvmPayloadV2 } from "../../types";
 import {
   decodeTransactionFromPayload,
+  normalizeAcceptedTransactionVersions,
   recordPendingOrTerminal,
   transactionMessageHash,
   TransactionOnchainFailureError,
@@ -205,6 +205,16 @@ export interface UptoSvmFacilitatorConfig {
    */
   maxRequiredSignatures?: number;
   /**
+   * Transaction message versions this facilitator accepts for the client's
+   * open, advertised as `extra.transactionVersions` in `/supported`. An open
+   * of any other version is rejected with `unsupported_transaction_version`
+   * before any instruction is inspected; a legacy message is accepted exactly
+   * when version 0 is.
+   *
+   * Default: `[0, 1]`
+   */
+  transactionVersions?: readonly (0 | 1)[];
+  /**
    * Priority price (microlamports per compute unit) for facilitator-submitted
    * v1 settlement transactions. It is converted to v1's total lamport fee;
    * `0` omits the config field. Under v0 it is a `SetComputeUnitPrice`
@@ -335,6 +345,7 @@ export class UptoSvmScheme implements SchemeNetworkFacilitator {
   private readonly resolveCallerIdentity: UptoSvmFacilitatorConfig["resolveCallerIdentity"];
   private readonly signer: PaymentChannelFacilitatorSigner;
   private readonly facilitatorTransactionVersion: FacilitatorTransactionVersion;
+  private readonly transactionVersions: readonly (0 | 1)[];
 
   private readonly getKitSigner: (feePayer: Address) => FacilitatorSigningCapabilities;
 
@@ -365,6 +376,7 @@ export class UptoSvmScheme implements SchemeNetworkFacilitator {
     ) {
       throw new Error("paymentChannelsTreasuryOwner must be a base58 Solana address");
     }
+    this.transactionVersions = normalizeAcceptedTransactionVersions(config.transactionVersions);
     assertPaymentChannelFacilitatorSigner(signer, "UptoSvmScheme");
     this.signer = signer;
     this.getKitSigner = signer.getSigner.bind(signer);
@@ -434,7 +446,7 @@ export class UptoSvmScheme implements SchemeNetworkFacilitator {
     const randomIndex = Math.floor(Math.random() * addresses.length);
     const extra: Record<string, unknown> = {
       feePayer: addresses[randomIndex],
-      transactionVersions: [...ADVERTISED_TRANSACTION_VERSIONS],
+      transactionVersions: [...this.transactionVersions],
     };
     if (this.authorizerSigner) {
       extra.receiverAuthorizer = this.authorizerSigner.address;
@@ -473,6 +485,17 @@ export class UptoSvmScheme implements SchemeNetworkFacilitator {
         invalidReason: auth.failure.reason,
         invalidMessage: auth.failure.message,
         payer: auth.failure.payer,
+      };
+    }
+    // The deposit settle refuses an open whose channel already exists, so the
+    // preflight does too: a verify that passed would otherwise promise a
+    // deposit that cannot land.
+    const channelRpc = accountFetchRpc(this.signer, requirements.network) as ChannelRpc;
+    if (await channelExists(channelRpc, auth.ctx.p.channelId)) {
+      return {
+        isValid: false,
+        invalidReason: ERR_CHANNEL_ALREADY_OPEN,
+        payer: auth.ctx.p.from,
       };
     }
     return { isValid: true, invalidReason: undefined, payer: auth.ctx.p.from };
@@ -1433,6 +1456,7 @@ export class UptoSvmScheme implements SchemeNetworkFacilitator {
         maxComputeUnits: this.config.maxComputeUnits,
         maxPriorityFeeMicroLamports: this.config.maxPriorityFeeMicroLamports,
         maxRequiredSignatures: this.config.maxRequiredSignatures,
+        acceptedTransactionVersions: this.transactionVersions,
         memo: resolveUptoSvmMemo(requirements.extra),
         mint: requirements.asset,
         openSlot,

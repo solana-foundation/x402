@@ -612,6 +612,12 @@ export interface VerifyOpenExpected {
    * check still applies).
    */
   maxRequiredSignatures?: number | undefined;
+  /**
+   * Transaction message versions the facilitator accepts. Any other version is
+   * rejected before any instruction is inspected; legacy is accepted exactly
+   * when version 0 is. Unset accepts `[0, 1]`.
+   */
+  acceptedTransactionVersions?: readonly number[] | undefined;
 }
 
 /** Expected bindings for a canonical six-account `top_up` transaction. */
@@ -626,6 +632,8 @@ export interface VerifyTopUpExpected {
   programId?: string | undefined;
   maxComputeUnits?: number | undefined;
   maxPriorityFeeMicroLamports?: number | undefined;
+  /** As {@link VerifyOpenExpected.acceptedTransactionVersions}. */
+  acceptedTransactionVersions?: readonly number[] | undefined;
 }
 
 /** Decode and validate the canonical top-up transaction layout and bindings. */
@@ -635,9 +643,11 @@ export async function verifyTopUpTransaction(
 ): Promise<void> {
   const decoded = getTransactionDecoder().decode(getBase64Codec().encode(transactionBase64));
   const compiledMessage = getCompiledTransactionMessageDecoder().decode(decoded.messageBytes);
-  if (!isAcceptedTransactionVersion(compiledMessage.version)) {
+  if (
+    !isAcceptedTransactionVersion(compiledMessage.version, expected.acceptedTransactionVersions)
+  ) {
     throw new Error(
-      `${ErrUnsupportedTransactionVersion}: verifyTopUpTransaction: transaction message version ${String(compiledMessage.version)} is not accepted; top-up transactions must be legacy, version 0, or version 1`,
+      `${ErrUnsupportedTransactionVersion}: verifyTopUpTransaction: transaction message version ${String(compiledMessage.version)} is not accepted; accepted versions: ${acceptedVersionsLabel(expected.acceptedTransactionVersions)}`,
     );
   }
   const oversized = transactionSizeExceeded(transactionBase64, compiledMessage.version);
@@ -807,9 +817,9 @@ export async function verifyOpenTransaction(
   // keeps it: the ComputeBudget prefix on legacy and version 0, the message
   // config on version 1. A version this verifier does not model would pass
   // those checks vacuously, so reject it first.
-  if (!isAcceptedTransactionVersion(message.version)) {
+  if (!isAcceptedTransactionVersion(message.version, expected.acceptedTransactionVersions)) {
     throw new Error(
-      `${ErrUnsupportedTransactionVersion}: verifyOpenTransaction: transaction message version ${String(message.version)} is not accepted; open transactions must be legacy, version 0, or version 1`,
+      `${ErrUnsupportedTransactionVersion}: verifyOpenTransaction: transaction message version ${String(message.version)} is not accepted; accepted versions: ${acceptedVersionsLabel(expected.acceptedTransactionVersions)}`,
     );
   }
   const oversized = transactionSizeExceeded(transactionBase64, message.version);
@@ -1019,7 +1029,14 @@ export async function verifyOpenTransaction(
     }
   }
 
-  const openData = getOpenInstructionDataDecoder().decode(openIx.data);
+  // `read` rather than `decode`: the decoder stops at the end of the open
+  // args, so bytes past them would otherwise be signed without being read.
+  const [openData, openDataEnd] = getOpenInstructionDataDecoder().read(openIx.data, 0);
+  if (openDataEnd !== openIx.data.length) {
+    throw new Error(
+      `verifyOpenTransaction: open instruction data has ${openIx.data.length - openDataEnd} trailing bytes after the open args`,
+    );
+  }
   const { deposit, gracePeriod, openSlot, recipients, salt } = openData.openArgs;
 
   if (deposit === 0n) throw new Error("verifyOpenTransaction: deposit must be greater than zero");
@@ -1402,6 +1419,17 @@ export function parseU64(value: bigint | number | string, name: string): bigint 
   }
   if (parsed < 0n || parsed > U64_MAX) throw new Error(`${name} must fit in u64`);
   return parsed;
+}
+
+/**
+ * Describe an accepted-version set for an error message.
+ *
+ * @param accepted - The configured accepted versions, or undefined for the default
+ * @returns The versions, with legacy named where version 0 admits it
+ */
+function acceptedVersionsLabel(accepted: readonly number[] | undefined): string {
+  const versions = accepted ?? [0, 1];
+  return [...(versions.includes(0) ? ["legacy"] : []), ...versions.map(String)].join(", ");
 }
 
 /**

@@ -130,6 +130,11 @@ export interface VerifyRequestCloseExpected {
   programId?: string | undefined;
   maxComputeUnits?: number | undefined;
   maxPriorityFeeMicroLamports?: number | undefined;
+  /**
+   * Transaction message versions the facilitator accepts; legacy is accepted
+   * exactly when version 0 is. Unset accepts `[0, 1]`.
+   */
+  acceptedTransactionVersions?: readonly number[] | undefined;
 }
 
 /**
@@ -148,9 +153,11 @@ export async function verifyRequestCloseTransaction(
   }
   const decoded = getTransactionDecoder().decode(getBase64Codec().encode(transactionBase64));
   const compiledMessage = getCompiledTransactionMessageDecoder().decode(decoded.messageBytes);
-  if (!isAcceptedTransactionVersion(compiledMessage.version)) {
+  if (
+    !isAcceptedTransactionVersion(compiledMessage.version, expected.acceptedTransactionVersions)
+  ) {
     throw new Error(
-      `${ErrUnsupportedTransactionVersion}: verifyRequestCloseTransaction: transaction message version ${String(compiledMessage.version)} is not accepted; request-close transactions must be legacy, version 0, or version 1`,
+      `${ErrUnsupportedTransactionVersion}: verifyRequestCloseTransaction: transaction message version ${String(compiledMessage.version)} is not accepted`,
     );
   }
   const oversized = transactionSizeExceeded(transactionBase64, compiledMessage.version);

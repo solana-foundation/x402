@@ -34,6 +34,20 @@ export const MAINNET_WS_URL = "wss://api.mainnet-beta.solana.com";
 export const DEFAULT_COMPUTE_UNIT_PRICE_MICROLAMPORTS = 1;
 export const MAX_COMPUTE_UNIT_PRICE_MICROLAMPORTS = 5_000_000; // 5 lamports
 export const DEFAULT_COMPUTE_UNIT_LIMIT = 20_000;
+
+/**
+ * Reference default ceiling on the compute unit limit a sponsor pays for
+ * (scheme_exact_svm.md §2.2.1), applied to a version-0 `SetComputeUnitLimit`
+ * and a version-1 header `computeUnitLimit` alike.
+ */
+export const DEFAULT_MAX_COMPUTE_UNITS = 400_000;
+
+/**
+ * Default ceiling on a sponsored transaction's required signatures: the client
+ * and the fee payer. Any other required signer is a base fee the sponsor pays
+ * for a party outside the payment (scheme_exact_svm.md §2.1.4).
+ */
+export const DEFAULT_MAX_REQUIRED_SIGNATURES = 2;
 export const MAX_MEMO_BYTES = 256;
 
 /**
