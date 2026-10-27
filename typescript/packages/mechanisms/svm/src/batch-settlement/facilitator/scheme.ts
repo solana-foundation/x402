@@ -48,8 +48,6 @@ import {
   broadcastOpen,
   getChannelDistributionHash,
   simulateOpenSettleDistribute,
-  submitChannelTransactionWithSigner,
-  ChannelSimulationError,
   SettlementConfirmationTimeoutError,
 } from "../../payment-channels/facilitator";
 import {
@@ -117,8 +115,8 @@ import {
   CHANNEL_READ_ATTEMPTS,
   CHANNEL_READ_INITIAL_BACKOFF_MS,
   COMPLETED_BROADCAST_SUFFIX,
-  MAX_CHANNELS_PER_SETTLE_TX,
 } from "./constants";
+import { type RedemptionPolicy, redemptionPolicy, submitRedemptionTransaction } from "./redemption";
 import type {
   BatchDelegatedReceiverAuth,
   BatchReceiverBindingHistoryReader,
@@ -175,6 +173,7 @@ export class BatchSvmScheme implements SchemeNetworkFacilitator {
   private readonly maxIdleSecs: number;
   private readonly receiverBindingHistoryReader: BatchReceiverBindingHistoryReader | undefined;
   private readonly delegatedReceiverAuth: BatchDelegatedReceiverAuth | undefined;
+  private readonly redemption: RedemptionPolicy;
 
   constructor(
     signer: FacilitatorSvmSigner,
@@ -192,6 +191,7 @@ export class BatchSvmScheme implements SchemeNetworkFacilitator {
     this.distributionPasses = distributionsForStore(this.pendingStore);
     this.maxIdleSecs = assertMaxIdleSecs(config.maxIdleSecs);
     this.receiverBindingHistoryReader = config.receiverBindingHistoryReader;
+    this.redemption = redemptionPolicy(config.redemptionTransactionVersion);
   }
 
   getExtra(_: Network): Record<string, unknown> {
@@ -199,6 +199,8 @@ export class BatchSvmScheme implements SchemeNetworkFacilitator {
     return {
       feePayer: addresses[Math.floor(Math.random() * addresses.length)],
       transactionVersions: [...ADVERTISED_TRANSACTION_VERSIONS],
+      maxClaimChannels: this.redemption.maxClaimChannels,
+      maxSettleChannels: this.redemption.maxSettleChannels,
       // Copied into the 402: how long servers have to claim before an idle close.
       ...(this.maxIdleSecs > 0 ? { maxIdleSecs: this.maxIdleSecs } : {}),
       ...(this.delegatedReceiverAuth
@@ -221,6 +223,7 @@ export class BatchSvmScheme implements SchemeNetworkFacilitator {
       network,
       signer: this.signer,
       storage: this.channelStorage,
+      useTransactionV1: this.redemption.version === 1,
     });
   }
 
@@ -405,6 +408,9 @@ export class BatchSvmScheme implements SchemeNetworkFacilitator {
     payload: BatchClaimPayload,
     requirements: PaymentRequirements,
   ): Promise<SettleResponse> {
+    if (payload.claims.length > this.redemption.maxClaimChannels) {
+      throw new Error(`${BatchError.PAYLOAD_TYPE}: claims exceed maxClaimChannels`);
+    }
     const prepared: PreparedClaim[] = [];
     for (const claim of payload.claims) {
       const terms = await this.resolveTerms(claim.channelConfig, requirements, "payload");
@@ -538,7 +544,7 @@ export class BatchSvmScheme implements SchemeNetworkFacilitator {
   ): Promise<SettleResponse> {
     if (
       payload.channels.length === 0 ||
-      payload.channels.length > MAX_CHANNELS_PER_SETTLE_TX ||
+      payload.channels.length > this.redemption.maxSettleChannels ||
       new Set(payload.channels.map(item => item.channelId)).size !== payload.channels.length
     ) {
       throw new Error(`${BatchError.PAYLOAD_TYPE}: invalid channel batch`);
@@ -1637,22 +1643,16 @@ export class BatchSvmScheme implements SchemeNetworkFacilitator {
   ): Promise<
     { ok: true; replayed: boolean; signature: Signature } | { ok: false; response: SettleResponse }
   > {
-    const broadcast = await this.broadcastDurably(key, network, payer, async onBroadcast => {
-      try {
-        return await submitChannelTransactionWithSigner(
-          this.resolveFeePayer(feePayer),
-          this.signer,
-          network,
-          instructions,
-          { onPrepared: onBroadcast },
-        );
-      } catch (error) {
-        if (error instanceof ChannelSimulationError) {
-          throw new Error(`${BatchError.SETTLEMENT_SIMULATION}: ${String(error.cause)}`);
-        }
-        throw error;
-      }
-    });
+    const broadcast = await this.broadcastDurably(key, network, payer, onBroadcast =>
+      submitRedemptionTransaction(
+        this.resolveFeePayer(feePayer),
+        this.signer,
+        network,
+        instructions,
+        this.redemption.version,
+        onBroadcast,
+      ),
+    );
     return broadcast.ok
       ? {
           ok: true,

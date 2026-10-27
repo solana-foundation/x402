@@ -22,7 +22,8 @@ import type { ChannelState, ChannelStore } from "./types";
  * The spec packs no more than four channels into one claim transaction, and a
  * full batch is never silently truncated.
  */
-const MAX_CHANNELS_PER_BATCH = 4;
+/** Channels per claim or settle request when the facilitator advertises no capacity. */
+const DEFAULT_CHANNELS_PER_BATCH = 4;
 
 /** Submits a server-authored redemption payload; normally a facilitator. */
 export type RedemptionSettler = (
@@ -58,7 +59,7 @@ export interface BatchChannelManagerConfig {
    * the ones the server advertises.
    */
   requirements: PaymentRequirements;
-  /** Channels per claim or distribute transaction. Defaults to, and is capped at, the spec's four. */
+  /** Channels per claim or distribute transaction, capped at the facilitator's advertised capacity. */
   maxChannelsPerBatch?: number | undefined;
   /**
    * RPC endpoint for confirmed watermark reads. Omit to use the public
@@ -207,7 +208,7 @@ export class BatchChannelManager {
     const claimable = unclaimed.filter(channel => channel.status === "open");
     const closing = unclaimed.filter(channel => channel.status === "closing");
     const result = { claimed: [] as string[], sealed: [] as string[] };
-    for (const batch of chunk(claimable, this.batchSize())) {
+    for (const batch of chunk(claimable, this.batchSize("maxClaimChannels"))) {
       await this.claimBatch(batch, result);
     }
     for (const channel of closing) {
@@ -441,7 +442,7 @@ export class BatchChannelManager {
       channel => channel.status === "open" && channel.settled > channel.payoutWatermark,
     );
     const distributed: string[] = [];
-    for (const batch of chunk(payable, this.batchSize())) {
+    for (const batch of chunk(payable, this.batchSize("maxSettleChannels"))) {
       const response = await this.config.settle(
         {
           accepted: this.config.requirements,
@@ -576,17 +577,21 @@ export class BatchChannelManager {
   }
 
   /**
-   * How many channels one redemption transaction carries.
+   * How many channels one redemption transaction carries: the facilitator's
+   * advertised capacity copied into the requirements (four when absent),
+   * narrowed by `maxChannelsPerBatch`. A `claims[]` or `channels[]` longer
+   * than that capacity is not a valid request.
    *
+   * @param field - `maxClaimChannels` for claims, `maxSettleChannels` for distributions
    * @returns Channels to pack into one redemption transaction
    */
-  private batchSize(): number {
-    // Clamp to the spec's ceiling: a `claims[]` or `channels[]` array longer
-    // than four is not a valid request (spec 4.5).
-    return Math.min(
-      MAX_CHANNELS_PER_BATCH,
-      Math.max(1, this.config.maxChannelsPerBatch ?? MAX_CHANNELS_PER_BATCH),
-    );
+  private batchSize(field: "maxClaimChannels" | "maxSettleChannels"): number {
+    const advertised = this.config.requirements.extra?.[field];
+    const capacity =
+      typeof advertised === "number" && Number.isSafeInteger(advertised) && advertised > 0
+        ? advertised
+        : DEFAULT_CHANNELS_PER_BATCH;
+    return Math.min(capacity, Math.max(1, this.config.maxChannelsPerBatch ?? capacity));
   }
 }
 

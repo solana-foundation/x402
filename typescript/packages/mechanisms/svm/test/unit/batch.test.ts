@@ -1323,7 +1323,9 @@ describe("batch-settlement SVM", () => {
       const extra = facilitator.getExtra(SOLANA_DEVNET_CAIP2);
       expect(extra).toEqual({
         feePayer: feePayer.address,
+        maxClaimChannels: 18,
         maxIdleSecs: 604_800,
+        maxSettleChannels: 13,
         transactionVersions: [0, 1],
       });
       // The advertised list is a copy, so mutating one response cannot change the next.
@@ -1344,6 +1346,8 @@ describe("batch-settlement SVM", () => {
       });
       expect(disabled.getExtra(SOLANA_DEVNET_CAIP2)).toEqual({
         feePayer: feePayer.address,
+        maxClaimChannels: 18,
+        maxSettleChannels: 13,
         transactionVersions: [0, 1],
       });
       expect(

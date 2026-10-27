@@ -1,5 +1,9 @@
 export { BatchSvmScheme } from "./scheme";
-export { MAX_CHANNELS_PER_SETTLE_TX } from "./constants";
+export {
+  MAX_CHANNELS_PER_SETTLE_TX,
+  V1_MAX_CLAIM_CHANNELS,
+  V1_MAX_SETTLE_CHANNELS,
+} from "./constants";
 export type { BatchSvmFacilitatorConfig } from "./scheme";
 export {
   InMemoryPaymentChannelStorage,

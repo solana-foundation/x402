@@ -44,6 +44,8 @@ export interface BatchSvmRentCleanupManagerConfig {
    * cleanup passes that do not override {@link RentCleanupOptions.maxIdleSecs}.
    */
   maxIdleSecs?: number;
+  /** Build reclaim and close batches as version 1 (62 reclaims per transaction). */
+  useTransactionV1?: boolean;
 }
 
 /**

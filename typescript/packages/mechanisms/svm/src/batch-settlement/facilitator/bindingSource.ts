@@ -63,6 +63,12 @@ export interface BatchSvmFacilitatorConfig {
    * is not advertised. Defaults to `DEFAULT_MAX_IDLE_SECS` (seven days).
    */
   maxIdleSecs?: number | undefined;
+  /**
+   * Message version of the facilitator-built redemption transactions (claim,
+   * settle, seal, refund, rent cleanup). Defaults to `1`, which advertises
+   * `maxClaimChannels` 18 and `maxSettleChannels` 13; `0` keeps four of each.
+   */
+  redemptionTransactionVersion?: 0 | 1 | undefined;
   maxPriorityFeeMicroLamports?: number | undefined;
   maxComputeUnits?: number | undefined;
   maxRequiredSignatures?: number | undefined;

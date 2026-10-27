@@ -2,6 +2,7 @@
 /** Wire types for the SVM `batch-settlement` scheme. */
 
 import { BatchError } from "./errors";
+import { V1_MAX_CLAIM_CHANNELS } from "./facilitator/constants";
 
 export { BATCH_SETTLEMENT_SCHEME } from "./constants";
 
@@ -311,7 +312,8 @@ export function isBatchFacilitatorPayload(value: unknown): value is BatchFacilit
     return (
       Array.isArray(value.claims) &&
       value.claims.length > 0 &&
-      value.claims.length <= 4 &&
+      // The protocol maximum; the facilitator checks its advertised capacity.
+      value.claims.length <= V1_MAX_CLAIM_CHANNELS &&
       value.claims.every(isBatchVoucherClaim)
     );
   }
