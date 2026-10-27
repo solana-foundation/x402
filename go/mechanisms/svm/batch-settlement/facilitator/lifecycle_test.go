@@ -1490,16 +1490,34 @@ func TestBatchFacilitatorLifecycle(t *testing.T) {
 	t.Run("rejects empty and oversized redemption batches", func(t *testing.T) {
 		scheme := newScheme(t, newSigner(t), nil)
 		_, err := scheme.settleClaims(ctx, batchsettlement.BatchClaimPayload{Claims: nil, Type: batchsettlement.PayloadTypeClaim}, requirements())
-		require.ErrorContains(t, err, batchsettlement.ErrFeePayerMismatch)
+		require.ErrorContains(t, err, batchsettlement.ErrPayloadType)
 
-		channels := make([]batchsettlement.BatchSettleChannel, MaxChannelsPerSettleTx+1)
-		for i := range channels {
-			channels[i] = batchsettlement.BatchSettleChannel{ChannelConfig: channelConfig, ChannelID: channelID}
+		oversized := func(scheme *BatchSvmScheme, claims, settles int) (error, error) {
+			claimList := make([]batchsettlement.BatchVoucherClaim, claims)
+			for i := range claimList {
+				claimList[i] = batchsettlement.BatchVoucherClaim{ChannelConfig: channelConfig, ChannelID: channelID}
+			}
+			_, claimErr := scheme.settleClaims(ctx, batchsettlement.BatchClaimPayload{Type: batchsettlement.PayloadTypeClaim, Claims: claimList}, requirements())
+			channels := make([]batchsettlement.BatchSettleChannel, settles)
+			for i := range channels {
+				channels[i] = batchsettlement.BatchSettleChannel{ChannelConfig: channelConfig, ChannelID: channelID}
+			}
+			_, settleErr := scheme.settleDistributions(ctx, batchsettlement.BatchSettlePayload{
+				Type: batchsettlement.PayloadTypeSettle, Channels: channels,
+			}, requirements())
+			return claimErr, settleErr
 		}
-		_, err = scheme.settleDistributions(ctx, batchsettlement.BatchSettlePayload{
-			Type: batchsettlement.PayloadTypeSettle, Channels: channels,
-		}, requirements())
-		require.ErrorContains(t, err, "invalid channel batch")
+		// Version 1 (default): the advertised capacity is 18 claims and 13 channels.
+		claimErr, settleErr := oversized(scheme, batchsettlement.V1MaxClaimChannels+1, batchsettlement.V1MaxSettleChannels+1)
+		require.ErrorContains(t, claimErr, batchsettlement.ErrPayloadType)
+		require.ErrorContains(t, claimErr, "maxClaimChannels")
+		require.ErrorContains(t, settleErr, "invalid channel batch")
+
+		// Version 0: four of each, so five is over capacity.
+		v0 := newScheme(t, newSigner(t), &Config{UseTransactionV0: true})
+		claimErr, settleErr = oversized(v0, MaxChannelsPerSettleTx+1, MaxChannelsPerSettleTx+1)
+		require.ErrorContains(t, claimErr, "maxClaimChannels")
+		require.ErrorContains(t, settleErr, "invalid channel batch")
 	})
 
 	t.Run("persists, reconciles, and forgets durable broadcast signatures", func(t *testing.T) {

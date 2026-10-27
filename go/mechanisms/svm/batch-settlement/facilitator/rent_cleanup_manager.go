@@ -42,6 +42,9 @@ type RentCleanupConfig struct {
 	MaxIdleSecs                   *int64
 	ComputeUnitPriceMicroLamports *uint64
 	SettleComputeUnitLimit        *uint32
+	// UseTransactionV0 builds cleanup transactions as version 0 instead of the
+	// default version 1 (which packs up to DefaultMaxReclaimsPerTxV1 reclaims).
+	UseTransactionV0 bool
 }
 
 // BatchSvmRentCleanupManager recovers rent a facilitator fronts for batch channels.
@@ -63,6 +66,7 @@ func NewBatchSvmRentCleanupManager(config RentCleanupConfig) *BatchSvmRentCleanu
 			SettleComputeUnitLimit:        config.SettleComputeUnitLimit,
 			MaxIdleSecs:                   config.MaxIdleSecs,
 			AbandonPolicy:                 paymentchannels.OpenAbandonPolicyIdle,
+			UseTransactionV1:              !config.UseTransactionV0,
 			Label:                         "BatchSvmRentCleanupManager",
 		}),
 	}

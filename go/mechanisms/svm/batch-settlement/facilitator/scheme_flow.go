@@ -495,6 +495,9 @@ func (f *BatchSvmScheme) simulateOpen(ctx context.Context, validated ValidatedDe
 }
 
 func (f *BatchSvmScheme) settleClaims(ctx context.Context, payload batchsettlement.BatchClaimPayload, requirements types.PaymentRequirements) (*x402.SettleResponse, error) {
+	if len(payload.Claims) == 0 || len(payload.Claims) > f.maxClaimChannels() {
+		return nil, fmt.Errorf("%s: claims exceed the facilitator's maxClaimChannels %d", batchsettlement.ErrPayloadType, f.maxClaimChannels())
+	}
 	prepared := make([]PreparedClaim, 0, len(payload.Claims))
 	var instructions []solana.Instruction
 	for _, claim := range payload.Claims {
@@ -654,7 +657,7 @@ func (f *BatchSvmScheme) settleClaims(ctx context.Context, payload batchsettleme
 }
 
 func (f *BatchSvmScheme) settleDistributions(ctx context.Context, payload batchsettlement.BatchSettlePayload, requirements types.PaymentRequirements) (*x402.SettleResponse, error) {
-	if len(payload.Channels) == 0 || len(payload.Channels) > MaxChannelsPerSettleTx {
+	if len(payload.Channels) == 0 || len(payload.Channels) > f.maxSettleChannels() {
 		return nil, fmt.Errorf("%s: invalid channel batch", batchsettlement.ErrPayloadType)
 	}
 	seen := map[string]struct{}{}

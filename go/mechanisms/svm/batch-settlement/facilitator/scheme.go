@@ -46,6 +46,11 @@ type Config struct {
 	// only when ResolveCallerIdentity is set. The identity is written on
 	// ChannelStorage, the same store as every other channel write.
 	DelegatedReceiverAuth *DelegatedReceiverAuth
+	// UseTransactionV0 builds the facilitator's own redemption transactions
+	// (claim, settle, seal, refund, rent cleanup) as version 0 instead of the
+	// default version 1, for a network without transaction v1 (SIMD-0385). It
+	// also lowers the advertised maxClaimChannels and maxSettleChannels to 4.
+	UseTransactionV0 bool
 }
 
 type schemeHooks struct {
@@ -138,6 +143,10 @@ func (f *BatchSvmScheme) getExtra(ctx context.Context, network x402.Network) map
 		// top-up, and close transactions. Servers copy it into the 402.
 		svm.ExtraTransactionVersions: append([]int(nil), svm.AdvertisedTransactionVersions...),
 	}
+	// Redemption capacity of the message version this facilitator builds.
+	// Servers copy it and author claim/settle batches no longer than it.
+	extra[batchsettlement.ExtraMaxClaimChannels] = f.maxClaimChannels()
+	extra[batchsettlement.ExtraMaxSettleChannels] = f.maxSettleChannels()
 	if f.maxIdleSecs > 0 {
 		extra[batchsettlement.ExtraMaxIdleSecs] = f.maxIdleSecs
 	}
@@ -145,6 +154,55 @@ func (f *BatchSvmScheme) getExtra(ctx context.Context, network x402.Network) map
 		extra[batchsettlement.ExtraReceiverAuthorizer] = f.delegated.ReceiverAuthorizer
 	}
 	return extra
+}
+
+// maxClaimChannels is the claim capacity this facilitator advertises and enforces.
+func (f *BatchSvmScheme) maxClaimChannels() int {
+	if f.config.UseTransactionV0 {
+		return batchsettlement.DefaultBatchChannels
+	}
+	return batchsettlement.V1MaxClaimChannels
+}
+
+// maxSettleChannels is the settle capacity this facilitator advertises and enforces.
+func (f *BatchSvmScheme) maxSettleChannels() int {
+	if f.config.UseTransactionV0 {
+		return batchsettlement.DefaultBatchChannels
+	}
+	return batchsettlement.V1MaxSettleChannels
+}
+
+// redemptionOptions sizes a facilitator-built redemption. Version 1 carries a
+// compute budget sized for the batch: 25,000 units per payment-channels
+// instruction plus 25,000, never below the single-channel default and capped
+// at the runtime maximum.
+func (f *BatchSvmScheme) redemptionOptions(instructions []solana.Instruction, onPrepared func(string, string) error) paymentchannels.SubmitSettleOptions {
+	opts := paymentchannels.SubmitSettleOptions{OnPrepared: onPrepared, UseTransactionV1: !f.config.UseTransactionV0}
+	if f.config.UseTransactionV0 {
+		return opts
+	}
+	limit := RedemptionComputeUnitLimit(instructions)
+	opts.ComputeUnitLimit = &limit
+	return opts
+}
+
+// RedemptionComputeUnitLimit is the version-1 compute unit limit for a
+// redemption carrying instructions.
+func RedemptionComputeUnitLimit(instructions []solana.Instruction) uint32 {
+	channels := 0
+	for _, instruction := range instructions {
+		if instruction.ProgramID().Equals(paymentchannels.ProgramID) {
+			channels++
+		}
+	}
+	limit := uint64(RedemptionComputeUnitsBase) + uint64(RedemptionComputeUnitsPerChannel)*uint64(channels)
+	if limit < uint64(paymentchannels.DefaultSettleComputeUnitLimit) {
+		limit = uint64(paymentchannels.DefaultSettleComputeUnitLimit)
+	}
+	if limit > MaxRedemptionComputeUnits {
+		limit = MaxRedemptionComputeUnits
+	}
+	return uint32(limit)
 }
 
 // GetSigners returns the fee payer addresses.
@@ -166,10 +224,11 @@ func (f *BatchSvmScheme) GetChannelStorage() paymentchannels.PaymentChannelStora
 func (f *BatchSvmScheme) CreateRentCleanupManager(network x402.Network) *BatchSvmRentCleanupManager {
 	idle := f.maxIdleSecs
 	return NewBatchSvmRentCleanupManager(RentCleanupConfig{
-		Signer:      f.raw,
-		Network:     string(network),
-		MaxIdleSecs: &idle,
-		Storage:     f.channelStorage,
+		Signer:           f.raw,
+		Network:          string(network),
+		MaxIdleSecs:      &idle,
+		Storage:          f.channelStorage,
+		UseTransactionV0: f.config.UseTransactionV0,
 	})
 }
 
@@ -745,9 +804,11 @@ func (f *BatchSvmScheme) submitRedemption(ctx context.Context, feePayer, network
 		if err != nil {
 			return "", err
 		}
-		signature, err := paymentchannels.SubmitChannelTransactionWithSigner(ctx, f.raw, f.signer, feeKey, network, instructions, paymentchannels.SubmitSettleOptions{
-			OnPrepared: onPrepared,
-		})
+		opts := f.redemptionOptions(instructions, onPrepared)
+		if opts.UseTransactionV1 && !paymentchannels.FacilitatorV1TransactionFits(feeKey, instructions, opts) {
+			return "", fmt.Errorf("%s: redemption does not fit one version-1 transaction (%d bytes, %d account keys, %d instructions)", batchsettlement.ErrPayloadType, solana.MaxTransactionSizeV1, solana.MaxAddressesV1, solana.MaxInstructionsV1)
+		}
+		signature, err := paymentchannels.SubmitChannelTransactionWithSigner(ctx, f.raw, f.signer, feeKey, network, instructions, opts)
 		if err != nil {
 			var simulation *paymentchannels.ChannelSimulationError
 			if errors.As(err, &simulation) {

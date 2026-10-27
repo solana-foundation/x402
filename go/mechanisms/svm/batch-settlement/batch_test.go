@@ -277,9 +277,11 @@ func TestBatchSettlementSVM(t *testing.T) {
 		facilitator := newFacilitator(t, context.Background(), feePayer, nil)
 		extra := facilitator.GetExtra(svm.SolanaDevnetCAIP2)
 		require.Equal(t, map[string]any{
-			batchsettlement.ExtraFeePayer:    feePayer.Address().String(),
-			batchsettlement.ExtraMaxIdleSecs: paymentchannels.DefaultMaxIdleSecs,
-			svm.ExtraTransactionVersions:     []int{0, 1},
+			batchsettlement.ExtraFeePayer:          feePayer.Address().String(),
+			batchsettlement.ExtraMaxIdleSecs:       paymentchannels.DefaultMaxIdleSecs,
+			batchsettlement.ExtraMaxClaimChannels:  batchsettlement.V1MaxClaimChannels,
+			batchsettlement.ExtraMaxSettleChannels: batchsettlement.V1MaxSettleChannels,
+			svm.ExtraTransactionVersions:           []int{0, 1},
 		}, extra)
 		require.Equal(t, []string{feePayer.Address().String()}, facilitator.GetSigners(svm.SolanaDevnetCAIP2))
 
@@ -297,8 +299,10 @@ func TestBatchSettlementSVM(t *testing.T) {
 		disabledIdle := int64(0)
 		disabled := newFacilitator(t, context.Background(), feePayer, &disabledIdle)
 		require.Equal(t, map[string]any{
-			batchsettlement.ExtraFeePayer: feePayer.Address().String(),
-			svm.ExtraTransactionVersions:  []int{0, 1},
+			batchsettlement.ExtraFeePayer:          feePayer.Address().String(),
+			batchsettlement.ExtraMaxClaimChannels:  batchsettlement.V1MaxClaimChannels,
+			batchsettlement.ExtraMaxSettleChannels: batchsettlement.V1MaxSettleChannels,
+			svm.ExtraTransactionVersions:           []int{0, 1},
 		}, disabled.GetExtra(svm.SolanaDevnetCAIP2))
 		require.Panics(t, func() {
 			negative := int64(-1)
