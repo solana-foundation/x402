@@ -316,13 +316,20 @@ func SimulateOpenSettleDistribute(
 	if err != nil {
 		return err
 	}
-	computeLimitIx, err := computebudget.NewSetComputeUnitLimitInstructionBuilder().
-		SetUnits(maxTransactionComputeUnits).
-		ValidateAndBuild()
-	if err != nil {
-		return fmt.Errorf("failed to build compute limit instruction: %w", err)
+	// The simulation follows the open's message version: a version-1 open
+	// (budget in its message config, possibly over the 1232-byte version-0
+	// limit) is simulated as version 1 with no ComputeBudget instructions.
+	v1 := openTx.Message.GetVersion() == solana.MessageVersionV1
+	var instructions []solana.Instruction
+	if !v1 {
+		computeLimitIx, err := computebudget.NewSetComputeUnitLimitInstructionBuilder().
+			SetUnits(maxTransactionComputeUnits).
+			ValidateAndBuild()
+		if err != nil {
+			return fmt.Errorf("failed to build compute limit instruction: %w", err)
+		}
+		instructions = append(instructions, computeLimitIx)
 	}
-	instructions := []solana.Instruction{computeLimitIx}
 	for _, compiled := range openTx.Message.Instructions {
 		program, err := openTx.Message.Program(compiled.ProgramIDIndex)
 		if err != nil {
@@ -361,7 +368,16 @@ func SimulateOpenSettleDistribute(
 	}
 	instructions = append(instructions, distribute)
 
-	tx, err := buildSignedTransaction(ctx, signer, feePayer, channel.Network, simPlaceholderBlockhash, instructions)
+	var tx *solana.Transaction
+	if v1 {
+		units := uint32(maxTransactionComputeUnits)
+		tx, err = compileChannelTransaction(ctx, signer, feePayer, channel.Network, simPlaceholderBlockhash, instructions, SubmitSettleOptions{
+			UseTransactionV1: true,
+			ComputeUnitLimit: &units,
+		})
+	} else {
+		tx, err = buildSignedTransaction(ctx, signer, feePayer, channel.Network, simPlaceholderBlockhash, instructions)
+	}
 	if err != nil {
 		return err
 	}
