@@ -342,7 +342,7 @@ func TestBatchSettlementReceiverAuthorizerBinding(t *testing.T) {
 		require.NoError(t, err)
 		_, err = verifyOpen(t, signAndEncode(t, other), &expected)
 		require.Error(t, err)
-		require.Contains(t, err.Error(), "found 0")
+		require.Contains(t, err.Error(), "names another receiver authorizer")
 
 		both, err := paymentchannels.BuildOpenTransaction(openArgs(func(args *paymentchannels.BuildOpenArgs) {
 			args.Memo = &payerBinding

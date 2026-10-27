@@ -85,7 +85,7 @@ func SetupTransactionError(err error) error {
 	}
 	reason := ErrSetupTransaction
 	switch {
-	case strings.Contains(message, "receiver binding"):
+	case strings.Contains(message, "names another receiver authorizer"):
 		reason = ErrReceiverAuthorizerMismatch
 	case gracePeriodPattern.MatchString(message):
 		reason = ErrWithdrawDelayMismatch

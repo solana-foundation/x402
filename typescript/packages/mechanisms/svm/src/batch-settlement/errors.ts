@@ -46,7 +46,7 @@ export type BatchErrorReason = (typeof BatchError)[keyof typeof BatchError];
 export function rethrowSetupTransactionError(error: unknown): never {
   const detail = error instanceof Error ? error.message : String(error);
   if (detail.startsWith(ErrUnsupportedTransactionVersion)) throw new Error(detail);
-  const reason = detail.includes("receiver binding")
+  const reason = detail.includes("names another receiver authorizer")
     ? BatchError.RECEIVER_AUTHORIZER_MISMATCH
     : /gracePeriod \d+ != expected withdrawDelay/.test(detail)
       ? BatchError.WITHDRAW_DELAY_MISMATCH

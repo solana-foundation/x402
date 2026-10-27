@@ -488,7 +488,8 @@ func TestBatchFacilitatorLifecycle(t *testing.T) {
 			err    error
 			reason string
 		}{
-			{errors.New("verifyOpenTransaction: expected exactly one Memo instruction matching the receiver binding, found 0"), batchsettlement.ErrReceiverAuthorizerMismatch},
+			{errors.New("verifyOpenTransaction: the receiver binding Memo names another receiver authorizer"), batchsettlement.ErrReceiverAuthorizerMismatch},
+			{errors.New("verifyOpenTransaction: expected exactly one receiver-binding Memo, found 0"), batchsettlement.ErrSetupTransaction},
 			{errors.New("verifyOpenTransaction: gracePeriod 901 != expected withdrawDelay 900"), batchsettlement.ErrWithdrawDelayMismatch},
 			{fmt.Errorf("%s: verifyOpenTransaction: unsupported transaction message version 2", svm.ErrUnsupportedTransactionVersion), svm.ErrUnsupportedTransactionVersion},
 			{errors.New("verifyOpenTransaction: transaction is 4097 bytes, above the 4096-byte limit for version 1"), batchsettlement.ErrSetupTransaction},

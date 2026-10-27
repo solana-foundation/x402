@@ -1293,23 +1293,10 @@ function findCanonicalOpenInstruction(
     i += 1;
   }
 
-  let otherMemos = memoDatas;
-  if (limits.expectedBindingMemo !== undefined) {
-    const expectedBinding = limits.expectedBindingMemo;
-    const prefixEnd = expectedBinding.lastIndexOf(":");
-    const prefix = prefixEnd === -1 ? expectedBinding : expectedBinding.slice(0, prefixEnd + 1);
-    const decode = (data: Uint8Array) => new TextDecoder().decode(data);
-    const exact = memoDatas.filter(data => decode(data) === expectedBinding).length;
-    // Any other memo under the same prefix is a second binding, so recovery
-    // would not know which key the payer committed to.
-    const prefixed = memoDatas.filter(data => decode(data).startsWith(prefix)).length;
-    if (exact !== 1 || prefixed !== 1) {
-      throw new Error(
-        `verifyOpenTransaction: expected exactly one Memo instruction matching the receiver binding, found ${exact === 1 ? prefixed : exact}`,
-      );
-    }
-    otherMemos = memoDatas.filter(data => !decode(data).startsWith(prefix));
-  }
+  const otherMemos =
+    limits.expectedBindingMemo === undefined
+      ? memoDatas
+      : withoutReceiverBinding(memoDatas, limits.expectedBindingMemo);
 
   if (limits.expectedMemo !== undefined) {
     if (otherMemos.length !== 1) {
@@ -1426,4 +1413,33 @@ function randomU64(): bigint {
   const bytes = new Uint8Array(8);
   globalThis.crypto.getRandomValues(bytes);
   return new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getBigUint64(0, true);
+}
+
+/**
+ * Checks the open carries exactly one receiver-binding Memo, equal to the
+ * expected one, and returns the other Memos.
+ *
+ * @param memoDatas - Data of every Memo instruction after `open`
+ * @param expectedBinding - The binding Memo the facilitator's key produces
+ * @returns The Memos outside the binding prefix
+ */
+function withoutReceiverBinding(memoDatas: Uint8Array[], expectedBinding: string): Uint8Array[] {
+  const prefixEnd = expectedBinding.lastIndexOf(":");
+  const prefix = prefixEnd === -1 ? expectedBinding : expectedBinding.slice(0, prefixEnd + 1);
+  const decode = (data: Uint8Array) => new TextDecoder().decode(data);
+  const exact = memoDatas.filter(data => decode(data) === expectedBinding).length;
+  // Any other memo under the same prefix is a second binding, so recovery
+  // would not know which key the payer committed to.
+  const prefixed = memoDatas.filter(data => decode(data).startsWith(prefix)).length;
+  if (exact === 0 && prefixed > 0) {
+    throw new Error(
+      "verifyOpenTransaction: the receiver binding Memo names another receiver authorizer",
+    );
+  }
+  if (exact !== 1 || prefixed !== 1) {
+    throw new Error(
+      `verifyOpenTransaction: expected exactly one receiver-binding Memo, found ${exact === 1 ? prefixed : exact}`,
+    );
+  }
+  return memoDatas.filter(data => !decode(data).startsWith(prefix));
 }

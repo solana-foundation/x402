@@ -186,7 +186,9 @@ describe("batch-settlement receiver-authorizer binding", () => {
     const other = await buildOpenPaymentChannelTransaction(
       openArgs({ bindingMemo: encodeReceiverBindingMemo(payer.address) }),
     );
-    await expect(verifyOpen(other.transaction, expected)).rejects.toThrow(/found 0/);
+    await expect(verifyOpen(other.transaction, expected)).rejects.toThrow(
+      /names another receiver authorizer/,
+    );
     const both = await buildOpenPaymentChannelTransaction(
       openArgs({ memo: encodeReceiverBindingMemo(payer.address) }),
     );

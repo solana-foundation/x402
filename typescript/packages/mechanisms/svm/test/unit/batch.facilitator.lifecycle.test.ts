@@ -979,9 +979,13 @@ describe("batch facilitator lifecycle", () => {
     const failures: [unknown, string][] = [
       [
         new Error(
-          "verifyOpenTransaction: expected exactly one Memo instruction matching the receiver binding, found 0",
+          "verifyOpenTransaction: the receiver binding Memo names another receiver authorizer",
         ),
         BatchError.RECEIVER_AUTHORIZER_MISMATCH,
+      ],
+      [
+        new Error("verifyOpenTransaction: expected exactly one receiver-binding Memo, found 0"),
+        BatchError.SETUP_TRANSACTION,
       ],
       [
         new Error("verifyOpenTransaction: gracePeriod 901 != expected withdrawDelay 900"),

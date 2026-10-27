@@ -1165,11 +1165,11 @@ func memosBesidesBinding(memoDatas [][]byte, expectedBinding *string) ([][]byte,
 	if exact == 1 {
 		found = prefixed
 	}
+	if exact == 0 && prefixed > 0 {
+		return nil, fmt.Errorf("verifyOpenTransaction: the receiver binding Memo names another receiver authorizer")
+	}
 	if exact != 1 || prefixed != 1 {
-		return nil, fmt.Errorf(
-			"verifyOpenTransaction: expected exactly one Memo instruction matching the receiver binding, found %d",
-			found,
-		)
+		return nil, fmt.Errorf("verifyOpenTransaction: expected exactly one receiver-binding Memo, found %d", found)
 	}
 	other := make([][]byte, 0, len(memoDatas))
 	for _, data := range memoDatas {
