@@ -318,4 +318,3 @@ describe("server batch size", () => {
     },
   );
 });
-
