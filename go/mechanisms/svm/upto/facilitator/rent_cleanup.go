@@ -2,8 +2,9 @@ package facilitator
 
 import (
 	"context"
-	solana "github.com/gagliardetto/solana-go"
 	"time"
+
+	solana "github.com/gagliardetto/solana-go"
 
 	"github.com/x402-foundation/x402/go/v2/mechanisms/svm/paymentchannels"
 )
