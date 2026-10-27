@@ -29,11 +29,15 @@ type Config struct {
 	// MaxComputeUnits caps the compute unit limit on the static path, for a
 	// version-0 SetComputeUnitLimit and a version-1 header computeUnitLimit
 	// alike. Nil uses DefaultMaxComputeUnits (400,000, the reference default
-	// of scheme_exact_svm.md §2.2.1).
+	// of scheme_exact_svm.md §2.2.1); while nil, a smart-wallet transaction
+	// above it is judged by Path 2 against SmartWalletMaxComputeUnits instead.
+	// Setting it makes it a hard ceiling for both paths.
 	MaxComputeUnits *uint32
 	// MaxRequiredSignatures caps the required signatures. A payment needs
 	// exactly two (client and fee payer) and MUST NOT require another signer
-	// (§2.1.4). Nil uses DefaultMaxRequiredSignatures (2).
+	// (§2.1.4). Nil uses DefaultMaxRequiredSignatures (2). It is checked before
+	// path dispatch, so it also bounds smart-wallet transactions: a threshold
+	// multisig whose members co-sign the payment transaction needs it raised.
 	MaxRequiredSignatures *uint8
 	// TransactionVersions is the set of message versions this facilitator
 	// accepts and advertises as extra.transactionVersions. Any other version
@@ -310,9 +314,20 @@ func (f *ExactSvmScheme) verify(
 		}, nil
 	}
 
-	if f.config.EnableSmartWalletVerification && isLayoutRecoverable(staticErr) {
+	// Under the default static compute-unit cap (MaxComputeUnits nil), a smart
+	// wallet's compute units are the business of SmartWalletMaxComputeUnits: a
+	// cap failure falls through to Path 2 too, but only for a transaction that
+	// invokes allowlisted wallet programs; otherwise the static reason stands.
+	defaultCapExceeded := f.config.MaxComputeUnits == nil && verifyReason(staticErr) == ErrComputeLimitInstructionTooHigh
+	if f.config.EnableSmartWalletVerification && (defaultCapExceeded || isLayoutRecoverable(staticErr)) {
 		if err := f.assertSmartWalletAllowlist(tx); err != nil {
+			if defaultCapExceeded {
+				return nil, staticErr
+			}
 			return nil, err
+		}
+		if defaultCapExceeded && !invokesWalletProgram(tx) {
+			return nil, staticErr
 		}
 		feePayer, err := solana.PublicKeyFromBase58(feePayerStr)
 		if err != nil {
@@ -344,13 +359,30 @@ func (f *ExactSvmScheme) verify(
 	return nil, staticErr
 }
 
-func isLayoutRecoverable(err error) bool {
+// verifyReason is the invalid reason an error carries.
+func verifyReason(err error) string {
 	var ve *x402.VerifyError
-	reason := err.Error()
 	if errors.As(err, &ve) {
-		reason = ve.InvalidReason
+		return ve.InvalidReason
 	}
-	switch reason {
+	return err.Error()
+}
+
+// invokesWalletProgram reports whether a top-level instruction invokes a
+// program other than ComputeBudget and Memo.
+func invokesWalletProgram(tx *solana.Transaction) bool {
+	memoPubkey := solana.MustPublicKeyFromBase58(svm.MemoProgramAddress)
+	for _, ix := range tx.Message.Instructions {
+		programID, err := tx.Message.Program(ix.ProgramIDIndex)
+		if err == nil && !programID.Equals(solana.ComputeBudget) && !programID.Equals(memoPubkey) {
+			return true
+		}
+	}
+	return false
+}
+
+func isLayoutRecoverable(err error) bool {
+	switch verifyReason(err) {
 	case ErrTransactionInstructionsLength,
 		ErrNoTransferInstruction,
 		ErrUnknownFourthInstruction,

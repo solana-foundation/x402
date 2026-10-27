@@ -198,7 +198,10 @@ export type ExactSvmSchemeOptions = {
    * (scheme_exact_svm.md §2.2.1). An SPL transfer with a memo uses ~20k CU, so
    * a low ceiling still leaves ample headroom for wallet-injected instructions.
    *
-   * Default: {@link DEFAULT_MAX_COMPUTE_UNITS} (400,000, the spec's reference default)
+   * Default: {@link DEFAULT_MAX_COMPUTE_UNITS} (400,000, the spec's reference default).
+   * While it is unset, a smart-wallet transaction above the default is judged
+   * by Path 2 against `smartWalletMaxComputeUnits` instead; setting it
+   * explicitly makes it a hard ceiling for both paths.
    */
   maxComputeUnits?: number;
 
@@ -207,7 +210,9 @@ export type ExactSvmSchemeOptions = {
    * of base fee, paid by the facilitator. An x402 payment needs exactly two
    * (payer + fee payer): the transaction MUST NOT require any other signer
    * (scheme_exact_svm.md §2.1.4). Raise it only for a wallet whose authority
-   * is itself several signers.
+   * is itself several signers. It is checked before path dispatch, so it also
+   * bounds smart-wallet (Path 2) transactions: a threshold multisig whose
+   * members co-sign the payment transaction needs it raised.
    *
    * Default: {@link DEFAULT_MAX_REQUIRED_SIGNATURES} (2)
    */
@@ -997,9 +1002,18 @@ export class ExactSvmScheme implements SchemeNetworkFacilitator {
     // self-spend, or a genuinely failing simulation — describes a transaction
     // that is invalid for this payment regardless of wallet type, so Path 2 must
     // not run; doing so would mask the real reason behind a smart_wallet_* code.
+    //
+    // Under the default static compute-unit cap (maxComputeUnits not set), a
+    // smart wallet's compute units are the business of smartWalletMaxComputeUnits:
+    // a cap failure falls through to Path 2 too, but only for a transaction
+    // that invokes allowlisted wallet programs; otherwise the static reason stands.
+    const defaultCapExceeded =
+      staticResult.invalidReason === Errors.ErrComputeLimitInstructionTooHigh &&
+      this.options?.maxComputeUnits === undefined;
     const staticReasonRecoverable =
-      typeof staticResult.invalidReason === "string" &&
-      LAYOUT_RECOVERABLE_REASONS.has(staticResult.invalidReason);
+      defaultCapExceeded ||
+      (typeof staticResult.invalidReason === "string" &&
+        LAYOUT_RECOVERABLE_REASONS.has(staticResult.invalidReason));
 
     if (this.options?.enableSmartWalletVerification && staticReasonRecoverable) {
       // Program allowlist: only known, audited smart wallet programs can reach Path 2.
@@ -1027,6 +1041,9 @@ export class ExactSvmScheme implements SchemeNetworkFacilitator {
       }
 
       const disallowedProgram = topLevelPrograms.find(addr => !allowedPrograms.has(addr));
+      if (defaultCapExceeded && (disallowedProgram || topLevelPrograms.length === 0)) {
+        return { response: staticResult, verificationPath: null };
+      }
       if (disallowedProgram) {
         return {
           response: {
