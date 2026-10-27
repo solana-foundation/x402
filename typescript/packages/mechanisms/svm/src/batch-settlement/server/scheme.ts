@@ -43,11 +43,13 @@ import {
 import { getStablecoinTokenProgram, validateSvmAddress } from "../../utils";
 import {
   CLIENT_VOUCHER_EXPIRES_AT,
+  DYNAMIC_EXTRA_FIELDS,
   FULL_SPLIT_BPS,
   MAX_WITHDRAW_DELAY,
   MIN_WITHDRAW_DELAY,
 } from "../constants";
-import { BatchError } from "../errors";
+import { ErrUnsupportedTransactionVersion } from "../../exact/facilitator/errors";
+import { BatchError, rethrowSetupTransactionError } from "../errors";
 import { verifyBatchAuthorization } from "../authorization";
 import { signCloseAuthorization } from "../closeAuthorization";
 import { encodeReceiverBindingMemo } from "../receiverBinding";
@@ -106,7 +108,7 @@ export class BatchSvmScheme implements SchemeNetworkServer {
   readonly paymentFlows = {
     channel: { default: "authorization", supported: ["authorization"] },
   } as const satisfies Record<string, PaymentFlowConfig>;
-  readonly dynamicExtraFields = ["recentBlockhash", "recentSlot"];
+  readonly dynamicExtraFields = [...DYNAMIC_EXTRA_FIELDS];
   readonly schemeHooks: SchemeServerHooks;
 
   private readonly store: ChannelStore;
@@ -554,11 +556,7 @@ export class BatchSvmScheme implements SchemeNetworkServer {
             withdrawDelay: raw.channelConfig.withdrawDelay,
           });
         } catch (error) {
-          const detail = error instanceof Error ? error.message : String(error);
-          const reason = detail.includes("receiver binding")
-            ? BatchError.RECEIVER_AUTHORIZER_MISMATCH
-            : BatchError.SETUP_TRANSACTION;
-          throw new Error(`${reason}: ${detail}`);
+          rethrowSetupTransactionError(error);
         }
       }
 
@@ -1734,5 +1732,6 @@ function parsePositiveAmount(value: string, field: string): bigint {
 function classifyError(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
   if (message.includes(CHANNEL_BUSY)) return CHANNEL_BUSY;
+  if (message.startsWith(ErrUnsupportedTransactionVersion)) return ErrUnsupportedTransactionVersion;
   return Object.values(BatchError).find(value => message.includes(value)) ?? "transaction_failed";
 }

@@ -94,7 +94,7 @@ func (s *BatchSvmScheme) PaymentFlows() map[string]x402.PaymentFlowConfig {
 
 // DynamicExtraFields returns extra keys regenerated on each PaymentRequired response.
 func (s *BatchSvmScheme) DynamicExtraFields() []string {
-	return []string{batchsettlement.ExtraRecentBlockhash, batchsettlement.ExtraRecentSlot}
+	return append([]string(nil), batchsettlement.DynamicExtraFields...)
 }
 
 // GetAssetDecimals implements AssetDecimalsProvider for dollar settlement overrides.
@@ -1249,11 +1249,7 @@ func (s *BatchSvmScheme) verifyDepositOpen(parsed batchsettlement.ParsedBatchPay
 		expected.Memo = &memo
 	}
 	if _, err := paymentchannels.VerifyOpenTransaction(parsed.Deposit.Transaction, expected); err != nil {
-		reason := batchsettlement.ErrSetupTransaction
-		if strings.Contains(err.Error(), "receiver binding") {
-			reason = batchsettlement.ErrReceiverAuthorizerMismatch
-		}
-		return fmt.Errorf("%s: %s", reason, err.Error())
+		return batchsettlement.SetupTransactionError(err)
 	}
 	return nil
 }
@@ -1610,6 +1606,9 @@ func classifyError(err error) string {
 	message := errString(err)
 	if strings.Contains(message, ChannelBusy) {
 		return ChannelBusy
+	}
+	if strings.HasPrefix(message, svm.ErrUnsupportedTransactionVersion) {
+		return svm.ErrUnsupportedTransactionVersion
 	}
 	for _, reason := range batchsettlement.ErrorReasons() {
 		if strings.Contains(message, reason) {

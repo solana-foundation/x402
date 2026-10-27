@@ -64,6 +64,17 @@ func AssertNotClosing(channel *generated.Channel, channelID string) error {
 	return nil
 }
 
+// AssertRefundable rejects a refund on a channel past Closing (sealed or
+// distributed) with the close code: such a channel cannot be closed again
+// (spec 4.5, 7).
+func AssertRefundable(channel *generated.Channel, channelID string) error {
+	status := generated.ChannelStatus(channel.Status)
+	if status != generated.ChannelStatus_Open && status != generated.ChannelStatus_Closing {
+		return fmt.Errorf("%s: a refund needs an Open or Closing channel; %s has status %d", batchsettlement.ErrCloseState, channelID, channel.Status)
+	}
+	return nil
+}
+
 // SettleSeal applies the server's latest voucher with settle_and_seal and pays out with distribute.
 func SettleSeal(
 	ctx context.Context,
@@ -236,7 +247,7 @@ func PrepareRefund(
 		return PreparedRefund{}, err
 	}
 	if channel != nil && (cumulative < channel.Settlement.Settled || cumulative > channel.Deposit) {
-		return PreparedRefund{}, fmt.Errorf("%s: refund voucher must lie within settled and deposit", batchsettlement.ErrCumulativeAmountMismatch)
+		return PreparedRefund{}, fmt.Errorf("%s: refund voucher must lie within settled and deposit", batchsettlement.ErrCloseState)
 	}
 	binding, err := deps.ReadBinding(ctx, requirements.Network, channelID)
 	if err != nil {
@@ -293,6 +304,9 @@ func ValidateRefund(
 	}
 	channel, err := deps.FetchChannel(ctx, requirements.Network, prepared.ChannelID)
 	if err != nil {
+		return nil, "", BatchTerms{}, err
+	}
+	if err := AssertRefundable(channel, prepared.ChannelID); err != nil {
 		return nil, "", BatchTerms{}, err
 	}
 	if err := deps.AssertClaimChannel(channel, payload.ChannelConfig, prepared.Terms, requirements, []generated.ChannelStatus{

@@ -190,19 +190,9 @@ func (f *BatchSvmScheme) validateDeposit(ctx context.Context, payload batchsettl
 			return ValidatedDeposit{}, err
 		}
 		expected := existing.Deposit + deposit
-		switch proof.Signer {
-		case batchsettlement.VoucherSignerServer:
-			if charge > expected {
-				return ValidatedDeposit{}, fmt.Errorf("%s: charge exceeds topped-up ceiling", batchsettlement.ErrCumulativeAmountMismatch)
-			}
-		case batchsettlement.VoucherSignerClient:
-			// Cover settled + price, and stay strictly above settled even when the price is zero.
-			minimum, ok := batchsettlement.AddU64(existing.Settlement.Settled, charge)
-			if !ok || proofAmount < minimum || proofAmount <= existing.Settlement.Settled || proofAmount > expected {
-				return ValidatedDeposit{}, fmt.Errorf("%s: voucher exceeds topped-up ceiling", batchsettlement.ErrCumulativeAmountMismatch)
-			}
-		default:
-			return ValidatedDeposit{}, fmt.Errorf("%s", batchsettlement.ErrVoucherSignature)
+		settled := existing.Settlement.Settled
+		if err := AssertDepositProof(proof.Signer, proofAmount, charge, expected, &settled); err != nil {
+			return ValidatedDeposit{}, err
 		}
 		feePayer, err := solana.PublicKeyFromBase58(terms.FeePayer)
 		if err != nil {
@@ -235,7 +225,7 @@ func (f *BatchSvmScheme) validateDeposit(ctx context.Context, payload batchsettl
 			MaxComputeUnits:             f.config.MaxComputeUnits,
 			MaxPriorityFeeMicroLamports: f.config.MaxPriorityFeeMicroLamports,
 		}); err != nil {
-			return ValidatedDeposit{}, err
+			return ValidatedDeposit{}, batchsettlement.SetupTransactionError(err)
 		}
 		if err := f.assertSettlementAccounts(ctx, requirements, payload.ChannelConfig.Payer, terms.TokenProgram); err != nil {
 			return ValidatedDeposit{}, err
@@ -244,17 +234,8 @@ func (f *BatchSvmScheme) validateDeposit(ctx context.Context, payload batchsettl
 		validated.IsTopUp = true
 		return validated, nil
 	}
-	switch proof.Signer {
-	case batchsettlement.VoucherSignerServer:
-		if charge > deposit {
-			return ValidatedDeposit{}, fmt.Errorf("%s: invalid first voucher amount", batchsettlement.ErrCumulativeAmountMismatch)
-		}
-	case batchsettlement.VoucherSignerClient:
-		if proofAmount != charge || charge > deposit {
-			return ValidatedDeposit{}, fmt.Errorf("%s: invalid first voucher amount", batchsettlement.ErrCumulativeAmountMismatch)
-		}
-	default:
-		return ValidatedDeposit{}, fmt.Errorf("%s", batchsettlement.ErrVoucherSignature)
+	if err := AssertDepositProof(proof.Signer, proofAmount, charge, deposit, nil); err != nil {
+		return ValidatedDeposit{}, err
 	}
 	if err := f.verifyOpen(ctx, payload, requirements, terms, channelID, deposit); err != nil {
 		return ValidatedDeposit{}, err
@@ -318,7 +299,7 @@ func (f *BatchSvmScheme) verifyOpen(ctx context.Context, payload batchsettlement
 		MaxRequiredSignatures:       f.config.MaxRequiredSignatures,
 	})
 	if err != nil {
-		return err
+		return batchsettlement.SetupTransactionError(err)
 	}
 	if open.ChannelID.String() != channelID {
 		return fmt.Errorf("%s: setup transaction channel mismatch", batchsettlement.ErrChannelIDMismatch)
@@ -1024,6 +1005,9 @@ func (f *BatchSvmScheme) settleRefund(ctx context.Context, payload batchsettleme
 			if err != nil {
 				return nil, err
 			}
+			if err := AssertRefundable(channel, prepared.ChannelID); err != nil {
+				return nil, err
+			}
 			if err := f.assertClaimChannel(channel, payload.ChannelConfig, prepared.Terms, requirements, []generated.ChannelStatus{generated.ChannelStatus_Open, generated.ChannelStatus_Closing}); err != nil {
 				return nil, err
 			}
@@ -1115,6 +1099,9 @@ func (f *BatchSvmScheme) verifyRefund(ctx context.Context, payload batchsettleme
 			return nil, err
 		}
 		if err := AssertNotClosing(channel, channelID); err != nil {
+			return nil, err
+		}
+		if err := AssertRefundable(channel, channelID); err != nil {
 			return nil, err
 		}
 		if err := f.assertClaimChannel(channel, payload.ChannelConfig, terms, requirements, []generated.ChannelStatus{generated.ChannelStatus_Open, generated.ChannelStatus_Closing}); err != nil {

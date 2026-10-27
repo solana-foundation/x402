@@ -407,12 +407,173 @@ func TestBatchFacilitatorLifecycle(t *testing.T) {
 		require.False(t, result.IsValid)
 		require.Equal(t, "unsupported_scheme", result.InvalidReason)
 
-		badNet := req
-		badNet.Network = "solana:other"
-		result, err = scheme.Verify(ctx, payload, badNet, nil)
+		badAccepted := payload
+		badAccepted.Accepted.Scheme = "exact"
+		result, err = scheme.Verify(ctx, badAccepted, req, nil)
 		require.NoError(t, err)
-		require.False(t, result.IsValid)
-		require.Equal(t, "network_mismatch", result.InvalidReason)
+		require.Equal(t, "unsupported_scheme", result.InvalidReason)
+
+		// Spec 4.5: accepted must equal the requirements in every payment field.
+		withExtra := func(key string, value any) func(*types.PaymentRequirements) {
+			return func(r *types.PaymentRequirements) {
+				extra := map[string]any{}
+				for k, v := range r.Extra {
+					extra[k] = v
+				}
+				extra[key] = value
+				r.Extra = extra
+			}
+		}
+		for _, override := range []func(*types.PaymentRequirements){
+			func(r *types.PaymentRequirements) { r.Network = "solana:other" },
+			func(r *types.PaymentRequirements) { r.Amount = "999" },
+			func(r *types.PaymentRequirements) { r.Asset = receiver },
+			func(r *types.PaymentRequirements) { r.PayTo = mint },
+			func(r *types.PaymentRequirements) { r.MaxTimeoutSeconds = 301 },
+			withExtra(batchsettlement.ExtraWithdrawDelay, 901),
+			withExtra(batchsettlement.ExtraMemo, "extra"),
+		} {
+			result, err = scheme.Verify(ctx, payload, requirements(override), nil)
+			require.NoError(t, err)
+			require.False(t, result.IsValid)
+			require.Equal(t, InvalidPaymentRequirements, result.InvalidReason)
+			require.Equal(t, payer.Address().String(), result.Payer)
+		}
+
+		// Fields a server regenerates per 402 are not part of the comparison.
+		hookTerms(scheme, defaultTerms)
+		hookChannelID(scheme, channelID)
+		scheme.hooks.fetchChannel = func(context.Context, string, string) (*generated.Channel, error) {
+			return channel(), nil
+		}
+		stale := payment(batchsettlement.BatchVoucherPayload{
+			Type: batchsettlement.PayloadTypeVoucher, ChannelConfig: channelConfig, Voucher: voucher,
+		}, requirements(withExtra(batchsettlement.ExtraRecentSlot, "1")))
+		fresh := requirements(withExtra(batchsettlement.ExtraRecentSlot, "2"), withExtra(batchsettlement.ExtraRecentBlockhash, "fresh"))
+		result, err = scheme.Verify(ctx, stale, fresh, nil)
+		require.NoError(t, err)
+		require.True(t, result.IsValid, result.InvalidReason)
+		require.Empty(t, EnvelopeFailure(
+			requirements(func(r *types.PaymentRequirements) { r.Extra = nil }),
+			requirements(func(r *types.PaymentRequirements) { r.Extra = map[string]any{} }),
+		))
+	})
+
+	t.Run("maps setup-transaction failures to their spec codes", func(t *testing.T) {
+		scheme := newScheme(t, newSigner(t), nil)
+		scheme.hooks.readChannel = func(context.Context, string, string) (*generated.Channel, error) { return nil, nil }
+		req := requirements()
+		verifyDeposit := func(payload batchsettlement.BatchDepositPayload) string {
+			t.Helper()
+			result, err := scheme.Verify(ctx, payment(payload, req), req, nil)
+			require.NoError(t, err)
+			require.False(t, result.IsValid)
+			return result.InvalidReason
+		}
+		garbage := actualDeposit
+		garbage.Deposit.Transaction = "AAAA"
+		require.Equal(t, batchsettlement.ErrSetupTransaction, verifyDeposit(garbage))
+
+		// An open transaction submitted against an existing channel is not a top_up.
+		scheme.hooks.readChannel = func(context.Context, string, string) (*generated.Channel, error) {
+			return channel(func(c *generated.Channel) {
+				c.AuthorizedSigner = payer.Address()
+				c.OpenSlot = 123
+				c.Salt = mustParseU64(t, actualDeposit.ChannelConfig.Salt)
+			}), nil
+		}
+		require.Equal(t, batchsettlement.ErrSetupTransaction, verifyDeposit(actualDeposit))
+
+		for _, tc := range []struct {
+			err    error
+			reason string
+		}{
+			{errors.New("verifyOpenTransaction: expected exactly one Memo instruction matching the receiver binding, found 0"), batchsettlement.ErrReceiverAuthorizerMismatch},
+			{errors.New("verifyOpenTransaction: gracePeriod 901 != expected withdrawDelay 900"), batchsettlement.ErrWithdrawDelayMismatch},
+			{fmt.Errorf("%s: verifyOpenTransaction: unsupported transaction message version 2", svm.ErrUnsupportedTransactionVersion), svm.ErrUnsupportedTransactionVersion},
+			{errors.New("verifyOpenTransaction: transaction is 4097 bytes, above the 4096-byte limit for version 1"), batchsettlement.ErrSetupTransaction},
+			{errors.New("verifyTopUpTransaction: top-up amount mismatch"), batchsettlement.ErrSetupTransaction},
+		} {
+			mapped := batchsettlement.SetupTransactionError(tc.err)
+			require.ErrorIs(t, mapped, tc.err)
+			require.Equal(t, tc.reason, ClassifyError(mapped), tc.err.Error())
+		}
+	})
+
+	t.Run("splits cumulative mismatches from deposits that cannot cover the proof", func(t *testing.T) {
+		scheme := newScheme(t, newSigner(t), nil)
+		scheme.hooks.readChannel = func(context.Context, string, string) (*generated.Channel, error) { return nil, nil }
+		verifyDeposit := func(amount string, req types.PaymentRequirements) string {
+			t.Helper()
+			payload := actualDeposit
+			payload.Deposit.Amount = amount
+			result, err := scheme.Verify(ctx, payment(payload, req), req, nil)
+			require.NoError(t, err)
+			require.False(t, result.IsValid)
+			return result.InvalidReason
+		}
+		// Open: a first voucher above the deposit, and one that is not the charge.
+		require.Equal(t, batchsettlement.ErrCumulativeExceedsDeposit, verifyDeposit("999", requirements()))
+		require.Equal(t, batchsettlement.ErrCumulativeAmountMismatch, verifyDeposit("10000", requirements(func(r *types.PaymentRequirements) { r.Amount = "999" })))
+		// Top-up: a voucher behind the watermark, and one above the topped-up deposit.
+		existing := func(overrides ...func(*generated.Channel)) {
+			scheme.hooks.readChannel = func(context.Context, string, string) (*generated.Channel, error) {
+				return channel(append([]func(*generated.Channel){func(c *generated.Channel) {
+					c.AuthorizedSigner = payer.Address()
+					c.OpenSlot = 123
+					c.Salt = mustParseU64(t, actualDeposit.ChannelConfig.Salt)
+				}}, overrides...)...), nil
+			}
+		}
+		existing(func(c *generated.Channel) { c.Settlement = generated.SettlementWatermarks{Settled: 1_000} })
+		require.Equal(t, batchsettlement.ErrCumulativeAmountMismatch, verifyDeposit("10000", requirements()))
+		existing(func(c *generated.Channel) { c.Deposit = 0 })
+		require.Equal(t, batchsettlement.ErrCumulativeExceedsDeposit, verifyDeposit("999", requirements()))
+
+		// Server mode bounds the charge by the deposit, open or top-up.
+		zero := uint64(0)
+		for _, settled := range []*uint64{nil, &zero} {
+			require.ErrorContains(t, AssertDepositProof(batchsettlement.VoucherSignerServer, 0, 2, 1, settled), batchsettlement.ErrCumulativeExceedsDeposit)
+			require.NoError(t, AssertDepositProof(batchsettlement.VoucherSignerServer, 0, 1, 1, settled))
+		}
+		maxU64 := ^uint64(0)
+		require.ErrorContains(t, AssertDepositProof(batchsettlement.VoucherSignerClient, maxU64, 1, maxU64, &maxU64), batchsettlement.ErrCumulativeAmountMismatch)
+		require.ErrorContains(t, AssertDepositProof("nobody", 1, 1, 1, nil), batchsettlement.ErrVoucherSignature)
+	})
+
+	t.Run("refuses refunds of channels past Closing with the close-state code", func(t *testing.T) {
+		scheme := newScheme(t, newSigner(t), nil)
+		blockhash := solana.MustHashFromBase58(svm.USDCMainnetAddress)
+		fallback, err := batchclient.BuildRefundPayload(ctx, batchclient.BuildRefundArgs{
+			ChannelConfig: actualDeposit.ChannelConfig,
+			ChannelID:     actualChannelID,
+			FeePayer:      feePayerKey.PublicKey().String(),
+			Payer:         payer,
+			Voucher:       actualDeposit.Voucher,
+			Blockhash:     &blockhash,
+		})
+		require.NoError(t, err)
+		scheme.hooks.readChannel = func(context.Context, string, string) (*generated.Channel, error) { return nil, nil }
+		req := requirements()
+		for _, status := range []generated.ChannelStatus{generated.ChannelStatus_Sealed, generated.ChannelStatus_Distributed} {
+			scheme.hooks.fetchChannel = func(context.Context, string, string) (*generated.Channel, error) {
+				return channel(func(c *generated.Channel) {
+					c.AuthorizedSigner = payer.Address()
+					c.OpenSlot = 123
+					c.Salt = mustParseU64(t, actualDeposit.ChannelConfig.Salt)
+					c.Status = uint8(status)
+				}), nil
+			}
+			verified, err := scheme.Verify(ctx, payment(fallback, req), req, nil)
+			require.NoError(t, err)
+			require.Equal(t, batchsettlement.ErrCloseState, verified.InvalidReason)
+			settled, err := scheme.Settle(ctx, payment(fallback, req), req, nil)
+			require.NoError(t, err)
+			require.False(t, settled.Success)
+			require.Equal(t, batchsettlement.ErrCloseState, settled.ErrorReason)
+		}
+		require.NoError(t, AssertRefundable(channel(), actualChannelID))
+		require.NoError(t, AssertRefundable(channel(func(c *generated.Channel) { c.Status = uint8(generated.ChannelStatus_Closing) }), actualChannelID))
 	})
 
 	t.Run("routes verify variants and classifies validation failures", func(t *testing.T) {

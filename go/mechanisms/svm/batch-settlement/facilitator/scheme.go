@@ -277,11 +277,8 @@ func (f *BatchSvmScheme) Verify(ctx context.Context, payload types.PaymentPayloa
 		return VerifyFailure(batchsettlement.ErrPayloadType, "", ""), nil //nolint:nilerr // a malformed payload is an invalid payment, not a transport failure
 	}
 	payer := parsed.ChannelConfig.Payer
-	if payload.Accepted.Scheme != batchsettlement.Scheme || requirements.Scheme != batchsettlement.Scheme {
-		return VerifyFailure("unsupported_scheme", payer, ""), nil
-	}
-	if payload.Accepted.Network != requirements.Network {
-		return VerifyFailure("network_mismatch", payer, ""), nil
+	if reason := EnvelopeFailure(payload.Accepted, requirements); reason != "" {
+		return VerifyFailure(reason, payer, ""), nil
 	}
 	response, err := f.verifyParsed(ctx, record, parsed, requirements)
 	if err != nil {

@@ -73,3 +73,8 @@ const (
 	PayloadTypeSeal          = "seal"
 	AuthorizationTypeProof   = "proof"
 )
+
+// DynamicExtraFields are the PaymentRequirements.extra keys a server
+// regenerates for every PaymentRequired, so they are not part of requirements
+// matching.
+var DynamicExtraFields = []string{ExtraRecentBlockhash, ExtraRecentSlot}

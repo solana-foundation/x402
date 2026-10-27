@@ -75,6 +75,7 @@ import {
   claimResponse,
   classifyError,
   depositResponse,
+  envelopeFailure,
   parseOptionalSlot,
   pendingSignatureOf,
   recoveredRefundResponse,
@@ -89,6 +90,7 @@ import { recordPendingOrTerminal, TransactionOnchainFailureError } from "../../u
 import { ErrSettlementPending } from "../../exact/facilitator/errors";
 import {
   assertNotClosing,
+  assertRefundable,
   prepareRefund,
   type SealDependencies,
   settleCooperativeRefund,
@@ -97,6 +99,7 @@ import {
 } from "./seal";
 import {
   advancesSettled,
+  assertDepositProof,
   assertServerModeProof as checkServerModeProof,
   assertServerModeRefundProof,
   voucherSignerFor,
@@ -129,7 +132,7 @@ import type {
   ValidatedDeposit,
   VoucherModeBinding,
 } from "./types";
-import { BatchError } from "../errors";
+import { BatchError, rethrowSetupTransactionError } from "../errors";
 import { encodeReceiverBindingMemo } from "../receiverBinding";
 import {
   CLIENT_VOUCHER_EXPIRES_AT,
@@ -251,15 +254,8 @@ export class BatchSvmScheme implements SchemeNetworkFacilitator {
   ): Promise<VerifyResponse> {
     const payload = payment.payload;
     if (!isBatchPayload(payload)) return verifyFailure(BatchError.PAYLOAD_TYPE, "");
-    if (
-      payment.accepted.scheme !== BATCH_SETTLEMENT_SCHEME ||
-      requirements.scheme !== BATCH_SETTLEMENT_SCHEME
-    ) {
-      return verifyFailure("unsupported_scheme", payload.channelConfig.payer);
-    }
-    if (payment.accepted.network !== requirements.network) {
-      return verifyFailure("network_mismatch", payload.channelConfig.payer);
-    }
+    const envelope = envelopeFailure(payment.accepted, requirements);
+    if (envelope) return verifyFailure(envelope, payload.channelConfig.payer);
 
     try {
       switch (payload.type) {
@@ -332,6 +328,7 @@ export class BatchSvmScheme implements SchemeNetworkFacilitator {
             await assertServerModeRefundProof(payload, channelId);
             const channel = await this.fetchChannel(requirements.network, channelId);
             assertNotClosing(channel, channelId);
+            assertRefundable(channel, channelId);
             this.assertClaimChannel(channel, payload.channelConfig, terms, requirements, [
               ChannelStatus.Open,
               ChannelStatus.Closing,
@@ -820,27 +817,12 @@ export class BatchSvmScheme implements SchemeNetworkFacilitator {
         ChannelStatus.Open,
       ]);
       const expectedDeposit = existing.deposit + deposit;
-      const settled = existing.settlement.settled;
-      switch (proof.signer) {
-        case "server":
-          if (charge > expectedDeposit) {
-            throw new Error(
-              `${BatchError.CUMULATIVE_AMOUNT_MISMATCH}: charge exceeds topped-up ceiling`,
-            );
-          }
-          break;
-        case "client":
-          if (!advancesSettled(proofAmount, settled, charge) || proofAmount > expectedDeposit) {
-            throw new Error(
-              `${BatchError.CUMULATIVE_AMOUNT_MISMATCH}: voucher exceeds topped-up ceiling`,
-            );
-          }
-          break;
-        default: {
-          const unexpected: never = proof;
-          throw new Error(String(unexpected));
-        }
-      }
+      assertDepositProof(proof.signer, {
+        charge,
+        deposit: expectedDeposit,
+        proof: proofAmount,
+        settled: existing.settlement.settled,
+      });
       await verifyTopUpTransaction(payload.deposit.transaction, {
         amount: deposit,
         channelId,
@@ -851,7 +833,7 @@ export class BatchSvmScheme implements SchemeNetworkFacilitator {
         memo: terms.memo,
         mint: requirements.asset,
         tokenProgram: terms.tokenProgram,
-      });
+      }).catch(rethrowSetupTransactionError);
       await this.assertSettlementAccounts(
         requirements,
         payload.channelConfig.payer,
@@ -868,22 +850,7 @@ export class BatchSvmScheme implements SchemeNetworkFacilitator {
         terms,
       };
     }
-    switch (proof.signer) {
-      case "server":
-        if (charge > deposit) {
-          throw new Error(`${BatchError.CUMULATIVE_AMOUNT_MISMATCH}: invalid first voucher amount`);
-        }
-        break;
-      case "client":
-        if (proofAmount !== charge || charge > deposit) {
-          throw new Error(`${BatchError.CUMULATIVE_AMOUNT_MISMATCH}: invalid first voucher amount`);
-        }
-        break;
-      default: {
-        const unexpected: never = proof;
-        throw new Error(String(unexpected));
-      }
-    }
+    assertDepositProof(proof.signer, { charge, deposit, proof: proofAmount });
     const open = await verifyOpenTransaction(payload.deposit.transaction, {
       authorizedSigner: payload.channelConfig.payerAuthorizer,
       expectedBindingMemo: encodeReceiverBindingMemo(terms.receiverAuthorizer),
@@ -901,7 +868,7 @@ export class BatchSvmScheme implements SchemeNetworkFacilitator {
       recipients: [{ bps: FULL_SPLIT_BPS, recipient: requirements.payTo }],
       tokenProgram: terms.tokenProgram,
       withdrawDelay: terms.withdrawDelay,
-    });
+    }).catch(rethrowSetupTransactionError);
     if (open.channelId !== channelId) {
       throw new Error(`${BatchError.CHANNEL_ID_MISMATCH}: setup transaction channel mismatch`);
     }
@@ -1187,6 +1154,7 @@ export class BatchSvmScheme implements SchemeNetworkFacilitator {
       },
       beforeSend: async () => {
         const channel = await this.fetchChannel(requirements.network, channelId);
+        assertRefundable(channel, channelId);
         this.assertClaimChannel(channel, payload.channelConfig, terms, requirements, [
           ChannelStatus.Open,
           ChannelStatus.Closing,

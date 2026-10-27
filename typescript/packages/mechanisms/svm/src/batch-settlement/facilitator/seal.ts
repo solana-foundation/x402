@@ -214,6 +214,21 @@ export function assertNotClosing(channel: Channel, channelId: string): void {
 }
 
 /**
+ * Reject a refund on a channel past `Closing` (sealed or distributed) with the
+ * close code: such a channel cannot be closed again (spec 4.5, 7).
+ *
+ * @param channel - Decoded channel account
+ * @param channelId - Channel PDA, for the message
+ */
+export function assertRefundable(channel: Channel, channelId: string): void {
+  if (channel.status !== ChannelStatus.Open && channel.status !== ChannelStatus.Closing) {
+    throw new Error(
+      `${BatchError.CLOSE_STATE}: a refund needs an Open or Closing channel; ${channelId} has status ${channel.status}`,
+    );
+  }
+}
+
+/**
  * Apply the server's latest voucher with `settle_and_seal` and pay out with a
  * sealed `distribute`, in one transaction: to a `Closing` channel before the
  * payer's grace period ends (`seal`), or to an `Open` one (`refund`).
@@ -381,7 +396,7 @@ export async function prepareRefund(
   const channel = await deps.readChannel(requirements.network, channelId);
   if (channel && (cumulative < channel.settlement.settled || cumulative > channel.deposit)) {
     throw new Error(
-      `${BatchError.CUMULATIVE_AMOUNT_MISMATCH}: refund voucher must lie within settled and deposit`,
+      `${BatchError.CLOSE_STATE}: refund voucher must lie within settled and deposit`,
     );
   }
 
@@ -431,6 +446,7 @@ export async function validateRefund(
 ): Promise<{ channel: Channel; channelId: string; terms: SealTerms }> {
   const { channelId, terms } = await prepareRefund(deps, payload, requirements, limits, context);
   const channel = await deps.fetchChannel(requirements.network, channelId);
+  assertRefundable(channel, channelId);
   deps.assertClaimChannel(channel, payload.channelConfig, terms, requirements, [
     ChannelStatus.Open,
     ChannelStatus.Closing,
