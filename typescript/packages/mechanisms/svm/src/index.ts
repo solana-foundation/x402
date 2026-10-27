@@ -43,6 +43,9 @@ export type {
 export type { ExactSvmPayloadV1, ExactSvmPayloadV2, UptoSvmPayloadV2 } from "./types";
 export { isUptoSvmPayload } from "./types";
 
+// The payment-channels treasury owner of each deployed program, for
+// facilitators' paymentChannelsTreasuryOwner override.
+export { getPaymentChannelsTreasuryOwner } from "./payment-channels/onchain";
 export {
   discoverChannelsByRentPayer,
   CHANNEL_ACCOUNT_SIZE,
