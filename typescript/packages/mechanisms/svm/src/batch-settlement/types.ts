@@ -2,7 +2,7 @@
 /** Wire types for the SVM `batch-settlement` scheme. */
 
 import { BatchError } from "./errors";
-import { V1_MAX_CLAIM_CHANNELS } from "./facilitator/constants";
+import { V1_MAX_CLAIM_CHANNELS, V1_MAX_SETTLE_CHANNELS } from "./facilitator/constants";
 
 export { BATCH_SETTLEMENT_SCHEME } from "./constants";
 
@@ -329,6 +329,7 @@ export function isBatchFacilitatorPayload(value: unknown): value is BatchFacilit
     value.type === "settle" &&
     Array.isArray(value.channels) &&
     value.channels.length > 0 &&
+    value.channels.length <= V1_MAX_SETTLE_CHANNELS &&
     value.channels.every(
       item =>
         isRecord(item) &&
