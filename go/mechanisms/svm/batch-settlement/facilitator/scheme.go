@@ -42,6 +42,13 @@ type Config struct {
 	MaxPriorityFeeMicroLamports *uint64
 	MaxComputeUnits             *uint32
 	MaxRequiredSignatures       *int
+	// TransactionVersions is the set of message versions this facilitator
+	// accepts for client-built setup transactions (open, top_up,
+	// request_close) and advertises as extra.transactionVersions. Any other
+	// version is rejected with unsupported_transaction_version before any
+	// instruction is inspected; legacy is accepted exactly when 0 is. Nil
+	// means [0, 1].
+	TransactionVersions []int
 	// ReceiverBindingHistoryReader is the optional archive-RPC fallback for a
 	// channel row with no receiver-authorizer binding. A binding read from
 	// history is written back when the row is absent. Nil leaves history off;
@@ -83,6 +90,8 @@ type BatchSvmScheme struct {
 	maxIdleSecs     int64
 	history         ReceiverBindingHistoryReader
 	delegated       *DelegatedReceiverAuth
+	// transactionVersions is the normalized Config.TransactionVersions.
+	transactionVersions []int
 
 	mu                sync.Mutex
 	confirmationSlots map[string]uint64
@@ -108,6 +117,10 @@ func NewBatchSvmScheme(ctx context.Context, signer svm.FacilitatorSvmSigner, con
 	if err != nil {
 		panic(err)
 	}
+	transactionVersions, err := svm.NormalizeAcceptedTransactionVersions(config.TransactionVersions)
+	if err != nil {
+		panic("BatchSvmScheme: " + err.Error())
+	}
 	if config.ChannelStorage == nil {
 		config.ChannelStorage = paymentchannels.NewInMemoryPaymentChannelStorage()
 	}
@@ -116,16 +129,17 @@ func NewBatchSvmScheme(ctx context.Context, signer svm.FacilitatorSvmSigner, con
 		pending = NewInMemoryPendingSettlementStore()
 	}
 	scheme := &BatchSvmScheme{
-		config:            *config,
-		raw:               raw,
-		channelStorage:    config.ChannelStorage,
-		pendingStore:      pending,
-		settlementCache:   svm.NewSettlementCache(),
-		maxIdleSecs:       idle,
-		history:           config.ReceiverBindingHistoryReader,
-		delegated:         delegated,
-		confirmationSlots: map[string]uint64{},
-		now:               func() int64 { return time.Now().Unix() },
+		config:              *config,
+		raw:                 raw,
+		channelStorage:      config.ChannelStorage,
+		pendingStore:        pending,
+		settlementCache:     svm.NewSettlementCache(),
+		maxIdleSecs:         idle,
+		history:             config.ReceiverBindingHistoryReader,
+		delegated:           delegated,
+		transactionVersions: transactionVersions,
+		confirmationSlots:   map[string]uint64{},
+		now:                 func() int64 { return time.Now().Unix() },
 	}
 	scheme.signer = &recordingSigner{PaymentChannelFacilitatorSigner: raw, scheme: scheme}
 	return scheme
@@ -146,7 +160,7 @@ func (f *BatchSvmScheme) getExtra(ctx context.Context, network x402.Network) map
 		batchsettlement.ExtraFeePayer: addresses[mrand.IntN(len(addresses))].String(),
 		// Transaction message versions accepted in client-built deposit,
 		// top-up, and close transactions. Servers copy it into the 402.
-		svm.ExtraTransactionVersions: append([]int(nil), svm.AdvertisedTransactionVersions...),
+		svm.ExtraTransactionVersions: append([]int(nil), f.transactionVersions...),
 	}
 	// Redemption capacity of the message version this facilitator builds.
 	// Servers copy it and author claim/settle batches no longer than it.

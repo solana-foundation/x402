@@ -88,6 +88,9 @@ type VerifyRequestCloseExpected struct {
 	Program                     solana.PublicKey
 	MaxComputeUnits             *uint32
 	MaxPriorityFeeMicroLamports *uint64
+	// AcceptedTransactionVersions is the facilitator's accepted message
+	// versions; nil accepts AdvertisedTransactionVersions.
+	AcceptedTransactionVersions []int
 }
 
 // VerifyRequestCloseTransaction checks that the sponsor may authorize only the
@@ -96,7 +99,7 @@ func VerifyRequestCloseTransaction(transactionBase64 string, expected VerifyRequ
 	if expected.Payer.Equals(expected.FeePayer) {
 		return fmt.Errorf("verifyRequestCloseTransaction: payer must differ from feePayer")
 	}
-	tx, err := decodeChannelTransaction(transactionBase64, "verifyRequestCloseTransaction")
+	tx, err := decodeAcceptedChannelTransaction(transactionBase64, "verifyRequestCloseTransaction", expected.AcceptedTransactionVersions)
 	if err != nil {
 		return err
 	}

@@ -2,6 +2,7 @@ package svm
 
 import (
 	"encoding/base64"
+	"encoding/json"
 	"math"
 	"testing"
 
@@ -179,4 +180,50 @@ func TestMaxTransactionSize(t *testing.T) {
 	assert.Equal(t, 1232, MaxTransactionSize(solana.MessageVersionLegacy))
 	assert.Equal(t, 1232, MaxTransactionSize(solana.MessageVersionV0))
 	assert.Equal(t, 4096, MaxTransactionSize(solana.MessageVersionV1))
+}
+
+func TestAcceptedTransactionVersionSets(t *testing.T) {
+	// Legacy (-1) is policed as version 0.
+	assert.True(t, IsAcceptedWireTransactionVersionIn(-1, []int{0}))
+	assert.False(t, IsAcceptedWireTransactionVersionIn(-1, []int{1}))
+	assert.False(t, IsAcceptedWireTransactionVersionIn(1, []int{0}))
+	assert.True(t, IsAcceptedWireTransactionVersionIn(1, nil))
+	assert.False(t, IsAcceptedWireTransactionVersionIn(2, []int{0, 1, 2}))
+	assert.True(t, IsAcceptedTransactionVersionIn(solana.MessageVersionLegacy, []int{0}))
+	assert.False(t, IsAcceptedTransactionVersionIn(solana.MessageVersionV1, []int{0}))
+
+	normalized, err := NormalizeAcceptedTransactionVersions(nil)
+	assert.NoError(t, err)
+	assert.Equal(t, []int{0, 1}, normalized)
+	normalized, err = NormalizeAcceptedTransactionVersions([]int{1, 0, 1})
+	assert.NoError(t, err)
+	assert.Equal(t, []int{0, 1}, normalized)
+	for _, invalid := range [][]int{{}, {2}, {0, -1}} {
+		_, err := NormalizeAcceptedTransactionVersions(invalid)
+		assert.Error(t, err)
+	}
+}
+
+func TestUptoOpenSlotAcceptsTheSpecNumberForm(t *testing.T) {
+	base := map[string]interface{}{
+		"from": "a", "maxAmount": "1", "deposit": "1", "channelId": "c",
+		"authorizedSigner": "s", "openTransaction": "t", "nonce": "1",
+		"expiresAt": float64(2), "validAfter": float64(1),
+	}
+	with := func(slot interface{}) map[string]interface{} {
+		out := map[string]interface{}{"openSlot": slot}
+		for key, value := range base {
+			out[key] = value
+		}
+		return out
+	}
+	for _, slot := range []interface{}{"341000000", float64(341000000), int64(341000000), json.Number("341000000")} {
+		assert.True(t, IsUptoSvmPayload(with(slot)), "%T", slot)
+		payload, err := UptoPayloadFromMap(with(slot))
+		assert.NoError(t, err)
+		assert.Equal(t, "341000000", payload.OpenSlot)
+	}
+	for _, slot := range []interface{}{float64(-1), 1.5, float64(1 << 54), nil, ""} {
+		assert.False(t, IsUptoSvmPayload(with(slot)), "%v", slot)
+	}
 }

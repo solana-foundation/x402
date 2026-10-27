@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	solana "github.com/gagliardetto/solana-go"
 
 	x402 "github.com/x402-foundation/x402/go/v2"
+	"github.com/x402-foundation/x402/go/v2/mechanisms/svm"
 	batchsettlement "github.com/x402-foundation/x402/go/v2/mechanisms/svm/batch-settlement"
 	"github.com/x402-foundation/x402/go/v2/mechanisms/svm/paymentchannels"
 	"github.com/x402-foundation/x402/go/v2/mechanisms/svm/paymentchannels/generated"
@@ -26,6 +28,9 @@ const (
 type RefundLimits struct {
 	MaxComputeUnits             *uint32
 	MaxPriorityFeeMicroLamports *uint64
+	// TransactionVersions is the facilitator's accepted request_close message
+	// versions; nil accepts [0, 1].
+	TransactionVersions []int
 }
 
 // PreparedRefund is a validated refund. RequestClose is set only on the sponsored fallback path.
@@ -283,7 +288,12 @@ func PrepareRefund(
 		Memo:                        terms.Memo,
 		MaxComputeUnits:             limits.MaxComputeUnits,
 		MaxPriorityFeeMicroLamports: limits.MaxPriorityFeeMicroLamports,
+		AcceptedTransactionVersions: limits.TransactionVersions,
 	}); err != nil {
+		// A version outside the accepted set keeps its own reason (spec 1.5).
+		if strings.HasPrefix(err.Error(), svm.ErrUnsupportedTransactionVersion) {
+			return PreparedRefund{}, err
+		}
 		return PreparedRefund{}, fmt.Errorf("%s: %s", batchsettlement.ErrRefundTransaction, err.Error())
 	}
 	return PreparedRefund{ChannelID: channelID, Terms: terms, RequestClose: payload.Transaction}, nil

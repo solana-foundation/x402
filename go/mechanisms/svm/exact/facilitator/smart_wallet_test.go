@@ -228,7 +228,10 @@ func TestExactSvmScheme_SmartWalletComputeUnitsTooHigh(t *testing.T) {
 		mockExactSvmSigner: mockExactSvmSigner{addresses: []solana.PublicKey{f.facilitatorAddr}},
 		inner:              []rpc.InnerInstruction{f.inner},
 	}
-	scheme := NewExactSvmScheme(signer, &Config{EnableSmartWalletVerification: true})
+	// Raise the static-path cap above the transaction so the smart-wallet
+	// path, not the 400,000 static default, judges its compute units.
+	staticCap := uint32(1_400_000)
+	scheme := NewExactSvmScheme(signer, &Config{EnableSmartWalletVerification: true, MaxComputeUnits: &staticCap})
 
 	_, err := scheme.Verify(context.Background(), f.payload, f.requirements, nil)
 	var ve *x402.VerifyError

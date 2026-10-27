@@ -224,10 +224,11 @@ func (f *BatchSvmScheme) validateDeposit(ctx context.Context, payload batchsettl
 			Memo:                        terms.Memo,
 			MaxComputeUnits:             f.config.MaxComputeUnits,
 			MaxPriorityFeeMicroLamports: f.config.MaxPriorityFeeMicroLamports,
+			AcceptedTransactionVersions: f.transactionVersions,
 		}); err != nil {
 			return ValidatedDeposit{}, batchsettlement.SetupTransactionError(err)
 		}
-		if err := f.assertSettlementAccounts(ctx, requirements, payload.ChannelConfig.Payer, terms.TokenProgram); err != nil {
+		if err := f.assertSettlementAccounts(ctx, requirements, payload.ChannelConfig.Payer, terms.TokenProgram, deposit); err != nil {
 			return ValidatedDeposit{}, err
 		}
 		validated.ExpectedDeposit = expected
@@ -240,7 +241,7 @@ func (f *BatchSvmScheme) validateDeposit(ctx context.Context, payload batchsettl
 	if err := f.verifyOpen(ctx, payload, requirements, terms, channelID, deposit); err != nil {
 		return ValidatedDeposit{}, err
 	}
-	if err := f.assertSettlementAccounts(ctx, requirements, payload.ChannelConfig.Payer, terms.TokenProgram); err != nil {
+	if err := f.assertSettlementAccounts(ctx, requirements, payload.ChannelConfig.Payer, terms.TokenProgram, deposit); err != nil {
 		return ValidatedDeposit{}, err
 	}
 	validated.ExpectedDeposit = deposit
@@ -279,6 +280,16 @@ func (f *BatchSvmScheme) verifyOpen(ctx context.Context, payload batchsettlement
 	if err != nil {
 		return err
 	}
+	// The program accepts an open only within its slot window of the cluster
+	// slot it lands at, so the window is judged against the challenge's
+	// recentSlot or, without one, the cluster's own slot.
+	if recent == nil {
+		slot, err := f.signer.GetSlot(ctx, requirements.Network, paymentchannels.SlotCommitment)
+		if err != nil {
+			return fmt.Errorf("%s: read cluster slot: %w", batchsettlement.ErrChannelState, err)
+		}
+		recent = &slot
+	}
 	binding := batchsettlement.EncodeReceiverBindingMemo(terms.ReceiverAuthorizer)
 	open, err := paymentchannels.VerifyOpenTransaction(payload.Deposit.Transaction, paymentchannels.VerifyOpenExpected{
 		AuthorizedSigner:            authorizer,
@@ -297,6 +308,7 @@ func (f *BatchSvmScheme) verifyOpen(ctx context.Context, payload batchsettlement
 		MaxComputeUnits:             f.config.MaxComputeUnits,
 		MaxPriorityFeeMicroLamports: f.config.MaxPriorityFeeMicroLamports,
 		MaxRequiredSignatures:       f.config.MaxRequiredSignatures,
+		AcceptedTransactionVersions: f.transactionVersions,
 	})
 	if err != nil {
 		return batchsettlement.SetupTransactionError(err)
@@ -964,6 +976,7 @@ func (f *BatchSvmScheme) settleRefund(ctx context.Context, payload batchsettleme
 	limits := RefundLimits{
 		MaxComputeUnits:             f.config.MaxComputeUnits,
 		MaxPriorityFeeMicroLamports: f.config.MaxPriorityFeeMicroLamports,
+		TransactionVersions:         f.transactionVersions,
 	}
 	var prepared PreparedRefund
 	var err error
@@ -1122,6 +1135,7 @@ func (f *BatchSvmScheme) verifyRefund(ctx context.Context, payload batchsettleme
 	channel, id, _, err := ValidateRefund(ctx, f.sealDependencies(), refund, requirements, RefundLimits{
 		MaxComputeUnits:             f.config.MaxComputeUnits,
 		MaxPriorityFeeMicroLamports: f.config.MaxPriorityFeeMicroLamports,
+		TransactionVersions:         f.transactionVersions,
 	}, nil)
 	if err != nil {
 		return nil, err
@@ -1188,7 +1202,13 @@ func (f *BatchSvmScheme) assertDepositChannel(channel *generated.Channel, valida
 	return nil
 }
 
-func (f *BatchSvmScheme) assertSettlementAccounts(ctx context.Context, requirements types.PaymentRequirements, payer, tokenProgram string) error {
+// assertSettlementAccounts ensures a deposit can land and the channel can later
+// distribute before the sponsor co-signs it: each payout destination (payer
+// return, receiver, treasury) must be a usable token account for the mint
+// (an unusable one fails distribute only after the escrow is locked and the
+// request served), and the payer's must hold the deposit ("It MUST confirm the
+// payer has sufficient tokens").
+func (f *BatchSvmScheme) assertSettlementAccounts(ctx context.Context, requirements types.PaymentRequirements, payer, tokenProgram string, deposit uint64) error {
 	mint, err := solana.PublicKeyFromBase58(requirements.Asset)
 	if err != nil {
 		return err
@@ -1230,8 +1250,18 @@ func (f *BatchSvmScheme) assertSettlementAccounts(ctx context.Context, requireme
 		if err != nil || account == nil || account.Value == nil {
 			return fmt.Errorf("%s: missing %s ATA: %s", batchsettlement.ErrSettlementSimulation, item.label, ata)
 		}
-		if account.Value.Owner.String() != tokenProgram {
-			return fmt.Errorf("%s: %s ATA is not owned by %s: %s", batchsettlement.ErrSettlementSimulation, item.label, tokenProgram, ata)
+		var data []byte
+		if account.Value.Data != nil {
+			data = account.Value.Data.GetBinary()
+		}
+		if problem := paymentchannels.UnusableSettlementAccount(account.Value.Owner, data, item.owner, mint, program); problem != "" {
+			return fmt.Errorf("%s: %s ATA %s %s", batchsettlement.ErrSettlementSimulation, item.label, ata, problem)
+		}
+		if item.label == "payer" {
+			decoded, _ := paymentchannels.DecodeTokenAccount(data)
+			if decoded.Amount < deposit {
+				return fmt.Errorf("%s: payer ATA %s holds %d, less than the %d deposit", batchsettlement.ErrSettlementSimulation, ata, decoded.Amount, deposit)
+			}
 		}
 	}
 	return nil

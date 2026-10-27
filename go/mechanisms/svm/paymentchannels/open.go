@@ -266,7 +266,14 @@ func resolveSalt(salt *uint64) (uint64, error) {
 // raw bytes first, so a newer wire format is reported as unsupported however
 // the installed decoder handles it.
 func decodeChannelTransaction(transactionBase64, label string) (*solana.Transaction, error) {
-	if version, ok := svm.PeekWireTransactionVersion(transactionBase64); ok && !svm.IsAcceptedWireTransactionVersion(version) {
+	return decodeAcceptedChannelTransaction(transactionBase64, label, nil)
+}
+
+// decodeAcceptedChannelTransaction is decodeChannelTransaction against a
+// facilitator's accepted version set (nil means AdvertisedTransactionVersions;
+// legacy is accepted exactly when version 0 is).
+func decodeAcceptedChannelTransaction(transactionBase64, label string, accepted []int) (*solana.Transaction, error) {
+	if version, ok := svm.PeekWireTransactionVersion(transactionBase64); ok && !svm.IsAcceptedWireTransactionVersionIn(version, accepted) {
 		return nil, unsupportedTransactionVersionError(label, version)
 	}
 	tx, err := svm.DecodeTransaction(transactionBase64)
@@ -276,7 +283,7 @@ func decodeChannelTransaction(transactionBase64, label string) (*solana.Transact
 		}
 		return nil, fmt.Errorf("%s: %w", label, err)
 	}
-	if !svm.IsAcceptedTransactionVersion(tx.Message.GetVersion()) {
+	if !svm.IsAcceptedTransactionVersionIn(tx.Message.GetVersion(), accepted) {
 		return nil, unsupportedTransactionVersionError(label, svm.WireTransactionVersion(tx.Message.GetVersion()))
 	}
 	// The decoder accepts a transaction over its version's size limit (1232
@@ -482,12 +489,15 @@ type VerifyTopUpExpected struct {
 	Program                     solana.PublicKey
 	MaxComputeUnits             *uint32
 	MaxPriorityFeeMicroLamports *uint64
+	// AcceptedTransactionVersions is the facilitator's accepted message
+	// versions; nil accepts AdvertisedTransactionVersions.
+	AcceptedTransactionVersions []int
 }
 
 // VerifyTopUpTransaction decodes and validates the canonical top-up transaction
 // layout and account bindings.
 func VerifyTopUpTransaction(transactionBase64 string, expected VerifyTopUpExpected) error {
-	tx, err := decodeChannelTransaction(transactionBase64, "verifyTopUpTransaction")
+	tx, err := decodeAcceptedChannelTransaction(transactionBase64, "verifyTopUpTransaction", expected.AcceptedTransactionVersions)
 	if err != nil {
 		return err
 	}
@@ -638,6 +648,10 @@ type VerifyOpenExpected struct {
 	// MaxRequiredSignatures, when set, rejects transactions requiring more
 	// signatures than the operator allows.
 	MaxRequiredSignatures *int
+	// AcceptedTransactionVersions is the facilitator's accepted message
+	// versions, checked before any instruction; nil accepts
+	// AdvertisedTransactionVersions. Legacy is accepted exactly when 0 is.
+	AcceptedTransactionVersions []int
 }
 
 // VerifyOpenResult holds the channel facts extracted from a verified open.
@@ -662,7 +676,7 @@ func VerifyOpenTransaction(transactionBase64 string, expected VerifyOpenExpected
 	// The checks below model the legacy, v0 and v1 message layouts. Reject any
 	// other version before inspecting any instruction so version-specific
 	// policy fields cannot bypass the sponsor's limits.
-	tx, err := decodeChannelTransaction(transactionBase64, "verifyOpenTransaction")
+	tx, err := decodeAcceptedChannelTransaction(transactionBase64, "verifyOpenTransaction", expected.AcceptedTransactionVersions)
 	if err != nil {
 		return nil, err
 	}

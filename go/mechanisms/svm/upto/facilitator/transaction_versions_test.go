@@ -92,3 +92,16 @@ func TestSettleRejectsAnUnknownVersionOpenWithTheSpecReason(t *testing.T) {
 	assert.Equal(t, svm.ErrUnsupportedTransactionVersion, settleErrorReason(t, err))
 	assert.Empty(t, signer.sentTransactions(), "rejections never broadcast")
 }
+
+// A facilitator configured to accept [0] refuses a version-1 open before any
+// instruction is inspected, and advertises the configured set.
+func TestVerifyEnforcesTheConfiguredAcceptedVersions(t *testing.T) {
+	signer := newMockSigner(t, 1)
+	fixture := newV1PaymentFixture(t, signer)
+	scheme := newScheme(signer, newStubRPC(t), &Config{TransactionVersions: []int{0}})
+
+	assert.Equal(t, []int{0}, scheme.GetExtra(testNetwork)[upto.ExtraTransactionVersions])
+	_, err := scheme.Verify(context.Background(), fixture.payload, fixture.requirements, nil)
+	assert.Equal(t, svm.ErrUnsupportedTransactionVersion, verifyErrorReason(t, err))
+	assert.Panics(t, func() { NewUptoSvmScheme(signer, &Config{TransactionVersions: []int{2}}) })
+}

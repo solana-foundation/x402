@@ -886,6 +886,12 @@ func (s *BatchSvmScheme) resolveTerms(ctx context.Context, requirements types.Pa
 	if !ok || feePayer == "" {
 		return resolvedTerms{}, fmt.Errorf("extra.feePayer must be a non-empty string")
 	}
+	// The client's key is the channel payer and its voucher signer, and neither
+	// may be the sponsor: a sponsor that is also the payer could co-sign away
+	// the payer's own escrow.
+	if feePayer == s.signer.Address().String() {
+		return resolvedTerms{}, fmt.Errorf("%s: extra.feePayer must not equal the channel payer or payerAuthorizer", batchsettlement.ErrFeePayerMismatch)
+	}
 	withdrawDelay, ok := extraInt(extra[batchsettlement.ExtraWithdrawDelay])
 	if !ok || withdrawDelay < batchsettlement.MinWithdrawDelay || withdrawDelay > batchsettlement.MaxWithdrawDelay || withdrawDelay < requirements.MaxTimeoutSeconds {
 		return resolvedTerms{}, fmt.Errorf("extra.withdrawDelay is outside the allowed range")

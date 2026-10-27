@@ -5,7 +5,6 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"math"
 	"math/rand/v2"
 	"strconv"
 	"sync"
@@ -27,9 +26,29 @@ type Config struct {
 	SmartWalletMaxPriorityFeeMicroLamports *uint64
 	SmartWalletAllowedPrograms             []string
 	MaxPriorityFeeMicroLamports            *uint64
-	MaxComputeUnits                        *uint32
-	MaxRequiredSignatures                  *uint8
+	// MaxComputeUnits caps the compute unit limit on the static path, for a
+	// version-0 SetComputeUnitLimit and a version-1 header computeUnitLimit
+	// alike. Nil uses DefaultMaxComputeUnits (400,000, the reference default
+	// of scheme_exact_svm.md §2.2.1).
+	MaxComputeUnits *uint32
+	// MaxRequiredSignatures caps the required signatures. A payment needs
+	// exactly two (client and fee payer) and MUST NOT require another signer
+	// (§2.1.4). Nil uses DefaultMaxRequiredSignatures (2).
+	MaxRequiredSignatures *uint8
+	// TransactionVersions is the set of message versions this facilitator
+	// accepts and advertises as extra.transactionVersions. Any other version
+	// is rejected with unsupported_transaction_version before any instruction
+	// is inspected; legacy is accepted exactly when 0 is. Nil means [0, 1].
+	TransactionVersions []int
 }
+
+// DefaultMaxComputeUnits is the static-path compute unit ceiling when
+// Config.MaxComputeUnits is unset (scheme_exact_svm.md §2.2.1 reference default).
+const DefaultMaxComputeUnits uint32 = 400_000
+
+// DefaultMaxRequiredSignatures is the required-signature ceiling when
+// Config.MaxRequiredSignatures is unset: the client and the fee payer.
+const DefaultMaxRequiredSignatures uint8 = 2
 
 // accountInfoReader is the optional signer cap used to explain a failed simulation.
 // Exact-only signers omit it, so a missing method keeps the original failure.
@@ -44,10 +63,11 @@ type accountInfoReader interface {
 
 // ExactSvmScheme implements the SchemeNetworkFacilitator interface for SVM (Solana) exact payments (V2)
 type ExactSvmScheme struct {
-	signer          svm.FacilitatorSvmSigner
-	settlementCache *svm.SettlementCache
-	pendingStore    x402.PendingSettlementStore
-	config          Config
+	signer              svm.FacilitatorSvmSigner
+	settlementCache     *svm.SettlementCache
+	pendingStore        x402.PendingSettlementStore
+	config              Config
+	transactionVersions []int
 }
 
 type verifyResult struct {
@@ -77,6 +97,10 @@ func NewExactSvmScheme(signer svm.FacilitatorSvmSigner, config ...*Config) *Exac
 	if cfg.SmartWalletMaxComputeUnits != nil {
 		assertPositive("smartWalletMaxComputeUnits", int64(*cfg.SmartWalletMaxComputeUnits))
 	}
+	transactionVersions, err := svm.NormalizeAcceptedTransactionVersions(cfg.TransactionVersions)
+	if err != nil {
+		panic("exact svm facilitator: " + err.Error())
+	}
 
 	cache := cfg.SettlementCache
 	if cache == nil {
@@ -90,11 +114,30 @@ func NewExactSvmScheme(signer svm.FacilitatorSvmSigner, config ...*Config) *Exac
 	}
 
 	return &ExactSvmScheme{
-		signer:          signer,
-		settlementCache: cache,
-		pendingStore:    x402.NewInMemoryPendingSettlementStore(),
-		config:          cfg,
+		signer:              signer,
+		settlementCache:     cache,
+		pendingStore:        x402.NewInMemoryPendingSettlementStore(),
+		config:              cfg,
+		transactionVersions: transactionVersions,
 	}
+}
+
+// maxComputeUnits is the configured static-path compute unit ceiling, or
+// DefaultMaxComputeUnits.
+func (f *ExactSvmScheme) maxComputeUnits() uint32 {
+	if f.config.MaxComputeUnits != nil {
+		return *f.config.MaxComputeUnits
+	}
+	return DefaultMaxComputeUnits
+}
+
+// maxRequiredSignatures is the configured required-signature ceiling, or
+// DefaultMaxRequiredSignatures.
+func (f *ExactSvmScheme) maxRequiredSignatures() uint8 {
+	if f.config.MaxRequiredSignatures != nil {
+		return *f.config.MaxRequiredSignatures
+	}
+	return DefaultMaxRequiredSignatures
 }
 
 func assertPositive(name string, value int64) {
@@ -133,7 +176,7 @@ func (f *ExactSvmScheme) GetExtra(network x402.Network) map[string]interface{} {
 
 	extra := map[string]interface{}{
 		"feePayer":                   addresses[randomIndex].String(),
-		svm.ExtraTransactionVersions: append([]int(nil), svm.AdvertisedTransactionVersions...),
+		svm.ExtraTransactionVersions: append([]int(nil), f.transactionVersions...),
 	}
 	if f.config.EnableSmartWalletVerification {
 		extra["features"] = map[string]interface{}{
@@ -226,7 +269,7 @@ func (f *ExactSvmScheme) verify(
 	// Step 2: Parse and Validate Transaction Structure
 	// Read the version from the raw bytes first so a newer wire format is
 	// reported as unsupported however the installed decoder handles it.
-	if wireVersion, ok := svm.PeekWireTransactionVersion(solanaPayload.Transaction); ok && !svm.IsAcceptedWireTransactionVersion(wireVersion) {
+	if wireVersion, ok := svm.PeekWireTransactionVersion(solanaPayload.Transaction); ok && !svm.IsAcceptedWireTransactionVersionIn(wireVersion, f.transactionVersions) {
 		return nil, x402.NewVerifyError(ErrUnsupportedTransactionVersion, "", fmt.Sprintf("unsupported transaction message version %d", wireVersion))
 	}
 	tx, err := svm.DecodeTransaction(solanaPayload.Transaction)
@@ -236,7 +279,7 @@ func (f *ExactSvmScheme) verify(
 
 	// Message version gate, before any signature or instruction check: every
 	// check below reads its sponsorship policy from version-specific structure.
-	if !svm.IsAcceptedTransactionVersion(tx.Message.GetVersion()) {
+	if !svm.IsAcceptedTransactionVersionIn(tx.Message.GetVersion(), f.transactionVersions) {
 		return nil, x402.NewVerifyError(ErrUnsupportedTransactionVersion, "", fmt.Sprintf("unsupported transaction message version %d", svm.WireTransactionVersion(tx.Message.GetVersion())))
 	}
 
@@ -246,7 +289,7 @@ func (f *ExactSvmScheme) verify(
 		return nil, x402.NewVerifyError(ErrTransactionSizeExceeded, "", fmt.Sprintf("transaction is %d bytes, above the %d-byte limit", size, limit))
 	}
 
-	if f.config.MaxRequiredSignatures != nil && tx.Message.Header.NumRequiredSignatures > *f.config.MaxRequiredSignatures {
+	if tx.Message.Header.NumRequiredSignatures > f.maxRequiredSignatures() {
 		return nil, x402.NewVerifyError(ErrExcessiveSigners, "", ErrExcessiveSigners)
 	}
 
@@ -540,14 +583,14 @@ func (f *ExactSvmScheme) Settle(
 	if err != nil {
 		return nil, x402.NewSettleError(ErrInvalidPayloadTransaction, "", network, "", err.Error())
 	}
-	if wireVersion, ok := svm.PeekWireTransactionVersion(solanaPayload.Transaction); ok && !svm.IsAcceptedWireTransactionVersion(wireVersion) {
+	if wireVersion, ok := svm.PeekWireTransactionVersion(solanaPayload.Transaction); ok && !svm.IsAcceptedWireTransactionVersionIn(wireVersion, f.transactionVersions) {
 		return nil, x402.NewSettleError(ErrUnsupportedTransactionVersion, "", network, "", fmt.Sprintf("unsupported transaction message version %d", wireVersion))
 	}
 	tx, err := svm.DecodeTransaction(solanaPayload.Transaction)
 	if err != nil {
 		return nil, x402.NewSettleError(ErrInvalidPayloadTransaction, "", network, "", err.Error())
 	}
-	if !svm.IsAcceptedTransactionVersion(tx.Message.GetVersion()) {
+	if !svm.IsAcceptedTransactionVersionIn(tx.Message.GetVersion(), f.transactionVersions) {
 		return nil, x402.NewSettleError(ErrUnsupportedTransactionVersion, "", network, "", fmt.Sprintf("unsupported transaction message version %d", svm.WireTransactionVersion(tx.Message.GetVersion())))
 	}
 	// Keyed on message hash (immune to mutable fee-payer sig at slot 0); shared
@@ -780,10 +823,7 @@ func (f *ExactSvmScheme) reconcilePendingSettlement(
 // verifyTransactionV1Config applies the Path 1 compute caps to a version-1
 // message config (SIMD-0385), which replaces the ComputeBudget instructions.
 func (f *ExactSvmScheme) verifyTransactionV1Config(tx *solana.Transaction) error {
-	maxComputeUnits := uint32(math.MaxUint32)
-	if f.config.MaxComputeUnits != nil {
-		maxComputeUnits = *f.config.MaxComputeUnits
-	}
+	maxComputeUnits := f.maxComputeUnits()
 	maxPrice := uint64(svm.MaxComputeUnitPriceMicrolamports)
 	if f.config.MaxPriorityFeeMicroLamports != nil {
 		maxPrice = *f.config.MaxPriorityFeeMicroLamports
@@ -825,7 +865,7 @@ func (f *ExactSvmScheme) verifyComputeLimitInstruction(tx *solana.Transaction, i
 	}
 
 	units := binary.LittleEndian.Uint32(inst.Data[1:5])
-	if f.config.MaxComputeUnits != nil && units > *f.config.MaxComputeUnits {
+	if units > f.maxComputeUnits() {
 		return errors.New(ErrComputeLimitInstructionTooHigh)
 	}
 

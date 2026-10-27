@@ -83,6 +83,63 @@ func IsAcceptedWireTransactionVersion(version int) bool {
 	return version == -1 || version == 0 || version == 1
 }
 
+// IsAcceptedWireTransactionVersionIn reports whether a wire version (-1 for
+// legacy) is in a facilitator's accepted set of 0 and/or 1. A legacy message
+// is policed as version 0: it is accepted exactly when version 0 is. A nil or
+// empty set means AdvertisedTransactionVersions.
+func IsAcceptedWireTransactionVersionIn(version int, accepted []int) bool {
+	if !IsAcceptedWireTransactionVersion(version) {
+		return false
+	}
+	if len(accepted) == 0 {
+		accepted = AdvertisedTransactionVersions
+	}
+	if version == -1 {
+		version = 0
+	}
+	for _, candidate := range accepted {
+		if candidate == version {
+			return true
+		}
+	}
+	return false
+}
+
+// IsAcceptedTransactionVersionIn is IsAcceptedWireTransactionVersionIn for a
+// decoded message version.
+func IsAcceptedTransactionVersionIn(version solana.MessageVersion, accepted []int) bool {
+	return IsAcceptedTransactionVersion(version) &&
+		IsAcceptedWireTransactionVersionIn(WireTransactionVersion(version), accepted)
+}
+
+// NormalizeAcceptedTransactionVersions validates a facilitator's
+// TransactionVersions option: the message versions it accepts and advertises
+// as extra.transactionVersions. A nil slice means AdvertisedTransactionVersions;
+// otherwise it must be a non-empty list of 0 and/or 1, returned deduplicated
+// and ascending.
+func NormalizeAcceptedTransactionVersions(versions []int) ([]int, error) {
+	if versions == nil {
+		return append([]int(nil), AdvertisedTransactionVersions...), nil
+	}
+	seen := [2]bool{}
+	for _, version := range versions {
+		if version != 0 && version != 1 {
+			return nil, fmt.Errorf("transactionVersions must be a non-empty list of 0 and/or 1 (got %v)", versions)
+		}
+		seen[version] = true
+	}
+	normalized := make([]int, 0, 2)
+	for version, present := range seen {
+		if present {
+			normalized = append(normalized, version)
+		}
+	}
+	if len(normalized) == 0 {
+		return nil, fmt.Errorf("transactionVersions must be a non-empty list of 0 and/or 1 (got %v)", versions)
+	}
+	return normalized, nil
+}
+
 // PriorityFeeLamports converts a compute-unit price into the total priority
 // fee a version-1 transaction carries: ceil(microLamports * units / 1e6).
 func PriorityFeeLamports(computeUnitLimit uint32, microLamports uint64) (uint64, error) {

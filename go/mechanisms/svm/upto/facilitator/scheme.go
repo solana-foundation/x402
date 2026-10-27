@@ -70,6 +70,13 @@ type Config struct {
 	// rule applies.
 	MaxRequiredSignatures *int
 
+	// TransactionVersions is the set of message versions this facilitator
+	// accepts for a client open and advertises as extra.transactionVersions.
+	// An open of any other version is rejected with
+	// unsupported_transaction_version before any instruction is inspected;
+	// legacy is accepted exactly when 0 is. Nil means [0, 1].
+	TransactionVersions []int
+
 	// ComputeUnitPriceMicroLamports is converted to v1's total priority fee for
 	// facilitator-submitted settlement transactions. A value of 0 omits the
 	// config field. Unset defaults to svm.DefaultComputeUnitPriceMicrolamports.
@@ -172,6 +179,7 @@ type UptoSvmScheme struct {
 	pendingStore          x402.PendingSettlementStore
 	authorizerSigner      svm.ReceiverAuthorizerSigner
 	resolveCallerIdentity ResolveCallerIdentity
+	transactionVersions   []int
 }
 
 // NewUptoSvmScheme creates a new UptoSvmScheme. The signer supplies the fee
@@ -207,6 +215,10 @@ func NewUptoSvmScheme(signer svm.FacilitatorSvmSigner, config *Config) *UptoSvmS
 	if cfg.AuthorizerSigner != nil && cfg.ResolveCallerIdentity == nil {
 		panic("upto svm facilitator: authorizerSigner requires resolveCallerIdentity")
 	}
+	transactionVersions, err := svm.NormalizeAcceptedTransactionVersions(cfg.TransactionVersions)
+	if err != nil {
+		panic("upto svm facilitator: " + err.Error())
+	}
 	if cfg.ChannelStorage == nil {
 		cfg.ChannelStorage = paymentchannels.NewInMemoryPaymentChannelStorage()
 	}
@@ -218,6 +230,7 @@ func NewUptoSvmScheme(signer svm.FacilitatorSvmSigner, config *Config) *UptoSvmS
 		pendingStore:          x402.NewInMemoryPendingSettlementStore(),
 		authorizerSigner:      cfg.AuthorizerSigner,
 		resolveCallerIdentity: cfg.ResolveCallerIdentity,
+		transactionVersions:   transactionVersions,
 	}
 }
 
@@ -295,7 +308,7 @@ func (f *UptoSvmScheme) GetExtra(network x402.Network) map[string]interface{} {
 	}
 	extra := map[string]interface{}{
 		upto.ExtraFeePayer:            addresses[rand.IntN(len(addresses))].String(),
-		upto.ExtraTransactionVersions: append([]int(nil), svm.AdvertisedTransactionVersions...),
+		upto.ExtraTransactionVersions: append([]int(nil), f.transactionVersions...),
 	}
 	if f.authorizerSigner != nil {
 		extra[upto.ExtraReceiverAuthorizer] = f.authorizerSigner.Address().String()
@@ -324,6 +337,18 @@ func (f *UptoSvmScheme) Verify(
 	auth, err := f.validateOpenAuthorization(ctx, payload, requirements, true)
 	if err != nil {
 		return nil, err
+	}
+	// The deposit settle refuses an open whose channel already exists, so the
+	// read-only preflight does too: a verify that passed would otherwise
+	// promise a deposit that cannot land.
+	channelRPC := paymentchannels.AccountFetchRPC(f.signer, string(requirements.Network))
+	exists, err := paymentchannels.ChannelExists(ctx, channelRPC, auth.channelID)
+	if err != nil {
+		return nil, x402.NewVerifyError(ErrChannelState, auth.payload.From, err.Error())
+	}
+	if exists {
+		return nil, x402.NewVerifyError(ErrChannelAlreadyOpen, auth.payload.From,
+			fmt.Sprintf("channel %s already exists", auth.payload.ChannelId))
 	}
 	return &x402.VerifyResponse{IsValid: true, Payer: auth.payload.From}, nil
 }
@@ -1122,6 +1147,7 @@ func (f *UptoSvmScheme) validateOpenAuthorization(
 		MaxComputeUnits:             f.config.MaxComputeUnits,
 		MaxPriorityFeeMicroLamports: f.config.MaxPriorityFeeMicroLamports,
 		MaxRequiredSignatures:       f.config.MaxRequiredSignatures,
+		AcceptedTransactionVersions: f.transactionVersions,
 	})
 	if err != nil {
 		return nil, x402.NewVerifyError(openTransactionReason(err), payer, err.Error())

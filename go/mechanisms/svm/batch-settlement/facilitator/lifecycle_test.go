@@ -123,6 +123,12 @@ func TestBatchFacilitatorLifecycle(t *testing.T) {
 			scriptedSigner: inner,
 			owner:          solana.TokenProgramID,
 			exist:          true,
+			ataMint:        solana.MustPublicKeyFromBase58(mint),
+			ataOwners: []solana.PublicKey{
+				payer.Address(),
+				solana.MustPublicKeyFromBase58(receiver),
+				paymentchannels.ResolveTreasuryOwner(solana.PublicKey{}, network),
+			},
 		}
 		for _, opt := range opts {
 			opt(s)
@@ -195,16 +201,16 @@ func TestBatchFacilitatorLifecycle(t *testing.T) {
 		t.Run(fmt.Sprintf("identifies a missing %s settlement ATA", label), func(t *testing.T) {
 			var readIndex int
 			signer := newSigner(t)
-			signer.accountFn = func(solana.PublicKey) *rpc.GetAccountInfoResult {
+			signer.accountFn = func(account solana.PublicKey) *rpc.GetAccountInfoResult {
 				exists := readIndex != missingIndex
 				readIndex++
 				if !exists {
 					return &rpc.GetAccountInfoResult{}
 				}
-				return &rpc.GetAccountInfoResult{Value: &rpc.Account{Owner: solana.TokenProgramID}}
+				return &rpc.GetAccountInfoResult{Value: healthyTokenAccount(account, signer.ataMint, solana.TokenProgramID, signer.ataOwners...)}
 			}
 			scheme := newScheme(t, signer, nil)
-			err := scheme.assertSettlementAccounts(ctx, requirements(), payer.Address().String(), svm.TokenProgramAddress)
+			err := scheme.assertSettlementAccounts(ctx, requirements(), payer.Address().String(), svm.TokenProgramAddress, 1)
 			require.ErrorContains(t, err, "missing "+label+" ATA")
 			require.Equal(t, missingIndex+1, len(signer.accountCalls()))
 		})
@@ -215,8 +221,9 @@ func TestBatchFacilitatorLifecycle(t *testing.T) {
 			s.owner = solana.Token2022ProgramID
 		})
 		scheme := newScheme(t, signer, nil)
-		err := scheme.assertSettlementAccounts(ctx, requirements(), payer.Address().String(), svm.TokenProgramAddress)
-		require.ErrorContains(t, err, "payer ATA is not owned by "+svm.TokenProgramAddress)
+		err := scheme.assertSettlementAccounts(ctx, requirements(), payer.Address().String(), svm.TokenProgramAddress, 1)
+		require.ErrorContains(t, err, "is not owned by "+svm.TokenProgramAddress)
+		require.ErrorContains(t, err, "payer ATA ")
 	})
 
 	t.Run("requires account reads for settlement-path preflight", func(t *testing.T) {
@@ -941,6 +948,73 @@ func TestBatchFacilitatorLifecycle(t *testing.T) {
 		require.True(t, result.IsValid, "reason=%s message=%s", result.InvalidReason, result.InvalidMessage)
 		require.Equal(t, builtV1.ChannelID, result.Extra["channelId"])
 	})
+
+	t.Run("judges an open's slot against the cluster slot without extra.recentSlot", func(t *testing.T) {
+		req := requirements()
+		for _, tc := range []struct {
+			slot  uint64
+			valid bool
+		}{{123, true}, {123 + 1_500, true}, {122, false}, {123 + 1_501, false}} {
+			signer := &slotSigner{lifecycleSigner: newSigner(t), slot: tc.slot}
+			scheme := newScheme(t, signer, nil)
+			scheme.hooks.readChannel = func(context.Context, string, string) (*generated.Channel, error) { return nil, nil }
+			result, err := scheme.Verify(ctx, payment(actualDeposit, req), req, nil)
+			require.NoError(t, err)
+			require.Equal(t, tc.valid, result.IsValid, "cluster slot %d", tc.slot)
+			if !tc.valid {
+				require.Equal(t, batchsettlement.ErrSetupTransaction, result.InvalidReason)
+			}
+		}
+	})
+
+	t.Run("advertises and enforces its configured accepted versions", func(t *testing.T) {
+		scheme := newScheme(t, newSigner(t), &Config{TransactionVersions: []int{1}})
+		require.Equal(t, []int{1}, scheme.getExtra(ctx, x402.Network(network))[svm.ExtraTransactionVersions])
+		scheme.hooks.readChannel = func(context.Context, string, string) (*generated.Channel, error) { return nil, nil }
+		req := requirements()
+		result, err := scheme.Verify(ctx, payment(actualDeposit, req), req, nil)
+		require.NoError(t, err)
+		require.False(t, result.IsValid)
+		require.Equal(t, svm.ErrUnsupportedTransactionVersion, result.InvalidReason)
+		require.Panics(t, func() { newScheme(t, newSigner(t), &Config{TransactionVersions: []int{2}}) })
+	})
+
+	for _, tc := range []struct {
+		label   string
+		data    func() []byte
+		message string
+	}{
+		{"frozen", func() []byte {
+			return tokenAccountBytes(solana.MustPublicKeyFromBase58(mint), payer.Address(), 1_000_000, 2)
+		}, "is frozen"},
+		{"unfunded", func() []byte {
+			return tokenAccountBytes(solana.MustPublicKeyFromBase58(mint), payer.Address(), 1, 1)
+		}, "holds 1, less than the 10000 deposit"},
+		{"for another wallet", func() []byte {
+			return tokenAccountBytes(solana.MustPublicKeyFromBase58(mint), feePayerKey.PublicKey(), 1_000_000, 1)
+		}, "is owned by"},
+		{"for another mint", func() []byte {
+			return tokenAccountBytes(solana.MustPublicKeyFromBase58(receiver), payer.Address(), 1_000_000, 1)
+		}, "holds mint"},
+		{"uninitialized", func() []byte { return nil }, "is not an initialized token account"},
+	} {
+		label, data, message := tc.label, tc.data, tc.message
+		t.Run("refuses a payer settlement ATA "+label, func(t *testing.T) {
+			signer := newSigner(t)
+			payerATA, err := paymentchannels.FindATA(payer.Address(), solana.MustPublicKeyFromBase58(mint), solana.TokenProgramID)
+			require.NoError(t, err)
+			signer.accountFn = func(account solana.PublicKey) *rpc.GetAccountInfoResult {
+				if account.Equals(payerATA) {
+					return &rpc.GetAccountInfoResult{Value: &rpc.Account{Owner: solana.TokenProgramID, Data: rpc.DataBytesOrJSONFromBytes(data())}}
+				}
+				return &rpc.GetAccountInfoResult{Value: healthyTokenAccount(account, signer.ataMint, solana.TokenProgramID, signer.ataOwners...)}
+			}
+			scheme := newScheme(t, signer, nil)
+			err = scheme.assertSettlementAccounts(ctx, requirements(), payer.Address().String(), svm.TokenProgramAddress, 10_000)
+			require.ErrorContains(t, err, batchsettlement.ErrSettlementSimulation)
+			require.ErrorContains(t, err, message)
+		})
+	}
 
 	t.Run("validates real open, voucher, and refund transactions", func(t *testing.T) {
 		storage := paymentchannels.NewInMemoryPaymentChannelStorage()
@@ -1817,8 +1891,12 @@ func TestBatchFacilitatorLifecycle(t *testing.T) {
 
 type lifecycleSigner struct {
 	*scriptedSigner
-	owner      solana.PublicKey
-	exist      bool
+	owner solana.PublicKey
+	exist bool
+	// ataMint and ataOwners name the settlement ATAs served as healthy,
+	// funded token accounts.
+	ataMint    solana.PublicKey
+	ataOwners  []solana.PublicKey
 	accountFn  func(solana.PublicKey) *rpc.GetAccountInfoResult
 	simulateFn func(context.Context, *solana.Transaction, string) error
 	simulateN  int
@@ -1831,6 +1909,9 @@ func (s *lifecycleSigner) GetAccountInfo(ctx context.Context, account solana.Pub
 	}
 	if !s.exist {
 		return &rpc.GetAccountInfoResult{}, nil
+	}
+	if ata := healthyTokenAccount(account, s.ataMint, s.owner, s.ataOwners...); ata != nil {
+		return &rpc.GetAccountInfoResult{Value: ata}, nil
 	}
 	return &rpc.GetAccountInfoResult{Value: &rpc.Account{Owner: s.owner}}, nil
 }
@@ -1949,4 +2030,14 @@ func mustParseU64(t *testing.T, value string) uint64 {
 	parsed, err := paymentchannels.ParseU64(value, "value")
 	require.NoError(t, err)
 	return parsed
+}
+
+// slotSigner reports a fixed cluster slot.
+type slotSigner struct {
+	*lifecycleSigner
+	slot uint64
+}
+
+func (s *slotSigner) GetSlot(context.Context, string, rpc.CommitmentType) (uint64, error) {
+	return s.slot, nil
 }
