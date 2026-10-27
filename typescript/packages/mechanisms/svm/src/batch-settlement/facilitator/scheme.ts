@@ -22,7 +22,6 @@ import {
   buildDistributeInstruction,
   buildSettleInstructions,
   ChannelStatus,
-  getPaymentChannelsTreasuryOwner,
   type ServerInstruction,
 } from "../../payment-channels/onchain";
 import {
@@ -108,6 +107,8 @@ import {
   type BatchSvmFacilitatorConfig,
   delegatedIdentityForOpen,
   isDelegatedAuthorizer,
+  assertTreasuryOwner,
+  treasuryOwnerOf,
   readReceiverAuthorizer,
   resolveDelegatedIdentity,
 } from "./bindingSource";
@@ -192,6 +193,7 @@ export class BatchSvmScheme implements SchemeNetworkFacilitator {
     this.maxIdleSecs = assertMaxIdleSecs(config.maxIdleSecs);
     this.receiverBindingHistoryReader = config.receiverBindingHistoryReader;
     this.redemption = redemptionPolicy(config.redemptionTransactionVersion);
+    assertTreasuryOwner(config);
   }
 
   getExtra(_: Network): Record<string, unknown> {
@@ -224,6 +226,7 @@ export class BatchSvmScheme implements SchemeNetworkFacilitator {
       signer: this.signer,
       storage: this.channelStorage,
       useTransactionV1: this.redemption.version === 1,
+      treasuryOwner: this.config.paymentChannelsTreasuryOwner,
     });
   }
 
@@ -438,8 +441,7 @@ export class BatchSvmScheme implements SchemeNetworkFacilitator {
     if (!feePayer || prepared.some(item => item.feePayer !== feePayer)) {
       throw new Error(BatchError.FEE_PAYER_MISMATCH);
     }
-    // Keyed by exactly what this batch advances, so a retry of the same claim
-    // reconciles while a different one proceeds.
+    // Keyed by what this batch advances: a retry reconciles, a different claim proceeds.
     const claimKey = `batch:claim:${requirements.network}:${prepared
       .map(item => `${item.channelId}:${item.cumulative}`)
       .sort()
@@ -549,8 +551,7 @@ export class BatchSvmScheme implements SchemeNetworkFacilitator {
     ) {
       throw new Error(`${BatchError.PAYLOAD_TYPE}: invalid channel batch`);
     }
-    // This identifies a sweep queue, not an immutable merchant request. A later
-    // call may sweep new earnings after the preceding transaction is resolved.
+    // A sweep queue, not an immutable request: a later call may sweep new earnings.
     const key = `batch:distribute:${requirements.network}:${requirements.asset}:${requirements.payTo}:${payload.channels
       .map(item => item.channelId)
       .sort()
@@ -718,7 +719,7 @@ export class BatchSvmScheme implements SchemeNetworkFacilitator {
           if (
             closed &&
             (item.channelConfig.payer === requirements.payTo ||
-              getPaymentChannelsTreasuryOwner(requirements.network) === requirements.payTo)
+              treasuryOwnerOf(this.config, requirements.network) === requirements.payTo)
           ) {
             throw new PayoutAttributionAmbiguousError();
           }
@@ -954,8 +955,7 @@ export class BatchSvmScheme implements SchemeNetworkFacilitator {
         // across signer backends that will not sign the same bytes twice.
         await this.signer.simulateTransaction(payload.deposit.transaction, requirements.network);
       } else {
-        // Simulates the open/settle/distribute chain through the facilitator
-        // signer's own RPC, like every other read and broadcast here.
+        // Simulates the open/settle/distribute chain through the signer's own RPC.
         await simulateOpenSettleDistribute(
           terms.feePayerSigner,
           this.signer,
@@ -970,6 +970,7 @@ export class BatchSvmScheme implements SchemeNetworkFacilitator {
               rentPayer: terms.feePayer,
               splits: [{ bps: FULL_SPLIT_BPS, recipient: requirements.payTo }],
               tokenProgram: terms.tokenProgram,
+              treasuryOwner: treasuryOwnerOf(this.config, requirements.network),
             },
             openTransactionBase64: payload.deposit.transaction,
           },
@@ -1088,7 +1089,7 @@ export class BatchSvmScheme implements SchemeNetworkFacilitator {
       { label: "recipient", owner: address(requirements.payTo) },
       {
         label: "payment-channel treasury",
-        owner: getPaymentChannelsTreasuryOwner(requirements.network),
+        owner: treasuryOwnerOf(this.config, requirements.network),
       },
     ] as const;
     for (const { label, owner } of required) {
@@ -1469,8 +1470,7 @@ export class BatchSvmScheme implements SchemeNetworkFacilitator {
     // Keep the signature until the caller observes the operation-specific
     // postcondition. Confirmation can precede a fresh account view when RPC
     // requests are load-balanced across nodes.
-    // Submission helpers already confirmed and captured the execution slot.
-    // Do not add another status RPC to successful opens, top-ups or redemptions.
+    // Submission helpers already confirmed it (with its slot): no further status RPC.
     return { ok: true, replayed: false, signature };
   }
 
@@ -1571,8 +1571,7 @@ export class BatchSvmScheme implements SchemeNetworkFacilitator {
     // records, and completed is deliberately checked first on recovery.
     await this.pendingStore.set(this.completedBroadcastKey(key), signature);
     await this.forgetPending(key, signature);
-    // The completed identity/result now survives response loss; signed bytes
-    // are no longer needed for rebroadcast.
+    // Completion now survives response loss; the signed bytes are no longer needed.
     await discardWire(this.pendingStore, network, signature);
   }
 
@@ -1912,6 +1911,7 @@ export class BatchSvmScheme implements SchemeNetworkFacilitator {
       rentPayer: channel.rentPayer,
       splits: [{ bps: FULL_SPLIT_BPS, recipient: requirements.payTo }],
       tokenProgram: terms.tokenProgram,
+      treasuryOwner: treasuryOwnerOf(this.config, requirements.network),
     });
   }
 

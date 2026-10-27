@@ -483,14 +483,15 @@ func (f *BatchSvmScheme) simulateOpen(ctx context.Context, validated ValidatedDe
 		return err
 	}
 	return paymentchannels.SimulateOpenSettleDistribute(ctx, f.signer, feePayer, validated.Payload.Deposit.Transaction, paymentchannels.SettlementSimChannel{
-		ChannelID:    channelID,
-		Mint:         mint,
-		Network:      requirements.Network,
-		Payee:        feePayer,
-		Payer:        payer,
-		RentPayer:    feePayer,
-		Splits:       []paymentchannels.Split{{Recipient: requirements.PayTo, BPS: batchsettlement.FullSplitBPS}},
-		TokenProgram: tokenProgram,
+		ChannelID:     channelID,
+		Mint:          mint,
+		Network:       requirements.Network,
+		Payee:         feePayer,
+		Payer:         payer,
+		RentPayer:     feePayer,
+		Splits:        []paymentchannels.Split{{Recipient: requirements.PayTo, BPS: batchsettlement.FullSplitBPS}},
+		TokenProgram:  tokenProgram,
+		TreasuryOwner: f.config.PaymentChannelsTreasuryOwner,
 	})
 }
 
@@ -934,7 +935,7 @@ func (f *BatchSvmScheme) attributeDistribution(ctx context.Context, key, signatu
 			continue
 		}
 		if !balanceHasAccount(evidence.Meta.PostTokenBalances, escrowIndex) &&
-			(item.ChannelConfig.Payer == requirements.PayTo || paymentchannels.TreasuryOwner(requirements.Network).String() == requirements.PayTo) {
+			(item.ChannelConfig.Payer == requirements.PayTo || paymentchannels.ResolveTreasuryOwner(f.config.PaymentChannelsTreasuryOwner, requirements.Network).String() == requirements.PayTo) {
 			return nil, &PayoutAttributionAmbiguousError{}
 		}
 	}
@@ -1219,7 +1220,7 @@ func (f *BatchSvmScheme) assertSettlementAccounts(ctx context.Context, requireme
 	}{
 		{"payer", payer},
 		{"recipient", requirements.PayTo},
-		{"payment-channel treasury", paymentchannels.TreasuryOwner(requirements.Network).String()},
+		{"payment-channel treasury", paymentchannels.ResolveTreasuryOwner(f.config.PaymentChannelsTreasuryOwner, requirements.Network).String()},
 	} {
 		owner, err := solana.PublicKeyFromBase58(item.value)
 		if err != nil {

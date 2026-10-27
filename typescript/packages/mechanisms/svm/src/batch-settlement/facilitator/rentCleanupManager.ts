@@ -46,6 +46,8 @@ export interface BatchSvmRentCleanupManagerConfig {
   maxIdleSecs?: number;
   /** Build reclaim and close batches as version 1 (62 reclaims per transaction). */
   useTransactionV1?: boolean;
+  /** Treasury owner override for close/distribute cleanup. */
+  treasuryOwner?: string;
 }
 
 /**

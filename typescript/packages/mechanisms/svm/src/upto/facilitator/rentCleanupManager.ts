@@ -84,6 +84,8 @@ export interface UptoSvmRentCleanupManagerConfig {
    * v0 caps reclaim batches at `MAX_SAFE_RECLAIMS_PER_TX`. Defaults to 1.
    */
   facilitatorTransactionVersion?: FacilitatorTransactionVersion;
+  /** Treasury owner override; see `UptoSvmFacilitatorConfig.paymentChannelsTreasuryOwner`. */
+  treasuryOwner?: string | undefined;
 }
 
 /**

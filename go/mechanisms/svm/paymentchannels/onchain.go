@@ -124,6 +124,15 @@ func DecodeChannel(data []byte) (*generated.Channel, error) {
 	return &decoded, nil
 }
 
+// ResolveTreasuryOwner returns override when it is set, else the treasury
+// owner of the program deployed on network.
+func ResolveTreasuryOwner(override solana.PublicKey, network string) solana.PublicKey {
+	if !override.IsZero() {
+		return override
+	}
+	return TreasuryOwner(network)
+}
+
 // TreasuryOwner returns the payment-channels treasury owner for the program
 // binary deployed on the given CAIP-2 (or legacy v1) network.
 func TreasuryOwner(network string) solana.PublicKey {
@@ -277,6 +286,9 @@ type DistributeInstructionArgs struct {
 	Network string
 	// Program overrides the payment-channels program id. The zero key uses ProgramID.
 	Program solana.PublicKey
+	// TreasuryOwner overrides the treasury owner the program was built with,
+	// for a custom or local build. The zero key uses TreasuryOwner(Network).
+	TreasuryOwner solana.PublicKey
 }
 
 // BuildDistributeInstruction builds distribute with its dynamic tail of one
@@ -295,7 +307,7 @@ func BuildDistributeInstruction(args DistributeInstructionArgs) (solana.Instruct
 	if err != nil {
 		return nil, err
 	}
-	treasuryTokenAccount, err := FindATA(TreasuryOwner(args.Network), args.Mint, args.TokenProgram)
+	treasuryTokenAccount, err := FindATA(ResolveTreasuryOwner(args.TreasuryOwner, args.Network), args.Mint, args.TokenProgram)
 	if err != nil {
 		return nil, err
 	}

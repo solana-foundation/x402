@@ -37,6 +37,11 @@ const DefaultFacilitatorTransactionVersion = paymentchannels.FacilitatorTransact
 
 // Config is the optional configuration of the SVM `upto` facilitator.
 type Config struct {
+	// PaymentChannelsTreasuryOwner overrides the treasury owner the
+	// payment-channels program was built with, used to derive the treasury
+	// token account distribute pays. The zero key uses the deployed program's
+	// owner for the requirement's network; set it for a custom or local build.
+	PaymentChannelsTreasuryOwner solana.PublicKey
 	// ChannelStorage is the one channel store for every use case: the lifecycle
 	// index, rent cleanup, and the delegated caller identity. Unset uses one
 	// in-memory instance of this same store. Pass a durable implementation
@@ -273,6 +278,7 @@ func (f *UptoSvmScheme) NewRentCleanupManager(network string) *RentCleanupManage
 		Signer:                            f.signer,
 		Storage:                           f.channelStorage,
 		Network:                           network,
+		TreasuryOwner:                     f.config.PaymentChannelsTreasuryOwner,
 		ComputeUnitPriceMicroLamports:     f.config.ComputeUnitPriceMicroLamports,
 		SettleComputeUnitLimit:            f.config.SettleComputeUnitLimit,
 		SettleLoadedAccountsDataSizeLimit: f.config.SettleLoadedAccountsDataSizeLimit,
@@ -549,14 +555,15 @@ func (f *UptoSvmScheme) settleDeposit(
 
 	if err := paymentchannels.SimulateOpenSettleDistribute(
 		ctx, f.signer, auth.feePayer, uptoPayload.OpenTransaction, paymentchannels.SettlementSimChannel{
-			ChannelID:    auth.channelID,
-			Mint:         auth.mint,
-			Payee:        auth.feePayer,
-			Payer:        auth.from,
-			RentPayer:    auth.feePayer,
-			TokenProgram: auth.tokenProgram,
-			Network:      string(requirements.Network),
-			Splits:       auth.channelConfig.Splits,
+			ChannelID:     auth.channelID,
+			Mint:          auth.mint,
+			Payee:         auth.feePayer,
+			Payer:         auth.from,
+			RentPayer:     auth.feePayer,
+			TokenProgram:  auth.tokenProgram,
+			Network:       string(requirements.Network),
+			Splits:        auth.channelConfig.Splits,
+			TreasuryOwner: f.config.PaymentChannelsTreasuryOwner,
 		},
 	); err != nil {
 		f.settlementCache.Delete(depositKey)
@@ -867,6 +874,8 @@ type settlementChannel struct {
 	TokenProgram solana.PublicKey
 	Network      string
 	Splits       []paymentchannels.Split
+	// TreasuryOwner overrides the program's treasury owner; zero uses Network's.
+	TreasuryOwner solana.PublicKey
 }
 
 // voucherArgs carry a signed voucher into settle_and_seal via the Ed25519
@@ -904,14 +913,15 @@ func buildSettleAndDistribute(
 		return nil, err
 	}
 	distribute, err := paymentchannels.BuildDistributeInstruction(paymentchannels.DistributeInstructionArgs{
-		Channel:      channel.ChannelID,
-		Payer:        channel.Payer,
-		Payee:        channel.Payee,
-		RentPayer:    channel.RentPayer,
-		Mint:         channel.Mint,
-		TokenProgram: channel.TokenProgram,
-		Splits:       channel.Splits,
-		Network:      channel.Network,
+		Channel:       channel.ChannelID,
+		Payer:         channel.Payer,
+		Payee:         channel.Payee,
+		RentPayer:     channel.RentPayer,
+		Mint:          channel.Mint,
+		TokenProgram:  channel.TokenProgram,
+		Splits:        channel.Splits,
+		Network:       channel.Network,
+		TreasuryOwner: channel.TreasuryOwner,
 	})
 	if err != nil {
 		return nil, err
@@ -940,14 +950,15 @@ func (f *UptoSvmScheme) submitClaim(
 	}
 
 	instructions, err := buildSettleAndDistribute(settlementChannel{
-		ChannelID:    channel.ChannelID,
-		Mint:         channel.Mint,
-		Payee:        channel.Payee,
-		Payer:        channel.Payer,
-		RentPayer:    channel.RentPayer,
-		TokenProgram: args.TokenProgram,
-		Network:      args.Network,
-		Splits:       channel.Splits,
+		ChannelID:     channel.ChannelID,
+		Mint:          channel.Mint,
+		Payee:         channel.Payee,
+		Payer:         channel.Payer,
+		RentPayer:     channel.RentPayer,
+		TokenProgram:  args.TokenProgram,
+		Network:       args.Network,
+		Splits:        channel.Splits,
+		TreasuryOwner: f.config.PaymentChannelsTreasuryOwner,
 	}, voucher)
 	if err != nil {
 		return "", err

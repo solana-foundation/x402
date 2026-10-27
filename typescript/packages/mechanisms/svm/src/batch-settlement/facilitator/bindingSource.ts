@@ -1,4 +1,5 @@
-import { isAddress } from "@solana/kit";
+import { address, type Address, isAddress } from "@solana/kit";
+import { getPaymentChannelsTreasuryOwner } from "../../payment-channels/onchain";
 import type {
   FacilitatorContext,
   Network,
@@ -69,6 +70,13 @@ export interface BatchSvmFacilitatorConfig {
    * `maxClaimChannels` 18 and `maxSettleChannels` 13; `0` keeps four of each.
    */
   redemptionTransactionVersion?: 0 | 1 | undefined;
+  /**
+   * Treasury owner the payment-channels program was built with, used to derive
+   * the treasury token account `distribute` pays the protocol fee to. Defaults
+   * to the deployed program's owner for the requirement's network; set it for
+   * a custom or local build.
+   */
+  paymentChannelsTreasuryOwner?: string | undefined;
   maxPriorityFeeMicroLamports?: number | undefined;
   maxComputeUnits?: number | undefined;
   maxRequiredSignatures?: number | undefined;
@@ -360,4 +368,31 @@ function isReceiverBindingHistoryReader(value: object): value is BatchReceiverBi
     typeof historyReader.getSignaturesForAddress === "function" &&
     typeof historyReader.getTransaction === "function"
   );
+}
+
+/**
+ * The payment-channels treasury owner for `network`: the configured override,
+ * else the deployed program's owner for that network.
+ *
+ * @param config - Facilitator configuration
+ * @param network - CAIP-2 network of the requirements
+ * @returns Treasury owner address
+ */
+export function treasuryOwnerOf(config: BatchSvmFacilitatorConfig, network: string): Address {
+  if (config.paymentChannelsTreasuryOwner === undefined) {
+    return getPaymentChannelsTreasuryOwner(network);
+  }
+  if (!isAddress(config.paymentChannelsTreasuryOwner)) {
+    throw new Error("paymentChannelsTreasuryOwner must be a base58 Solana address");
+  }
+  return address(config.paymentChannelsTreasuryOwner);
+}
+
+/**
+ * Reject a configured treasury owner that is not a Solana address.
+ *
+ * @param config - Facilitator configuration
+ */
+export function assertTreasuryOwner(config: BatchSvmFacilitatorConfig): void {
+  if (config.paymentChannelsTreasuryOwner !== undefined) treasuryOwnerOf(config, "");
 }

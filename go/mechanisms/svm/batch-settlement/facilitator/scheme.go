@@ -24,8 +24,13 @@ import (
 
 // Config is the optional configuration of the batch-settlement SVM facilitator.
 type Config struct {
-	PendingSettlementStore  PendingSettlementStore
-	OnDistributionConfirmed OnDistributionConfirmed
+	// PaymentChannelsTreasuryOwner overrides the treasury owner the
+	// payment-channels program was built with, used to derive the treasury
+	// token account distribute pays. The zero key uses the deployed program's
+	// owner for the requirement's network; set it for a custom or local build.
+	PaymentChannelsTreasuryOwner solana.PublicKey
+	PendingSettlementStore       PendingSettlementStore
+	OnDistributionConfirmed      OnDistributionConfirmed
 	// ChannelStorage is the one channel store for every use case: the lifecycle
 	// index, the receiver-authorizer binding, the delegated caller identity,
 	// and rent cleanup. Unset uses one in-memory instance of this same store.
@@ -229,6 +234,7 @@ func (f *BatchSvmScheme) CreateRentCleanupManager(network x402.Network) *BatchSv
 		MaxIdleSecs:      &idle,
 		Storage:          f.channelStorage,
 		UseTransactionV0: f.config.UseTransactionV0,
+		TreasuryOwner:    f.config.PaymentChannelsTreasuryOwner,
 	})
 }
 
@@ -879,14 +885,15 @@ func (f *BatchSvmScheme) distributeInstruction(ctx context.Context, channelID st
 		return nil, err
 	}
 	return paymentchannels.BuildDistributeInstruction(paymentchannels.DistributeInstructionArgs{
-		Channel:      id,
-		Payer:        channel.Payer,
-		Payee:        channel.Payee,
-		RentPayer:    channel.RentPayer,
-		Mint:         channel.Mint,
-		TokenProgram: tokenProgram,
-		Splits:       []paymentchannels.Split{{Recipient: requirements.PayTo, BPS: batchsettlement.FullSplitBPS}},
-		Network:      requirements.Network,
+		Channel:       id,
+		Payer:         channel.Payer,
+		Payee:         channel.Payee,
+		RentPayer:     channel.RentPayer,
+		Mint:          channel.Mint,
+		TokenProgram:  tokenProgram,
+		Splits:        []paymentchannels.Split{{Recipient: requirements.PayTo, BPS: batchsettlement.FullSplitBPS}},
+		Network:       requirements.Network,
+		TreasuryOwner: f.config.PaymentChannelsTreasuryOwner,
 	})
 }
 

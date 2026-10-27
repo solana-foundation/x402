@@ -252,6 +252,14 @@ export interface UptoSvmFacilitatorConfig {
    */
   pendingSettlementStore?: PendingSettlementStore;
   /**
+   * Treasury owner the payment-channels program was built with, used to derive
+   * the treasury token account `distribute` pays the protocol fee to. Defaults
+   * to the deployed program's owner for the requirement's network; set it for
+   * a custom or local build (e.g. a localnet validator whose program carries
+   * the mainnet constant while requirements use devnet's CAIP-2 id).
+   */
+  paymentChannelsTreasuryOwner?: string;
+  /**
    * Enables facilitator-delegated receiver authorization. Advertised as
    * `/supported` `extra.receiverAuthorizer` and used to sign claim vouchers
    * when the server omits `voucherSignature`. Requires
@@ -351,6 +359,12 @@ export class UptoSvmScheme implements SchemeNetworkFacilitator {
     this.facilitatorTransactionVersion = resolveFacilitatorTransactionVersion(
       config.facilitatorTransactionVersion,
     );
+    if (
+      config.paymentChannelsTreasuryOwner !== undefined &&
+      !validateSvmAddress(config.paymentChannelsTreasuryOwner)
+    ) {
+      throw new Error("paymentChannelsTreasuryOwner must be a base58 Solana address");
+    }
     assertPaymentChannelFacilitatorSigner(signer, "UptoSvmScheme");
     this.signer = signer;
     this.getKitSigner = signer.getSigner.bind(signer);
@@ -404,6 +418,7 @@ export class UptoSvmScheme implements SchemeNetworkFacilitator {
       facilitatorTransactionVersion: this.facilitatorTransactionVersion,
       signer: cleanupSigner,
       storage: this.channelStorage,
+      treasuryOwner: this.config.paymentChannelsTreasuryOwner,
     });
   }
 
@@ -749,6 +764,7 @@ export class UptoSvmScheme implements SchemeNetworkFacilitator {
           rentPayer: feePayer,
           splits: channelConfig.splits,
           tokenProgram,
+          treasuryOwner: this.config.paymentChannelsTreasuryOwner,
         },
       });
     } catch (error) {
@@ -1099,6 +1115,7 @@ export class UptoSvmScheme implements SchemeNetworkFacilitator {
         rentPayer: channel.rentPayer,
         splits: channel.splits,
         tokenProgram,
+        treasuryOwner: this.config.paymentChannelsTreasuryOwner,
       });
 
       const instructions: ServerInstruction[] = [...settle, distribute];

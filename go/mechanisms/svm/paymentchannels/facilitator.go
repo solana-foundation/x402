@@ -300,6 +300,9 @@ type SettlementSimChannel struct {
 	RentPayer    solana.PublicKey
 	Splits       []Split
 	TokenProgram solana.PublicKey
+	// TreasuryOwner overrides the program's treasury owner; see
+	// DistributeInstructionArgs.TreasuryOwner.
+	TreasuryOwner solana.PublicKey
 }
 
 // SimulateOpenSettleDistribute simulates open + settle_and_seal(has_voucher=0)
@@ -354,14 +357,15 @@ func SimulateOpenSettleDistribute(
 	}
 	instructions = append(instructions, settle...)
 	distribute, err := BuildDistributeInstruction(DistributeInstructionArgs{
-		Channel:      channel.ChannelID,
-		Payer:        channel.Payer,
-		Payee:        channel.Payee,
-		RentPayer:    channel.RentPayer,
-		Mint:         channel.Mint,
-		TokenProgram: channel.TokenProgram,
-		Splits:       channel.Splits,
-		Network:      channel.Network,
+		Channel:       channel.ChannelID,
+		Payer:         channel.Payer,
+		Payee:         channel.Payee,
+		RentPayer:     channel.RentPayer,
+		Mint:          channel.Mint,
+		TokenProgram:  channel.TokenProgram,
+		Splits:        channel.Splits,
+		Network:       channel.Network,
+		TreasuryOwner: channel.TreasuryOwner,
 	})
 	if err != nil {
 		return err

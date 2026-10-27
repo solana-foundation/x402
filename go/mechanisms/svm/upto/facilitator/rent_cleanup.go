@@ -2,6 +2,7 @@ package facilitator
 
 import (
 	"context"
+	solana "github.com/gagliardetto/solana-go"
 	"time"
 
 	"github.com/x402-foundation/x402/go/v2/mechanisms/svm/paymentchannels"
@@ -174,6 +175,9 @@ type RentCleanupConfig struct {
 	Signer  paymentchannels.PaymentChannelFacilitatorSigner
 	Storage paymentchannels.PaymentChannelStorage
 	Network string
+	// TreasuryOwner overrides the program's treasury owner for close/distribute
+	// cleanup; the zero key uses the network's.
+	TreasuryOwner solana.PublicKey
 
 	// ComputeUnitPriceMicroLamports is the SetComputeUnitPrice (microlamports
 	// per compute unit) attached to cleanup transactions; 0 omits the
@@ -220,6 +224,7 @@ func NewRentCleanupManager(config RentCleanupConfig) *RentCleanupManager {
 			Signer:                            config.Signer,
 			Storage:                           config.Storage,
 			Network:                           config.Network,
+			TreasuryOwner:                     config.TreasuryOwner,
 			ComputeUnitPriceMicroLamports:     config.ComputeUnitPriceMicroLamports,
 			SettleComputeUnitLimit:            config.SettleComputeUnitLimit,
 			SettleLoadedAccountsDataSizeLimit: config.SettleLoadedAccountsDataSizeLimit,

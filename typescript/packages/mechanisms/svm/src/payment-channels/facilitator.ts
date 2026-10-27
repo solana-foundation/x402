@@ -422,6 +422,8 @@ export interface SettlementSimChannel {
   rentPayer: string;
   splits: readonly ChannelSplit[];
   tokenProgram: string;
+  /** Treasury owner override, as `DistributeBuildArgs.treasuryOwner`. */
+  treasuryOwner?: string | undefined;
 }
 
 /**
@@ -547,6 +549,7 @@ async function buildOpenSettleDistributeSimulation(
     rentPayer: channel.rentPayer,
     splits: channel.splits,
     tokenProgram: channel.tokenProgram,
+    treasuryOwner: channel.treasuryOwner,
   });
 
   if (compiled.version === 1) {
