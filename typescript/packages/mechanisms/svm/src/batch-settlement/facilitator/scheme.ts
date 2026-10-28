@@ -202,7 +202,7 @@ export class BatchSvmScheme implements SchemeNetworkFacilitator {
     this.distributionPasses = distributionsForStore(this.pendingStore);
     this.maxIdleSecs = assertMaxIdleSecs(config.maxIdleSecs);
     this.receiverBindingHistoryReader = config.receiverBindingHistoryReader;
-    this.redemption = redemptionPolicy(config.redemptionTransactionVersion);
+    this.redemption = redemptionPolicy(config.facilitatorTransactionVersion);
     this.transactionVersions = normalizeAcceptedTransactionVersions(config.transactionVersions);
     assertTreasuryOwner(config);
   }
@@ -236,7 +236,7 @@ export class BatchSvmScheme implements SchemeNetworkFacilitator {
       network,
       signer: this.signer,
       storage: this.channelStorage,
-      useTransactionV1: this.redemption.version === 1,
+      facilitatorTransactionVersion: this.redemption.version,
       treasuryOwner: this.config.paymentChannelsTreasuryOwner,
     });
   }

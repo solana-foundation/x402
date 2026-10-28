@@ -7,11 +7,12 @@ import type { Signature } from "@solana/kit";
 import {
   ChannelSimulationError,
   facilitatorV1TransactionFits,
+  resolveFacilitatorTransactionVersion,
   submitChannelTransactionWithSigner,
+  type FacilitatorTransactionVersion,
   type PaymentChannelSvmSigner,
 } from "../../payment-channels/facilitator";
 import type { ServerInstruction } from "../../payment-channels/onchain";
-import type { BuildableTransactionVersion } from "../../transactionV1";
 import { BatchError } from "../errors";
 import {
   MAX_CHANNELS_PER_SETTLE_TX,
@@ -34,33 +35,21 @@ export interface RedemptionCapacity {
   maxSettleChannels: number;
 }
 
-/**
- * Validate the configured redemption message version.
- *
- * @param version - `config.redemptionTransactionVersion`
- * @returns The version, `1` when unset
- */
-export function assertRedemptionTransactionVersion(
-  version: number | undefined,
-): BuildableTransactionVersion {
-  if (version === undefined) return 1;
-  if (version !== 0 && version !== 1) {
-    throw new Error(`redemptionTransactionVersion must be 0 or 1, got ${String(version)}`);
-  }
-  return version;
-}
-
 /** The redemption message version and the batch capacity it gives. */
-export type RedemptionPolicy = RedemptionCapacity & { version: BuildableTransactionVersion };
+export type RedemptionPolicy = RedemptionCapacity & { version: FacilitatorTransactionVersion };
 
 /**
- * Resolve the configured redemption version and its capacity.
+ * Resolve the configured facilitator transaction version and its capacity.
+ * Anything but 0 or 1 throws.
  *
- * @param version - `config.redemptionTransactionVersion`
- * @returns The version (`1` when unset) with its claim and settle capacity
+ * @param version - `config.facilitatorTransactionVersion`
+ * @returns The version (`DEFAULT_FACILITATOR_TRANSACTION_VERSION` when unset)
+ * with its claim and settle capacity
  */
-export function redemptionPolicy(version: number | undefined): RedemptionPolicy {
-  const resolved = assertRedemptionTransactionVersion(version);
+export function redemptionPolicy(
+  version: FacilitatorTransactionVersion | undefined,
+): RedemptionPolicy {
+  const resolved = resolveFacilitatorTransactionVersion(version);
   return { version: resolved, ...redemptionCapacity(resolved) };
 }
 
@@ -71,7 +60,7 @@ export function redemptionPolicy(version: number | undefined): RedemptionPolicy 
  * @param version - Message version redemptions are built in
  * @returns Channels per claim and per settle transaction
  */
-export function redemptionCapacity(version: BuildableTransactionVersion): RedemptionCapacity {
+export function redemptionCapacity(version: FacilitatorTransactionVersion): RedemptionCapacity {
   return version === 1
     ? { maxClaimChannels: V1_MAX_CLAIM_CHANNELS, maxSettleChannels: V1_MAX_SETTLE_CHANNELS }
     : {
@@ -90,12 +79,12 @@ export function redemptionCapacity(version: BuildableTransactionVersion): Redemp
  * @returns Options for the channel submit helpers
  */
 export function redemptionSubmitOptions(
-  version: BuildableTransactionVersion,
+  version: FacilitatorTransactionVersion,
   instructionCount: number,
-): { useTransactionV1: boolean; computeUnitLimit?: number } {
-  if (version !== 1) return { useTransactionV1: false };
+): { facilitatorTransactionVersion: FacilitatorTransactionVersion; computeUnitLimit?: number } {
+  if (version !== 1) return { facilitatorTransactionVersion: 0 };
   return {
-    useTransactionV1: true,
+    facilitatorTransactionVersion: 1,
     computeUnitLimit: Math.min(
       REDEMPTION_COMPUTE_UNIT_BASE + REDEMPTION_COMPUTE_UNIT_PER_INSTRUCTION * instructionCount,
       MAX_TRANSACTION_COMPUTE_UNITS,
@@ -121,11 +110,14 @@ export async function submitRedemptionTransaction(
   signer: Parameters<typeof submitChannelTransactionWithSigner>[1],
   network: string,
   instructions: readonly ServerInstruction[],
-  version: BuildableTransactionVersion,
+  version: FacilitatorTransactionVersion,
   onPrepared: (signature: string, wire: string) => Promise<void>,
 ): Promise<Signature> {
   const options = { ...redemptionSubmitOptions(version, instructions.length), onPrepared };
-  if (options.useTransactionV1 && !facilitatorV1TransactionFits(feePayer, instructions, options)) {
+  if (
+    options.facilitatorTransactionVersion === 1 &&
+    !facilitatorV1TransactionFits(feePayer, instructions, options)
+  ) {
     throw new Error(`${BatchError.PAYLOAD_TYPE}: batch does not fit one transaction`);
   }
   try {

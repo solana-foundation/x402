@@ -13,6 +13,25 @@ import (
 	"github.com/x402-foundation/x402/go/v2/mechanisms/svm/paymentchannels"
 )
 
+func intPtr(v int) *int { return &v }
+
+func TestResolveFacilitatorTransactionVersion(t *testing.T) {
+	assert.Equal(t, DefaultFacilitatorTransactionVersion, resolveFacilitatorTransactionVersion(nil))
+	assert.Equal(t, 0, resolveFacilitatorTransactionVersion(intPtr(paymentchannels.FacilitatorTransactionVersion0)))
+	assert.Equal(t, 1, resolveFacilitatorTransactionVersion(intPtr(paymentchannels.FacilitatorTransactionVersion1)))
+}
+
+func TestInvalidFacilitatorTransactionVersionPanicsAtConstruction(t *testing.T) {
+	for _, version := range []int{-1, 2, 3} {
+		assert.Panics(t, func() {
+			NewBatchSvmScheme(context.Background(), newScriptedSigner(t, 1), &Config{FacilitatorTransactionVersion: intPtr(version)})
+		}, "version %d", version)
+		assert.Panics(t, func() {
+			NewBatchSvmRentCleanupManager(RentCleanupConfig{FacilitatorTransactionVersion: intPtr(version)})
+		}, "version %d", version)
+	}
+}
+
 // Version-1 redemptions (scheme_batch_settlement_svm.md, "Facilitator-built
 // transactions and batching capacity").
 func TestBatchRedemptionsTransactionV1(t *testing.T) {
@@ -23,7 +42,7 @@ func TestBatchRedemptionsTransactionV1(t *testing.T) {
 		assert.Equal(t, batchsettlement.V1MaxClaimChannels, v1[batchsettlement.ExtraMaxClaimChannels])
 		assert.Equal(t, batchsettlement.V1MaxSettleChannels, v1[batchsettlement.ExtraMaxSettleChannels])
 
-		v0 := NewBatchSvmScheme(context.Background(), newScriptedSigner(t, 1), &Config{UseTransactionV0: true}).GetExtra(svm.SolanaDevnetCAIP2)
+		v0 := NewBatchSvmScheme(context.Background(), newScriptedSigner(t, 1), &Config{FacilitatorTransactionVersion: intPtr(paymentchannels.FacilitatorTransactionVersion0)}).GetExtra(svm.SolanaDevnetCAIP2)
 		assert.Equal(t, batchsettlement.DefaultBatchChannels, v0[batchsettlement.ExtraMaxClaimChannels])
 		assert.Equal(t, batchsettlement.DefaultBatchChannels, v0[batchsettlement.ExtraMaxSettleChannels])
 	})
@@ -113,8 +132,18 @@ func TestBatchRedemptionsTransactionV1(t *testing.T) {
 	})
 
 	t.Run("submits redemptions as version 0 when configured", func(t *testing.T) {
-		tx := submit(t, &Config{UseTransactionV0: true}, claimInstructions(t, 2))
+		tx := submit(t, &Config{FacilitatorTransactionVersion: intPtr(paymentchannels.FacilitatorTransactionVersion0)}, claimInstructions(t, 2))
 		assert.Equal(t, solana.MessageVersionV0, tx.Message.GetVersion())
+		assert.Nil(t, tx.Message.TransactionConfig.ComputeUnitLimit, "version 0 carries no inline batch budget")
+		hasBudget := false
+		for _, instruction := range tx.Message.Instructions {
+			program, err := tx.Message.Program(instruction.ProgramIDIndex)
+			require.NoError(t, err)
+			if program.Equals(solana.ComputeBudget) {
+				hasBudget = true
+			}
+		}
+		assert.True(t, hasBudget, "version 0 carries ComputeBudget instructions")
 	})
 
 	t.Run("fails a redemption that does not fit instead of truncating it", func(t *testing.T) {

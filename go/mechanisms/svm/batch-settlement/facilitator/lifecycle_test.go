@@ -1750,7 +1750,7 @@ func TestBatchFacilitatorLifecycle(t *testing.T) {
 		require.ErrorContains(t, settleErr, "invalid channel batch")
 
 		// Version 0: four of each, so five is over capacity.
-		v0 := newScheme(t, newSigner(t), &Config{UseTransactionV0: true})
+		v0 := newScheme(t, newSigner(t), &Config{FacilitatorTransactionVersion: intPtr(paymentchannels.FacilitatorTransactionVersion0)})
 		claimErr, settleErr = oversized(v0, MaxChannelsPerSettleTx+1, MaxChannelsPerSettleTx+1)
 		require.ErrorContains(t, claimErr, "maxClaimChannels")
 		require.ErrorContains(t, settleErr, "invalid channel batch")

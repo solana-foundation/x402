@@ -22,7 +22,6 @@ import {
   V1_MAX_SETTLE_CHANNELS,
 } from "../../src/batch-settlement/facilitator/constants";
 import {
-  assertRedemptionTransactionVersion,
   redemptionCapacity,
   redemptionPolicy,
   redemptionSubmitOptions,
@@ -33,7 +32,12 @@ import { BatchChannelManager } from "../../src/batch-settlement/server/channelMa
 import { MemoryChannelStore } from "../../src/batch-settlement/server/storage";
 import { SOLANA_DEVNET_CAIP2, TOKEN_PROGRAM_ADDRESS } from "../../src/constants";
 import { USDC_DEVNET_ADDRESS } from "../../src/defaultAssets";
-import { facilitatorV1TransactionFits } from "../../src/payment-channels/facilitator";
+import {
+  DEFAULT_FACILITATOR_TRANSACTION_VERSION,
+  type FacilitatorTransactionVersion,
+  facilitatorV1TransactionFits,
+} from "../../src/payment-channels/facilitator";
+import { BatchSvmRentCleanupManager } from "../../src/batch-settlement/facilitator/rentCleanupManager";
 import {
   buildDistributeInstruction,
   buildSettleInstructions,
@@ -90,9 +94,12 @@ async function distributeInstructions(
 
 describe("redemption policy", () => {
   it("defaults to version 1 and refuses anything but 0 or 1", () => {
-    expect(assertRedemptionTransactionVersion(undefined)).toBe(1);
-    expect(assertRedemptionTransactionVersion(0)).toBe(0);
-    expect(() => assertRedemptionTransactionVersion(2)).toThrow(/must be 0 or 1/);
+    expect(DEFAULT_FACILITATOR_TRANSACTION_VERSION).toBe(1);
+    expect(redemptionPolicy(undefined).version).toBe(1);
+    expect(redemptionPolicy(0).version).toBe(0);
+    expect(() => redemptionPolicy(2 as FacilitatorTransactionVersion)).toThrow(
+      /facilitatorTransactionVersion must be 0 or 1/,
+    );
   });
 
   it("gives four channels on version 0 and the version-1 capacities otherwise", () => {
@@ -105,10 +112,10 @@ describe("redemption policy", () => {
   });
 
   it("sizes the version-1 compute budget for the batch and caps it", () => {
-    expect(redemptionSubmitOptions(0, 8)).toEqual({ useTransactionV1: false });
+    expect(redemptionSubmitOptions(0, 8)).toEqual({ facilitatorTransactionVersion: 0 });
     expect(redemptionSubmitOptions(1, 8)).toEqual({
       computeUnitLimit: 225_000,
-      useTransactionV1: true,
+      facilitatorTransactionVersion: 1,
     });
     expect(redemptionSubmitOptions(1, 100).computeUnitLimit).toBe(1_400_000);
   });
@@ -218,18 +225,57 @@ describe("submitRedemptionTransaction", () => {
 });
 
 describe("batch facilitator capacity", () => {
-  async function facilitator(redemptionTransactionVersion?: 0 | 1) {
+  async function facilitator(facilitatorTransactionVersion?: FacilitatorTransactionVersion) {
     return new BatchFacilitatorScheme(toFacilitatorSvmSigner(await generateKeyPairSigner()), {
       channelStorage: new InMemoryPaymentChannelStorage(),
-      redemptionTransactionVersion,
+      facilitatorTransactionVersion,
     });
   }
 
-  it("builds rent cleanup in the redemption message version", async () => {
+  function cleanupVersion(manager: unknown): FacilitatorTransactionVersion {
+    return (manager as { facilitatorTransactionVersion: FacilitatorTransactionVersion })
+      .facilitatorTransactionVersion;
+  }
+
+  it("builds rent cleanup in the facilitator transaction version", async () => {
     const v1 = (await facilitator()).createRentCleanupManager(SOLANA_DEVNET_CAIP2);
     const v0 = (await facilitator(0)).createRentCleanupManager(SOLANA_DEVNET_CAIP2);
-    expect((v1 as unknown as { useTransactionV1: boolean }).useTransactionV1).toBe(true);
-    expect((v0 as unknown as { useTransactionV1: boolean }).useTransactionV1).toBe(false);
+    expect(cleanupVersion(v1)).toBe(1);
+    expect(cleanupVersion(v0)).toBe(0);
+  });
+
+  it("defaults a standalone rent cleanup manager to version 1", async () => {
+    const config = {
+      network: SOLANA_DEVNET_CAIP2,
+      signer: toFacilitatorSvmSigner(await generateKeyPairSigner()),
+      storage: new InMemoryPaymentChannelStorage(),
+    } as const;
+    expect(cleanupVersion(new BatchSvmRentCleanupManager(config))).toBe(1);
+    expect(
+      cleanupVersion(
+        new BatchSvmRentCleanupManager({ ...config, facilitatorTransactionVersion: 0 }),
+      ),
+    ).toBe(0);
+  });
+
+  it.each([2, -1, "1", null])("rejects facilitatorTransactionVersion %j", async version => {
+    const signer = toFacilitatorSvmSigner(await generateKeyPairSigner());
+    expect(
+      () =>
+        new BatchFacilitatorScheme(signer, {
+          channelStorage: new InMemoryPaymentChannelStorage(),
+          facilitatorTransactionVersion: version as unknown as FacilitatorTransactionVersion,
+        }),
+    ).toThrow(/facilitatorTransactionVersion must be 0 or 1/);
+    expect(
+      () =>
+        new BatchSvmRentCleanupManager({
+          network: SOLANA_DEVNET_CAIP2,
+          signer,
+          storage: new InMemoryPaymentChannelStorage(),
+          facilitatorTransactionVersion: version as unknown as FacilitatorTransactionVersion,
+        }),
+    ).toThrow(/facilitatorTransactionVersion must be 0 or 1/);
   });
 
   it("advertises four channels when redemptions are built as version 0", async () => {

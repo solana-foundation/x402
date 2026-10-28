@@ -573,6 +573,28 @@ async function buildOpenSettleDistributeSimulation(
  */
 export type FacilitatorTransactionVersion = 0 | 1;
 
+/**
+ * Used by the upto and batch-settlement facilitators when
+ * `facilitatorTransactionVersion` is unset.
+ */
+export const DEFAULT_FACILITATOR_TRANSACTION_VERSION: FacilitatorTransactionVersion = 1;
+
+/**
+ * Apply the default to an unset version and throw on anything but 0 or 1.
+ *
+ * @param version - Configured facilitator transaction version, if any
+ * @returns The version the facilitator builds its own transactions with
+ */
+export function resolveFacilitatorTransactionVersion(
+  version: FacilitatorTransactionVersion | undefined,
+): FacilitatorTransactionVersion {
+  if (version === undefined) return DEFAULT_FACILITATOR_TRANSACTION_VERSION;
+  if (version !== 0 && version !== 1) {
+    throw new Error(`facilitatorTransactionVersion must be 0 or 1, received ${String(version)}`);
+  }
+  return version;
+}
+
 /** Options for {@link submitSettle}. */
 export interface SubmitSettleOptions {
   /**

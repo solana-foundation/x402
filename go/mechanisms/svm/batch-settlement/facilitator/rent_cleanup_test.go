@@ -294,6 +294,37 @@ func TestBatchSvmRentCleanupManagerCleanup(t *testing.T) {
 		assert.Equal(t, solana.MessageVersionV1, h.signer.sentTransactions()[0].Message.GetVersion())
 	})
 
+	t.Run("createRentCleanupManager forwards the scheme's facilitator transaction version", func(t *testing.T) {
+		tests := []struct {
+			name        string
+			version     *int
+			wantVersion solana.MessageVersion
+		}{
+			{"unset defaults to v1", nil, solana.MessageVersionV1},
+			{"explicit v0", intPtr(paymentchannels.FacilitatorTransactionVersion0), solana.MessageVersionV0},
+		}
+		for _, test := range tests {
+			t.Run(test.name, func(t *testing.T) {
+				h := newHarness(t)
+				scheme := NewBatchSvmScheme(context.Background(), h.signer, &Config{
+					ChannelStorage:                h.storage,
+					FacilitatorTransactionVersion: test.version,
+				})
+				h.manager = scheme.CreateRentCleanupManager(svm.SolanaDevnetCAIP2)
+				h.seed(channelSeed{status: generated.ChannelStatus_Distributed, openSlot: openSlot, expiresAt: farFuture})
+				var reclaims int
+				require.NoError(t, h.manager.Cleanup(context.Background(), CleanupOptions{
+					MaxTxsPerSigner: 1,
+					OnReclaim:       func(ReclaimResult) { reclaims++ },
+				}))
+				assert.Equal(t, 1, reclaims)
+				sent := h.signer.sentTransactions()
+				require.Len(t, sent, 1)
+				assert.Equal(t, test.wantVersion, sent[0].Message.GetVersion())
+			})
+		}
+	})
+
 	t.Run("respects maxReclaimsPerTx and maxTxsPerSigner for reclaim batching", func(t *testing.T) {
 		h := newHarness(t)
 		for i := 0; i < 3; i++ {
@@ -312,7 +343,8 @@ func TestBatchSvmRentCleanupManagerCleanup(t *testing.T) {
 		// The clamp is the version-0 packet bound; version 1 packs by encoded fit.
 		h := newHarness(t)
 		h.manager = NewBatchSvmRentCleanupManager(RentCleanupConfig{
-			Network: network, Signer: h.signer, Storage: h.storage, UseTransactionV0: true,
+			Network: network, Signer: h.signer, Storage: h.storage,
+			FacilitatorTransactionVersion: intPtr(paymentchannels.FacilitatorTransactionVersion0),
 		})
 		for i := 0; i < MaxSafeReclaimsPerTx+1; i++ {
 			h.seed(channelSeed{status: generated.ChannelStatus_Distributed, openSlot: openSlot, expiresAt: farFuture})

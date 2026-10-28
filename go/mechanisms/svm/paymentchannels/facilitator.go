@@ -376,8 +376,8 @@ func SimulateOpenSettleDistribute(
 	if v1 {
 		units := uint32(maxTransactionComputeUnits)
 		tx, err = compileChannelTransaction(ctx, signer, feePayer, channel.Network, simPlaceholderBlockhash, instructions, SubmitSettleOptions{
-			UseTransactionV1: true,
-			ComputeUnitLimit: &units,
+			FacilitatorTransactionVersion: FacilitatorTransactionVersion1,
+			ComputeUnitLimit:              &units,
 		})
 	} else {
 		tx, err = buildSignedTransaction(ctx, signer, feePayer, channel.Network, simPlaceholderBlockhash, instructions)

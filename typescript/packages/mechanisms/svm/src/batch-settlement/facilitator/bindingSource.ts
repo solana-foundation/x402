@@ -1,4 +1,5 @@
 import { address, type Address, isAddress } from "@solana/kit";
+import type { FacilitatorTransactionVersion } from "../../payment-channels/facilitator";
 import { getPaymentChannelsTreasuryOwner } from "../../payment-channels/onchain";
 import type {
   FacilitatorContext,
@@ -65,11 +66,16 @@ export interface BatchSvmFacilitatorConfig {
    */
   maxIdleSecs?: number | undefined;
   /**
-   * Message version of the facilitator-built redemption transactions (claim,
-   * settle, seal, refund, rent cleanup). Defaults to `1`, which advertises
-   * `maxClaimChannels` 18 and `maxSettleChannels` 13; `0` keeps four of each.
+   * Message version (0 or 1) of the claim, settle, seal, refund, and
+   * rent-cleanup transactions the facilitator builds and signs itself. It does
+   * not affect which client-built versions are accepted. Any other value
+   * throws. `1` advertises `maxClaimChannels` 18 and `maxSettleChannels` 13
+   * and sizes an inline compute budget per batch; `0` advertises four of each
+   * and keeps the version-0 compute-budget defaults.
+   *
+   * Default: `DEFAULT_FACILITATOR_TRANSACTION_VERSION` (1)
    */
-  redemptionTransactionVersion?: 0 | 1 | undefined;
+  facilitatorTransactionVersion?: FacilitatorTransactionVersion | undefined;
   /**
    * Treasury owner the payment-channels program was built with, used to derive
    * the treasury token account `distribute` pays the protocol fee to. Defaults
