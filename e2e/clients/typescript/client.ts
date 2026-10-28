@@ -102,10 +102,28 @@ function svmChannelSalt(channelSalt: string): string {
   return (BigInt(channelSalt) % (1n << 64n)).toString();
 }
 
+/** Narrows what {@link createE2EClient} registers, for family-specific clients. */
+export type E2EClientOptions = {
+  /**
+   * Catalog network ids (e.g. `"svm"`) to register schemes for. Defaults to
+   * every family whose client credentials are set.
+   */
+  families?: readonly string[];
+  /**
+   * Solana transaction message versions the SVM schemes may build. Defaults
+   * to the SDK default (`[0, 1]`); `[0]` keeps a client on version 0 even when
+   * the facilitator advertises version 1.
+   */
+  svmTransactionVersions?: readonly (0 | 1)[];
+};
+
 /**
  * Builds the shared x402 client with all e2e scheme registrations.
+ *
+ * @param options - Optional family and SVM transaction-version narrowing
  */
-export async function createE2EClient(): Promise<E2EClientContext> {
+export async function createE2EClient(options: E2EClientOptions = {}): Promise<E2EClientContext> {
+  const wants = (family: string): boolean => !options.families || options.families.includes(family);
   const baseURL = process.env.RESOURCE_SERVER_URL as string;
   const endpointPath = process.env.ENDPOINT_PATH as string;
   const url = `${baseURL}${endpointPath}`;
@@ -117,7 +135,7 @@ export async function createE2EClient(): Promise<E2EClientContext> {
   // batch-settlement scheme drives the phases and the refund.
   const batchFamily: "svm" | "evm" = endpointPath.includes("/svm") ? "svm" : "evm";
 
-  if (process.env.CLIENT_EVM_PRIVATE_KEY) {
+  if (wants("evm") && process.env.CLIENT_EVM_PRIVATE_KEY) {
     const evmAccount = privateKeyToAccount(process.env.CLIENT_EVM_PRIVATE_KEY as `0x${string}`);
 
     const evmNetwork = resolveNetworkCaip2("evm");
@@ -169,11 +187,19 @@ export async function createE2EClient(): Promise<E2EClientContext> {
     );
   }
 
-  if (process.env.CLIENT_SVM_PRIVATE_KEY) {
+  if (wants("svm") && process.env.CLIENT_SVM_PRIVATE_KEY) {
     const svmSigner = await createKeyPairSignerFromBytes(
       base58.decode(process.env.CLIENT_SVM_PRIVATE_KEY),
     );
-    const svmSchemeOptions = process.env.SVM_RPC_URL ? { rpcUrl: process.env.SVM_RPC_URL } : undefined;
+    const svmSchemeOptions =
+      process.env.SVM_RPC_URL || options.svmTransactionVersions
+        ? {
+          ...(process.env.SVM_RPC_URL ? { rpcUrl: process.env.SVM_RPC_URL } : {}),
+          ...(options.svmTransactionVersions
+            ? { transactionVersions: options.svmTransactionVersions }
+            : {}),
+        }
+        : undefined;
 
     // Batch-settlement derives the channel PDA from a per-scenario salt so
     // concurrent e2e runs do not collide on one onchain channel. Discovery
@@ -223,7 +249,7 @@ export async function createE2EClient(): Promise<E2EClientContext> {
   const ccdAddress = process.env.CLIENT_CCD_ADDRESS;
 
   let aptosAccount: Account | undefined;
-  if (process.env.CLIENT_APTOS_PRIVATE_KEY) {
+  if (wants("aptos") && process.env.CLIENT_APTOS_PRIVATE_KEY) {
     const formattedKey = PrivateKey.formatPrivateKey(
       process.env.CLIENT_APTOS_PRIVATE_KEY,
       PrivateKeyVariants.Ed25519,
@@ -233,7 +259,7 @@ export async function createE2EClient(): Promise<E2EClientContext> {
   }
 
   let casperClientSigner: ClientCasperSigner | undefined;
-  if (process.env.CLIENT_CASPER_PRIVATE_KEY) {
+  if (wants("casper") && process.env.CLIENT_CASPER_PRIVATE_KEY) {
     casperClientSigner = await createClientCasperSigner(
       process.env.CLIENT_CASPER_PRIVATE_KEY,
       process.env.CLIENT_CASPER_PRIVATE_KEY_ALGORITHM === "secp256k1" ? 2 : 1, // Default to ED25519 if not specified
@@ -241,7 +267,7 @@ export async function createE2EClient(): Promise<E2EClientContext> {
   }
 
   let hederaClientSigner: ReturnType<typeof createClientHederaSigner> | undefined;
-  if (process.env.CLIENT_HEDERA_ACCOUNT_ID && process.env.CLIENT_HEDERA_PRIVATE_KEY) {
+  if (wants("hedera") && process.env.CLIENT_HEDERA_ACCOUNT_ID && process.env.CLIENT_HEDERA_PRIVATE_KEY) {
     hederaClientSigner = createClientHederaSigner(
       process.env.CLIENT_HEDERA_ACCOUNT_ID,
       HederaPrivateKey.fromStringECDSA(process.env.CLIENT_HEDERA_PRIVATE_KEY),
@@ -253,7 +279,7 @@ export async function createE2EClient(): Promise<E2EClientContext> {
   }
 
   let keetaSigner: ClientKeetaSigner | undefined;
-  if (process.env.CLIENT_KEETA_MNEMONIC) {
+  if (wants("keeta") && process.env.CLIENT_KEETA_MNEMONIC) {
     const keetaAccount = KeetaNet.lib.Account.fromSeed(
       await KeetaNet.lib.Account.seedFromPassphrase(process.env.CLIENT_KEETA_MNEMONIC),
       0,
@@ -262,19 +288,19 @@ export async function createE2EClient(): Promise<E2EClientContext> {
   }
 
   let stellarSigner: Ed25519Signer | undefined;
-  if (process.env.CLIENT_STELLAR_PRIVATE_KEY) {
+  if (wants("stellar") && process.env.CLIENT_STELLAR_PRIVATE_KEY) {
     stellarSigner = createEd25519Signer(process.env.CLIENT_STELLAR_PRIVATE_KEY);
   }
 
   let avmSigner: ReturnType<typeof toClientAvmSigner> | undefined;
-  if (process.env.CLIENT_AVM_PRIVATE_KEY) {
+  if (wants("avm") && process.env.CLIENT_AVM_PRIVATE_KEY) {
     avmSigner = toClientAvmSigner(process.env.CLIENT_AVM_PRIVATE_KEY);
   }
 
   const tvmNetwork = resolveNetworkCaip2("tvm");
   const tvmPrivateKey = process.env.CLIENT_TVM_PRIVATE_KEY;
   const tvmProvider = (process.env.TVM_PROVIDER || TVM_PROVIDER_TONCENTER).toLowerCase();
-  const tvmScheme = tvmPrivateKey
+  const tvmScheme = wants("tvm") && tvmPrivateKey
     ? new ExactTvmScheme(
       toClientTvmSigner(parseTvmKeyPair(tvmPrivateKey), {
         network: tvmNetwork,
@@ -288,7 +314,7 @@ export async function createE2EClient(): Promise<E2EClientContext> {
     )
     : undefined;
 
-  if (ccdPrivateKey && ccdAddress) {
+  if (wants("ccd") && ccdPrivateKey && ccdAddress) {
     schemes.push({
       network: networkCaip2Pattern("ccd"),
       client: new ExactConcordiumScheme(
@@ -339,7 +365,7 @@ export async function createE2EClient(): Promise<E2EClientContext> {
   if (tvmScheme) {
     schemes.push({ network: networkCaip2Pattern("tvm"), client: tvmScheme });
   }
-  if (process.env.CLIENT_NEAR_ACCOUNT_ID && process.env.CLIENT_NEAR_PRIVATE_KEY) {
+  if (wants("near") && process.env.CLIENT_NEAR_ACCOUNT_ID && process.env.CLIENT_NEAR_PRIVATE_KEY) {
     const nearNetwork = resolveNetworkCaip2("near") as `${string}:${string}`;
     const nearSigner = createClientNearSigner({
       accountId: process.env.CLIENT_NEAR_ACCOUNT_ID,
@@ -352,6 +378,7 @@ export async function createE2EClient(): Promise<E2EClientContext> {
     });
   }
   if (
+    wants("cardano") &&
     process.env.CLIENT_CARDANO_MNEMONIC &&
     process.env.BLOCKFROST_PROJECT_ID &&
     process.env.CARDANO_RPC_URL
@@ -372,6 +399,7 @@ export async function createE2EClient(): Promise<E2EClientContext> {
     });
   }
   if (
+    wants("canton") &&
     process.env.CLIENT_CANTON_PARTY &&
     process.env.CLIENT_CANTON_PRIVATE_KEY &&
     process.env.CANTON_PARTICIPANT_URL &&
@@ -402,7 +430,7 @@ export async function createE2EClient(): Promise<E2EClientContext> {
       }),
     });
   }
-  if (process.env.CLIENT_XRPL_SEED) {
+  if (wants("xrpl") && process.env.CLIENT_XRPL_SEED) {
     const xrplNetwork = resolveNetworkCaip2("xrpl") as `xrpl:${number}`;
     const xrplSigner = createXrplWalletSigner(Wallet.fromSeed(process.env.CLIENT_XRPL_SEED));
     schemes.push({
