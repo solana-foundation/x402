@@ -30,6 +30,7 @@ except ImportError as e:
 from ...schemas.helpers import convert_to_token_amount
 from .constants import (
     ACCEPTED_TRANSACTION_VERSIONS,
+    ADVERTISED_TRANSACTION_VERSIONS,
     CLIENT_SUPPORTED_TRANSACTION_VERSIONS,
     COMPUTE_BUDGET_PROGRAM_ADDRESS,
     DEFAULT_COMPUTE_UNIT_LIMIT,
@@ -555,7 +556,9 @@ def get_transaction_version(message: object) -> int | str:
         return -1
 
 
-def is_accepted_transaction_version(version: int | str) -> bool:
+def is_accepted_transaction_version(
+    version: int | str, accepted: Sequence[int] | None = None
+) -> bool:
     """Return whether a transaction version is one the SVM verifiers police.
 
     This is an allowlist (see ``ACCEPTED_TRANSACTION_VERSIONS``), not a denylist:
@@ -564,13 +567,46 @@ def is_accepted_transaction_version(version: int | str) -> bool:
 
     Args:
         version: Version reported by ``get_transaction_version``.
+        accepted: A facilitator's configured versions (see
+            ``normalize_accepted_transaction_versions``); legacy is accepted
+            exactly when 0 is. None means every modelled version.
 
     Returns:
         True if the version is accepted, False otherwise.
     """
     if isinstance(version, bool):
         return False
-    return version in ACCEPTED_TRANSACTION_VERSIONS
+    if version not in ACCEPTED_TRANSACTION_VERSIONS:
+        return False
+    if accepted is None:
+        return True
+    return (0 if version == "legacy" else version) in accepted
+
+
+def normalize_accepted_transaction_versions(versions: Sequence[int] | None) -> list[int]:
+    """Validate a facilitator's ``transaction_versions`` option.
+
+    These are the message versions it accepts and advertises as
+    ``extra.transactionVersions``.
+
+    Args:
+        versions: The configured versions, or None for
+            ``ADVERTISED_TRANSACTION_VERSIONS``.
+
+    Returns:
+        The accepted versions, deduplicated and ascending.
+
+    Raises:
+        ValueError: If ``versions`` is empty or holds anything but 0 and 1.
+    """
+    if versions is None:
+        return [int(version) for version in ADVERTISED_TRANSACTION_VERSIONS]
+    checked = _check_transaction_version_entries(versions, "transaction_versions")
+    if not checked:
+        raise ValueError(
+            f"{ERR_UNSUPPORTED_TRANSACTION_VERSION}: transaction_versions must not be empty"
+        )
+    return sorted(set(checked))
 
 
 def _check_transaction_version_entries(versions: object, field: str) -> list[int]:

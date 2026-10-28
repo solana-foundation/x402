@@ -26,7 +26,6 @@ import type {
 } from "@x402/core/types";
 import type { PaymentPayloadV1, PaymentRequirementsV1 } from "@x402/core/types/v1";
 import {
-  ADVERTISED_TRANSACTION_VERSIONS,
   LIGHTHOUSE_PROGRAM_ADDRESS,
   MAX_COMPUTE_UNIT_PRICE_MICROLAMPORTS,
   MEMO_PROGRAM_ADDRESS,
@@ -43,6 +42,7 @@ import {
   decodeTransactionFromPayload,
   getTokenPayerFromTransaction,
   isAcceptedTransactionVersion,
+  normalizeAcceptedTransactionVersions,
   peekWireTransactionVersion,
   transactionMessageHash,
 } from "../../../utils";
@@ -51,11 +51,28 @@ import {
   readTransactionV1Config,
   transactionSizeExceeded,
 } from "../../../transactionV1";
+import { staticTransferIndex } from "../../facilitator/scheme";
 import { verifyRequiredSignatures } from "../../facilitator/signatureVerification";
 
 const compiledMessageDecoder = getCompiledTransactionMessageDecoder();
 
 const IX_TOKEN_TRANSFER_CHECKED = 12;
+
+/**
+ * Configuration options for ExactSvmSchemeV1.
+ */
+export type ExactSvmSchemeV1Options = {
+  /**
+   * Transaction message versions this facilitator accepts, advertised as
+   * `extra.transactionVersions` in `/supported`. A message of any other
+   * version is rejected with `unsupported_transaction_version`; a legacy
+   * message is accepted exactly when version 0 is. Narrow it to `[0]` for a
+   * sponsor whose signer or RPC does not yet handle version 1.
+   *
+   * Default: `[0, 1]`
+   */
+  transactionVersions?: readonly (0 | 1)[];
+};
 
 /**
  * SVM facilitator implementation for the Exact payment scheme (V1).
@@ -65,19 +82,23 @@ export class ExactSvmSchemeV1 implements SchemeNetworkFacilitator {
   readonly caipFamily = "solana:*";
 
   private readonly settlementCache: SettlementCache;
+  private readonly transactionVersions: readonly (0 | 1)[];
 
   /**
    * Creates a new ExactSvmFacilitatorV1 instance.
    *
    * @param signer - The SVM RPC client for facilitator operations
    * @param settlementCache - Optional shared settlement cache (one is created if omitted)
+   * @param options - Optional facilitator configuration
    * @returns ExactSvmFacilitatorV1 instance
    */
   constructor(
     private readonly signer: FacilitatorSvmSigner,
     settlementCache?: SettlementCache,
+    options?: ExactSvmSchemeV1Options,
   ) {
     this.settlementCache = settlementCache ?? new SettlementCache();
+    this.transactionVersions = normalizeAcceptedTransactionVersions(options?.transactionVersions);
   }
 
   /**
@@ -95,7 +116,7 @@ export class ExactSvmSchemeV1 implements SchemeNetworkFacilitator {
 
     return {
       feePayer: addresses[randomIndex],
-      transactionVersions: [...ADVERTISED_TRANSACTION_VERSIONS],
+      transactionVersions: [...this.transactionVersions],
     };
   }
 
@@ -164,7 +185,10 @@ export class ExactSvmSchemeV1 implements SchemeNetworkFacilitator {
     // Read the version from the raw bytes first so a newer wire format is
     // reported as unsupported however the installed decoder handles it.
     const wireVersion = peekWireTransactionVersion(exactSvmPayload.transaction);
-    if (wireVersion !== undefined && !isAcceptedTransactionVersion(wireVersion)) {
+    if (
+      wireVersion !== undefined &&
+      !isAcceptedTransactionVersion(wireVersion, this.transactionVersions)
+    ) {
       return {
         isValid: false,
         invalidReason: ErrUnsupportedTransactionVersion,
@@ -198,7 +222,7 @@ export class ExactSvmSchemeV1 implements SchemeNetworkFacilitator {
     // signatures or instructions (its compute budget checks read the
     // ComputeBudget instructions of legacy and version 0 messages and the
     // config of version 1 messages).
-    if (!isAcceptedTransactionVersion(compiled.version)) {
+    if (!isAcceptedTransactionVersion(compiled.version, this.transactionVersions)) {
       return {
         isValid: false,
         invalidReason: ErrUnsupportedTransactionVersion,
@@ -242,9 +266,7 @@ export class ExactSvmSchemeV1 implements SchemeNetworkFacilitator {
       };
     }
     const instructions = decompiled.instructions ?? [];
-    // Legacy and version 0 put a ComputeLimit + ComputePrice prefix before the
-    // transfer; version 1 carries its budget in the message config instead.
-    const transferIndex = compiled.version === 1 ? 0 : 2;
+    const transferIndex = staticTransferIndex(compiled.version);
 
     if (compiled.version === 1) {
       const violation = checkTransactionV1Budget(
@@ -502,7 +524,7 @@ export class ExactSvmSchemeV1 implements SchemeNetworkFacilitator {
     if (decodedTx) {
       try {
         const compiled = compiledMessageDecoder.decode(decodedTx.messageBytes);
-        if (!isAcceptedTransactionVersion(compiled.version)) {
+        if (!isAcceptedTransactionVersion(compiled.version, this.transactionVersions)) {
           return {
             success: false,
             network: payloadV1.network,

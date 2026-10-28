@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import random
+from collections.abc import Sequence
 from typing import Any
 
 try:
@@ -21,7 +22,6 @@ from ....schemas import (
     VerifyResponse,
 )
 from ..constants import (
-    ADVERTISED_TRANSACTION_VERSIONS,
     ERR_AMOUNT_INSUFFICIENT,
     ERR_DUPLICATE_SETTLEMENT,
     ERR_FEE_PAYER_MISSING,
@@ -62,6 +62,7 @@ from ..utils import (
     get_token_payer_from_transaction,
     get_transaction_version,
     is_accepted_transaction_version,
+    normalize_accepted_transaction_versions,
     peek_wire_transaction_version,
     transaction_message_hash,
     transaction_size_exceeded,
@@ -87,6 +88,7 @@ class ExactSvmScheme:
         signer: FacilitatorSvmSigner,
         settlement_cache: SettlementCache | None = None,
         pending_store: PendingSettlementStore | None = None,
+        transaction_versions: Sequence[int] | None = None,
     ):
         """Create ExactSvmScheme facilitator.
 
@@ -97,8 +99,19 @@ class ExactSvmScheme:
                 transaction reconcile against an already-broadcast signature instead of
                 re-verifying and re-sending (see settlement_pending). Defaults to a fresh
                 in-memory store when omitted.
+            transaction_versions: Transaction message versions this facilitator
+                accepts and advertises as ``extra.transactionVersions``. Any other
+                version is rejected with ``unsupported_transaction_version``; legacy
+                is accepted exactly when 0 is. Narrow it to ``[0]`` for a sponsor
+                whose signer or RPC does not yet handle version 1. Defaults to
+                ``[0, 1]``.
+
+        Raises:
+            ValueError: If ``transaction_versions`` is empty or holds anything
+                but 0 and 1.
         """
         self._signer = signer
+        self._transaction_versions = normalize_accepted_transaction_versions(transaction_versions)
         self._settlement_cache = settlement_cache or SettlementCache()
         self._pending_store: PendingSettlementStore = (
             pending_store or InMemoryPendingSettlementStore()
@@ -125,7 +138,7 @@ class ExactSvmScheme:
 
         return {
             "feePayer": fee_payer,
-            "transactionVersions": list(ADVERTISED_TRANSACTION_VERSIONS),
+            "transactionVersions": list(self._transaction_versions),
         }
 
     def get_signers(self, network: Network) -> list[str]:
@@ -194,7 +207,9 @@ class ExactSvmScheme:
         # Read the version from the raw bytes first so a newer wire format is
         # reported as unsupported however the installed solders handles it.
         wire_version = peek_wire_transaction_version(svm_payload.transaction)
-        if wire_version is not None and not is_accepted_transaction_version(wire_version):
+        if wire_version is not None and not is_accepted_transaction_version(
+            wire_version, self._transaction_versions
+        ):
             return VerifyResponse(
                 is_valid=False, invalid_reason=ERR_UNSUPPORTED_TRANSACTION_VERSION, payer=""
             )
@@ -208,7 +223,9 @@ class ExactSvmScheme:
 
         # Version allowlist, checked before any signature or instruction check:
         # every check below reads its fee policy from version-specific structure.
-        if not is_accepted_transaction_version(get_transaction_version(tx.message)):
+        if not is_accepted_transaction_version(
+            get_transaction_version(tx.message), self._transaction_versions
+        ):
             return VerifyResponse(
                 is_valid=False, invalid_reason=ERR_UNSUPPORTED_TRANSACTION_VERSION, payer=""
             )
@@ -420,7 +437,9 @@ class ExactSvmScheme:
         # Parse and decode the transaction up front (no RPC calls) so we can key the
         # PendingSettlementStore on the message hash before doing any verify/sign/send work.
         wire_version = peek_wire_transaction_version(svm_payload.transaction)
-        if wire_version is not None and not is_accepted_transaction_version(wire_version):
+        if wire_version is not None and not is_accepted_transaction_version(
+            wire_version, self._transaction_versions
+        ):
             return SettleResponse(
                 success=False,
                 error_reason=ERR_UNSUPPORTED_TRANSACTION_VERSION,
@@ -430,7 +449,9 @@ class ExactSvmScheme:
             )
         try:
             tx = decode_transaction_from_payload(svm_payload)
-            if not is_accepted_transaction_version(get_transaction_version(tx.message)):
+            if not is_accepted_transaction_version(
+                get_transaction_version(tx.message), self._transaction_versions
+            ):
                 return SettleResponse(
                     success=False,
                     error_reason=ERR_UNSUPPORTED_TRANSACTION_VERSION,

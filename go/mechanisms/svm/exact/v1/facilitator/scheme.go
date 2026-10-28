@@ -21,23 +21,55 @@ import (
 
 // ExactSvmSchemeV1 implements the SchemeNetworkFacilitator interface for SVM (Solana) exact payments (V1)
 type ExactSvmSchemeV1 struct {
-	signer          svm.FacilitatorSvmSigner
-	settlementCache *svm.SettlementCache
+	signer              svm.FacilitatorSvmSigner
+	settlementCache     *svm.SettlementCache
+	transactionVersions []int
 }
 
-// NewExactSvmSchemeV1 creates a new ExactSvmSchemeV1.
+// Config configures an ExactSvmSchemeV1.
+type Config struct {
+	// SettlementCache shares deduplication state across V1 and V2 instances;
+	// nil creates a new cache.
+	SettlementCache *svm.SettlementCache
+	// TransactionVersions is the set of message versions this facilitator
+	// accepts and advertises as extra.transactionVersions. Any other version
+	// is rejected with unsupported_transaction_version; legacy is accepted
+	// exactly when 0 is. Nil means [0, 1]. Narrow it to [0] for a sponsor whose
+	// signer or RPC does not yet handle version 1.
+	TransactionVersions []int
+}
+
+// NewExactSvmSchemeV1 creates a new ExactSvmSchemeV1 accepting versions 0 and 1.
 // An optional SettlementCache may be provided to share deduplication state
 // across V1 and V2 instances; if nil a new cache is created.
 func NewExactSvmSchemeV1(signer svm.FacilitatorSvmSigner, cache ...*svm.SettlementCache) *ExactSvmSchemeV1 {
-	var c *svm.SettlementCache
-	if len(cache) > 0 && cache[0] != nil {
-		c = cache[0]
-	} else {
-		c = svm.NewSettlementCache()
+	cfg := &Config{}
+	if len(cache) > 0 {
+		cfg.SettlementCache = cache[0]
+	}
+	return NewExactSvmSchemeV1WithConfig(signer, cfg)
+}
+
+// NewExactSvmSchemeV1WithConfig creates a new ExactSvmSchemeV1 from config.
+// Panics when TransactionVersions is invalid, so operators learn about it at
+// startup.
+func NewExactSvmSchemeV1WithConfig(signer svm.FacilitatorSvmSigner, config *Config) *ExactSvmSchemeV1 {
+	cfg := Config{}
+	if config != nil {
+		cfg = *config
+	}
+	transactionVersions, err := svm.NormalizeAcceptedTransactionVersions(cfg.TransactionVersions)
+	if err != nil {
+		panic("exact svm v1 facilitator: " + err.Error())
+	}
+	cache := cfg.SettlementCache
+	if cache == nil {
+		cache = svm.NewSettlementCache()
 	}
 	return &ExactSvmSchemeV1{
-		signer:          signer,
-		settlementCache: c,
+		signer:              signer,
+		settlementCache:     cache,
+		transactionVersions: transactionVersions,
 	}
 }
 
@@ -62,7 +94,7 @@ func (f *ExactSvmSchemeV1) GetExtra(network x402.Network) map[string]interface{}
 
 	return map[string]interface{}{
 		"feePayer":                   addresses[randomIndex].String(),
-		svm.ExtraTransactionVersions: append([]int(nil), svm.AdvertisedTransactionVersions...),
+		svm.ExtraTransactionVersions: append([]int(nil), f.transactionVersions...),
 	}
 }
 
@@ -141,7 +173,7 @@ func (f *ExactSvmSchemeV1) Verify(
 	// Step 2: Parse and Validate Transaction Structure
 	// Read the version from the raw bytes first so a newer wire format is
 	// reported as unsupported however the installed decoder handles it.
-	if wireVersion, ok := svm.PeekWireTransactionVersion(svmPayload.Transaction); ok && !svm.IsAcceptedWireTransactionVersion(wireVersion) {
+	if wireVersion, ok := svm.PeekWireTransactionVersion(svmPayload.Transaction); ok && !svm.IsAcceptedWireTransactionVersionIn(wireVersion, f.transactionVersions) {
 		return nil, x402.NewVerifyError(ErrUnsupportedTransactionVersion, "", fmt.Sprintf("unsupported transaction message version %d", wireVersion))
 	}
 	tx, err := svm.DecodeTransaction(svmPayload.Transaction)
@@ -150,7 +182,7 @@ func (f *ExactSvmSchemeV1) Verify(
 	}
 
 	// Message version gate, before any signature or instruction check.
-	if !svm.IsAcceptedTransactionVersion(tx.Message.GetVersion()) {
+	if !svm.IsAcceptedTransactionVersionIn(tx.Message.GetVersion(), f.transactionVersions) {
 		return nil, x402.NewVerifyError(ErrUnsupportedTransactionVersion, "", fmt.Sprintf("unsupported transaction message version %d", svm.WireTransactionVersion(tx.Message.GetVersion())))
 	}
 
@@ -297,14 +329,14 @@ func (f *ExactSvmSchemeV1) Settle(
 		return nil, x402.NewSettleError(ErrInvalidPayloadTransaction, "", network, "", err.Error())
 	}
 	// Decode transaction before the cache check so we can key on the message hash.
-	if wireVersion, ok := svm.PeekWireTransactionVersion(svmPayload.Transaction); ok && !svm.IsAcceptedWireTransactionVersion(wireVersion) {
+	if wireVersion, ok := svm.PeekWireTransactionVersion(svmPayload.Transaction); ok && !svm.IsAcceptedWireTransactionVersionIn(wireVersion, f.transactionVersions) {
 		return nil, x402.NewSettleError(ErrUnsupportedTransactionVersion, "", network, "", fmt.Sprintf("unsupported transaction message version %d", wireVersion))
 	}
 	tx, err := svm.DecodeTransaction(svmPayload.Transaction)
 	if err != nil {
 		return nil, x402.NewSettleError(ErrInvalidPayloadTransaction, "", network, "", err.Error())
 	}
-	if !svm.IsAcceptedTransactionVersion(tx.Message.GetVersion()) {
+	if !svm.IsAcceptedTransactionVersionIn(tx.Message.GetVersion(), f.transactionVersions) {
 		return nil, x402.NewSettleError(ErrUnsupportedTransactionVersion, "", network, "", fmt.Sprintf("unsupported transaction message version %d", svm.WireTransactionVersion(tx.Message.GetVersion())))
 	}
 	txKey, err := svm.MessageHash(tx)

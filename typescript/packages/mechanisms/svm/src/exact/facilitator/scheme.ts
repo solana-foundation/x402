@@ -128,13 +128,14 @@ const LAYOUT_RECOVERABLE_REASONS = new Set<string>([
 ]);
 
 /**
- * Index of the Path 1 TransferChecked instruction: after the ComputeLimit +
- * ComputePrice prefix on legacy and version 0, first on version 1.
+ * Index of the exact scheme's static-path TransferChecked instruction: after
+ * the ComputeLimit + ComputePrice prefix on legacy and version 0, first on
+ * version 1, which carries its budget in the message config instead.
  *
  * @param version - The compiled message version
  * @returns The transfer's instruction index
  */
-function staticTransferIndex(version: number | string): number {
+export function staticTransferIndex(version: number | string): number {
   return version === 1 ? 0 : 2;
 }
 

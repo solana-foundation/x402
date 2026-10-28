@@ -26,6 +26,7 @@ from x402.mechanisms.svm import (
     USDC_DEVNET_ADDRESS,
     get_transaction_version,
     is_accepted_transaction_version,
+    normalize_accepted_transaction_versions,
     peek_wire_transaction_version,
     resolve_transaction_version,
 )
@@ -34,6 +35,7 @@ from x402.mechanisms.svm.exact import (
     ExactSvmFacilitatorScheme,
     ExactSvmServerScheme,
 )
+from x402.mechanisms.svm.exact.register import register_exact_svm_facilitator
 from x402.mechanisms.svm.exact.v1 import ExactSvmSchemeV1Client, ExactSvmSchemeV1Facilitator
 from x402.mechanisms.svm.signers import KeypairSigner
 from x402.mechanisms.svm.utils import compile_payment_message, transaction_message_hash
@@ -598,3 +600,67 @@ class TestFacilitatorGate:
         result = facilitator.verify(payload, requirements)
         assert result.is_valid is False
         assert result.invalid_reason != ERR_UNSUPPORTED_TRANSACTION_VERSION
+
+
+class TestConfiguredFacilitatorTransactionVersions:
+    """A facilitator's transaction_versions option narrows what it advertises and accepts."""
+
+    def test_normalizes_the_option(self):
+        assert normalize_accepted_transaction_versions(None) == [0, 1]
+        assert normalize_accepted_transaction_versions([1, 0, 1]) == [0, 1]
+        for invalid in ([], [2], ["legacy"], [True]):
+            with pytest.raises(ValueError):
+                normalize_accepted_transaction_versions(invalid)
+
+    def test_polices_legacy_as_version_0(self):
+        assert is_accepted_transaction_version("legacy", [0]) is True
+        assert is_accepted_transaction_version("legacy", [1]) is False
+        assert is_accepted_transaction_version(1, [0]) is False
+        assert is_accepted_transaction_version(2, [0, 1]) is False
+
+    @pytest.mark.parametrize(
+        "scheme_class", [ExactSvmFacilitatorScheme, ExactSvmSchemeV1Facilitator]
+    )
+    def test_advertises_the_configured_set(self, scheme_class):
+        facilitator = scheme_class(MockFacilitatorSigner(), transaction_versions=[0])
+        assert facilitator.get_extra(SOLANA_DEVNET_CAIP2)["transactionVersions"] == [0]
+        with pytest.raises(ValueError):
+            scheme_class(MockFacilitatorSigner(), transaction_versions=[])
+
+    def test_v2_facilitator_restricted_to_v0_refuses_version_1(self):
+        facilitator = ExactSvmFacilitatorScheme(MockFacilitatorSigner(), transaction_versions=[0])
+        payload, requirements = TestFacilitatorGate._v2_pair(_v0_tx())
+        with patch("x402.mechanisms.svm.exact.facilitator.get_transaction_version", return_value=1):
+            verified = facilitator.verify(payload, requirements)
+            settled = facilitator.settle(payload, requirements)
+        assert verified.invalid_reason == ERR_UNSUPPORTED_TRANSACTION_VERSION
+        assert settled.error_reason == ERR_UNSUPPORTED_TRANSACTION_VERSION
+
+    def test_v1_facilitator_restricted_to_v0_refuses_version_1(self):
+        facilitator = ExactSvmSchemeV1Facilitator(MockFacilitatorSigner(), transaction_versions=[0])
+        payload, requirements = TestFacilitatorGate._v1_pair(_v0_tx())
+        with patch(
+            "x402.mechanisms.svm.exact.v1.facilitator.get_transaction_version", return_value=1
+        ):
+            result = facilitator.verify(payload, requirements)
+        assert result.invalid_reason == ERR_UNSUPPORTED_TRANSACTION_VERSION
+
+    @pytest.mark.parametrize("build", [_legacy_tx, _v0_tx], ids=["legacy", "v0"])
+    def test_facilitator_restricted_to_v1_refuses_legacy_and_v0(self, build):
+        facilitator = ExactSvmFacilitatorScheme(MockFacilitatorSigner(), transaction_versions=[1])
+        payload, requirements = TestFacilitatorGate._v2_pair(build())
+        result = facilitator.verify(payload, requirements)
+        assert result.invalid_reason == ERR_UNSUPPORTED_TRANSACTION_VERSION
+
+    def test_register_applies_the_option_to_both_schemes(self):
+        from x402 import x402Facilitator
+
+        facilitator = register_exact_svm_facilitator(
+            x402Facilitator(),
+            MockFacilitatorSigner(),
+            SOLANA_DEVNET_CAIP2,
+            transaction_versions=[0],
+        )
+        kinds = facilitator.get_supported().kinds
+        assert len(kinds) > 1
+        assert all(kind.extra["transactionVersions"] == [0] for kind in kinds)

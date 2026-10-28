@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import random
+from collections.abc import Sequence
 from typing import Any
 
 try:
@@ -15,7 +16,6 @@ except ImportError as e:
 from .....schemas import Network, SettleResponse, VerifyResponse
 from .....schemas.v1 import PaymentPayloadV1, PaymentRequirementsV1
 from ...constants import (
-    ADVERTISED_TRANSACTION_VERSIONS,
     ERR_AMOUNT_INSUFFICIENT,
     ERR_DUPLICATE_SETTLEMENT,
     ERR_FEE_PAYER_MISSING,
@@ -53,6 +53,7 @@ from ...utils import (
     get_token_payer_from_transaction,
     get_transaction_version,
     is_accepted_transaction_version,
+    normalize_accepted_transaction_versions,
     peek_wire_transaction_version,
     transaction_message_hash,
     transaction_size_exceeded,
@@ -79,14 +80,26 @@ class ExactSvmSchemeV1:
         self,
         signer: FacilitatorSvmSigner,
         settlement_cache: SettlementCache | None = None,
+        transaction_versions: Sequence[int] | None = None,
     ):
         """Create ExactSvmSchemeV1 facilitator.
 
         Args:
             signer: SVM signer for verification/settlement.
             settlement_cache: Optional shared settlement cache (one is created if omitted).
+            transaction_versions: Transaction message versions this facilitator
+                accepts and advertises as ``extra.transactionVersions``. Any other
+                version is rejected with ``unsupported_transaction_version``; legacy
+                is accepted exactly when 0 is. Narrow it to ``[0]`` for a sponsor
+                whose signer or RPC does not yet handle version 1. Defaults to
+                ``[0, 1]``.
+
+        Raises:
+            ValueError: If ``transaction_versions`` is empty or holds anything
+                but 0 and 1.
         """
         self._signer = signer
+        self._transaction_versions = normalize_accepted_transaction_versions(transaction_versions)
         self._settlement_cache = settlement_cache or SettlementCache()
 
     def get_extra(self, network: Network) -> dict[str, Any] | None:
@@ -103,7 +116,7 @@ class ExactSvmSchemeV1:
         fee_payer = random.choice(addresses)
         return {
             "feePayer": fee_payer,
-            "transactionVersions": list(ADVERTISED_TRANSACTION_VERSIONS),
+            "transactionVersions": list(self._transaction_versions),
         }
 
     def get_signers(self, network: Network) -> list[str]:
@@ -164,7 +177,9 @@ class ExactSvmSchemeV1:
         # Read the version from the raw bytes first so a newer wire format is
         # reported as unsupported however the installed solders handles it.
         wire_version = peek_wire_transaction_version(svm_payload.transaction)
-        if wire_version is not None and not is_accepted_transaction_version(wire_version):
+        if wire_version is not None and not is_accepted_transaction_version(
+            wire_version, self._transaction_versions
+        ):
             return VerifyResponse(
                 is_valid=False, invalid_reason=ERR_UNSUPPORTED_TRANSACTION_VERSION, payer=""
             )
@@ -178,7 +193,9 @@ class ExactSvmSchemeV1:
 
         # Version allowlist, checked before any signature or instruction check:
         # every check below reads its fee policy from version-specific structure.
-        if not is_accepted_transaction_version(get_transaction_version(tx.message)):
+        if not is_accepted_transaction_version(
+            get_transaction_version(tx.message), self._transaction_versions
+        ):
             return VerifyResponse(
                 is_valid=False, invalid_reason=ERR_UNSUPPORTED_TRANSACTION_VERSION, payer=""
             )

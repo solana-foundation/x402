@@ -19,6 +19,7 @@ import {
   getInstructionsFromCompiledTransactionMessage,
   getTransactionDecoder,
 } from "@solana/kit";
+import { x402Facilitator } from "@x402/core/facilitator";
 import type { PaymentPayload, PaymentRequirements } from "@x402/core/types";
 import type { PaymentPayloadV1, PaymentRequirementsV1 } from "@x402/core/types/v1";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
@@ -33,6 +34,7 @@ import {
 import { USDC_DEVNET_ADDRESS } from "../../src/defaultAssets";
 import { ExactSvmScheme as ExactSvmClientScheme } from "../../src/exact/client/scheme";
 import * as Errors from "../../src/exact/facilitator/errors";
+import { registerExactSvmScheme } from "../../src/exact/facilitator/register";
 import { ExactSvmScheme as ExactSvmFacilitatorScheme } from "../../src/exact/facilitator/scheme";
 import {
   assertFeePayerIsolated,
@@ -450,6 +452,46 @@ describe("verifier version gates", () => {
         facilitator.verify(v2Payload(transaction, requirements), requirements),
       ).resolves.toMatchObject({ invalidReason: Errors.ErrUnsupportedTransactionVersion });
     }
+  });
+
+  it("legacy x402 v1 exact facilitator advertises and enforces its configured accepted set", async () => {
+    const facilitator = new ExactSvmSchemeV1(facilitatorSigner(), undefined, {
+      transactionVersions: [0],
+    });
+    expect(facilitator.getExtra(SOLANA_DEVNET_CAIP2)?.transactionVersions).toEqual([0]);
+
+    const v1 = await exactPayment(1);
+    await expect(
+      facilitator.verify(v1ProtocolPayload(v1.transaction), v1ProtocolRequirements()),
+    ).resolves.toMatchObject({
+      isValid: false,
+      invalidReason: Errors.ErrUnsupportedTransactionVersion,
+    });
+    const v0 = await exactPayment(0);
+    await expect(
+      facilitator.verify(v1ProtocolPayload(v0.transaction), v1ProtocolRequirements()),
+    ).resolves.toMatchObject({ isValid: true });
+    await expect(
+      facilitator.settle(v1ProtocolPayload(v1.transaction), v1ProtocolRequirements()),
+    ).resolves.toMatchObject({
+      success: false,
+      errorReason: Errors.ErrUnsupportedTransactionVersion,
+    });
+    expect(
+      () => new ExactSvmSchemeV1(facilitatorSigner(), undefined, { transactionVersions: [] }),
+    ).toThrow(/transactionVersions must be a non-empty list of 0 and\/or 1/);
+  });
+
+  it("registerExactSvmScheme applies transactionVersions to the v2 and v1 schemes", () => {
+    const facilitator = new x402Facilitator();
+    registerExactSvmScheme(facilitator, {
+      signer: facilitatorSigner(),
+      networks: SOLANA_DEVNET_CAIP2,
+      transactionVersions: [0],
+    });
+    const kinds = facilitator.getSupported().kinds;
+    expect(kinds.length).toBeGreaterThan(1);
+    for (const kind of kinds) expect(kind.extra?.transactionVersions).toEqual([0]);
   });
 
   it("exact facilitator rejects an invalid transactionVersions option at construction", () => {

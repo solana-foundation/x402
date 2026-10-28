@@ -212,3 +212,27 @@ func TestExactSvmSchemeV1_VerifyEnforcesTheVersion1SizeLimit(t *testing.T) {
 		assert.Zero(t, signer.simulateCalls)
 	}
 }
+
+func TestExactSvmSchemeV1_ConfiguredTransactionVersions(t *testing.T) {
+	payload, requirements, facilitatorAddr, _ := buildMessageV1Fixture(t, v1MessageConfig(), nil)
+	signer := &mockV1Signer{addresses: []solana.PublicKey{facilitatorAddr}}
+	scheme := NewExactSvmSchemeV1WithConfig(signer, &Config{TransactionVersions: []int{0}})
+
+	extra := scheme.GetExtra(x402.Network(svm.SolanaDevnetCAIP2))
+	assert.Equal(t, []int{0}, extra[svm.ExtraTransactionVersions])
+
+	_, err := scheme.Verify(context.Background(), payload, requirements, nil)
+	var ve *x402.VerifyError
+	require.True(t, errors.As(err, &ve), "%v", err)
+	assert.Equal(t, ErrUnsupportedTransactionVersion, ve.InvalidReason)
+
+	_, err = scheme.Settle(context.Background(), payload, requirements, nil)
+	var se *x402.SettleError
+	require.True(t, errors.As(err, &se), "%v", err)
+	assert.Equal(t, ErrUnsupportedTransactionVersion, se.ErrorReason)
+	assert.Equal(t, 0, signer.signCalls)
+
+	assert.Panics(t, func() {
+		NewExactSvmSchemeV1WithConfig(signer, &Config{TransactionVersions: []int{}})
+	})
+}
