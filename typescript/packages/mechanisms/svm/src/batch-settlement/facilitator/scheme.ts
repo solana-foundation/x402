@@ -958,6 +958,7 @@ export class BatchSvmScheme implements SchemeNetworkFacilitator {
               treasuryOwner: treasuryOwnerOf(this.config, requirements.network),
             },
             openTransactionBase64: payload.deposit.transaction,
+            acceptedTransactionVersions: this.transactionVersions,
           },
         );
       }

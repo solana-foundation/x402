@@ -15,6 +15,7 @@ import type { PaymentRequirements, SettleResponse } from "@x402/core/types";
 
 import { signCloseAuthorization } from "../closeAuthorization";
 import { BatchError } from "../errors";
+import { V1_MAX_CLAIM_CHANNELS, V1_MAX_SETTLE_CHANNELS } from "../facilitator/constants";
 import { BATCH_SETTLEMENT_SCHEME, type BatchSealPayload } from "../types";
 import type { ChannelState, ChannelStore } from "./types";
 
@@ -578,7 +579,8 @@ export class BatchChannelManager {
 
   /**
    * How many channels one redemption transaction carries: the facilitator's
-   * advertised capacity copied into the requirements (four when absent),
+   * advertised capacity copied into the requirements (four when absent,
+   * clamped to the protocol maximum),
    * narrowed by `maxChannelsPerBatch`. A `claims[]` or `channels[]` longer
    * than that capacity is not a valid request.
    *
@@ -587,9 +589,12 @@ export class BatchChannelManager {
    */
   private batchSize(field: "maxClaimChannels" | "maxSettleChannels"): number {
     const advertised = this.config.requirements.extra?.[field];
+    // Never above the protocol maximum: a facilitator misadvertising a larger
+    // capacity would otherwise get batches the wire guard rejects.
+    const ceiling = field === "maxClaimChannels" ? V1_MAX_CLAIM_CHANNELS : V1_MAX_SETTLE_CHANNELS;
     const capacity =
       typeof advertised === "number" && Number.isSafeInteger(advertised) && advertised > 0
-        ? advertised
+        ? Math.min(advertised, ceiling)
         : DEFAULT_CHANNELS_PER_BATCH;
     return Math.min(capacity, Math.max(1, this.config.maxChannelsPerBatch ?? capacity));
   }

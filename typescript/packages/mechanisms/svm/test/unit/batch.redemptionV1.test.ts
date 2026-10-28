@@ -350,6 +350,13 @@ describe("server batch size", () => {
     });
   });
 
+  it("clamps a misadvertised capacity to the protocol maximum", async () => {
+    expect(await batchSizes({ maxClaimChannels: 50, maxSettleChannels: 50 })).toEqual({
+      claim: V1_MAX_CLAIM_CHANNELS,
+      settle: V1_MAX_SETTLE_CHANNELS,
+    });
+  });
+
   it("narrows it to maxChannelsPerBatch", async () => {
     expect(await batchSizes({ maxClaimChannels: 18, maxSettleChannels: 13 }, 8)).toEqual({
       claim: 8,

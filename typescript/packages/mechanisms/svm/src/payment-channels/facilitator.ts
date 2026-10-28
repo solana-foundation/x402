@@ -426,6 +426,17 @@ export interface SettlementSimChannel {
   treasuryOwner?: string | undefined;
 }
 
+/** Arguments of {@link simulateOpenSettleDistribute}. */
+export interface OpenSettleDistributeSimulationArgs {
+  openTransactionBase64: string;
+  channel: SettlementSimChannel;
+  /**
+   * The facilitator's accepted message versions (its `transactionVersions`
+   * option). Defaults to `[0, 1]`.
+   */
+  acceptedTransactionVersions?: readonly number[];
+}
+
 /**
  * Simulate `open` + `settle_and_seal(has_voucher=0)` + `distribute` against live
  * state before broadcasting open, so settlement-account failures reject without
@@ -434,44 +445,26 @@ export interface SettlementSimChannel {
 export async function simulateOpenSettleDistribute(
   feePayer: PaymentChannelSvmSigner,
   rpc: ChannelRpc,
-  args: {
-    openTransactionBase64: string;
-    channel: SettlementSimChannel;
-  },
+  args: OpenSettleDistributeSimulationArgs,
 ): Promise<void>;
 export async function simulateOpenSettleDistribute(
   feePayer: PaymentChannelSvmSigner,
   signer: Pick<FacilitatorSvmSigner, "simulateTransaction">,
   network: string,
-  args: {
-    openTransactionBase64: string;
-    channel: SettlementSimChannel;
-  },
+  args: OpenSettleDistributeSimulationArgs,
 ): Promise<void>;
 export async function simulateOpenSettleDistribute(
   feePayer: PaymentChannelSvmSigner,
   rpcOrSigner: ChannelRpc | Pick<FacilitatorSvmSigner, "simulateTransaction">,
-  argsOrNetwork:
-    | {
-        openTransactionBase64: string;
-        channel: SettlementSimChannel;
-      }
-    | string,
-  maybeArgs?: {
-    openTransactionBase64: string;
-    channel: SettlementSimChannel;
-  },
+  argsOrNetwork: OpenSettleDistributeSimulationArgs | string,
+  maybeArgs?: OpenSettleDistributeSimulationArgs,
 ): Promise<void> {
   if (typeof argsOrNetwork === "string") {
     const args = maybeArgs;
     if (!args) {
       throw new Error("simulateOpenSettleDistribute: missing simulation args");
     }
-    const simulation = await buildOpenSettleDistributeSimulation(
-      feePayer,
-      args.openTransactionBase64,
-      args.channel,
-    );
+    const simulation = await buildOpenSettleDistributeSimulation(feePayer, args);
     await simulateInstructionsViaSigner(
       feePayer,
       rpcOrSigner as Pick<FacilitatorSvmSigner, "simulateTransaction">,
@@ -481,11 +474,7 @@ export async function simulateOpenSettleDistribute(
     );
     return;
   }
-  const simulation = await buildOpenSettleDistributeSimulation(
-    feePayer,
-    argsOrNetwork.openTransactionBase64,
-    argsOrNetwork.channel,
-  );
+  const simulation = await buildOpenSettleDistributeSimulation(feePayer, argsOrNetwork);
   await simulateInstructions(
     feePayer,
     rpcOrSigner as ChannelRpc,
@@ -503,12 +492,15 @@ export async function simulateOpenSettleDistribute(
  */
 async function buildOpenSettleDistributeSimulation(
   feePayer: PaymentChannelSvmSigner,
-  openTransactionBase64: string,
-  channel: SettlementSimChannel,
+  {
+    openTransactionBase64,
+    channel,
+    acceptedTransactionVersions,
+  }: OpenSettleDistributeSimulationArgs,
 ): Promise<{ instructions: Instruction[]; version: 0 | 1 }> {
   const tx = getTransactionDecoder().decode(getBase64Codec().encode(openTransactionBase64));
   const compiled = getCompiledTransactionMessageDecoder().decode(tx.messageBytes);
-  if (!isAcceptedTransactionVersion(compiled.version)) {
+  if (!isAcceptedTransactionVersion(compiled.version, acceptedTransactionVersions)) {
     throw new Error(
       `${ErrUnsupportedTransactionVersion}: simulateOpenSettleDistribute: transaction message version ${String(compiled.version)} is not accepted`,
     );

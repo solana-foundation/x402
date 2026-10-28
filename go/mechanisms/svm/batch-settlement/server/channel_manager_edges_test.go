@@ -207,6 +207,15 @@ func TestBatchSettlementRedemptionWorkerEdgeCases(t *testing.T) {
 		assert.Equal(t, []int{13, 7}, settles)
 	})
 
+	t.Run("a misadvertised capacity is clamped to the protocol maximum", func(t *testing.T) {
+		claims, settles := batchLengths(t, 30, map[string]any{
+			batchsettlement.ExtraMaxClaimChannels:  float64(50),
+			batchsettlement.ExtraMaxSettleChannels: float64(50),
+		}, 0)
+		assert.Equal(t, []int{18, 12}, claims)
+		assert.Equal(t, []int{13, 13, 4}, settles)
+	})
+
 	t.Run("a configured batch size lowers the advertised capacity", func(t *testing.T) {
 		claims, _ := batchLengths(t, 10, map[string]any{batchsettlement.ExtraMaxClaimChannels: 18}, 8)
 		assert.Equal(t, []int{8, 2}, claims)

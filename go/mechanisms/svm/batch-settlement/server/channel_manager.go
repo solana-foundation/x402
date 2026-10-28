@@ -524,21 +524,26 @@ func (m *BatchChannelManager) submit(ctx context.Context, payload any) (*x402.Se
 }
 
 // claimBatchSize is how many channels one claim request carries: the
-// facilitator's advertised maxClaimChannels (4 when absent), lowered by
+// facilitator's advertised maxClaimChannels (4 when absent, at most
+// V1MaxClaimChannels), lowered by
 // MaxChannelsPerBatch when set.
 func (m *BatchChannelManager) claimBatchSize() int {
-	return m.batchSize(batchsettlement.ExtraMaxClaimChannels)
+	return m.batchSize(batchsettlement.ExtraMaxClaimChannels, batchsettlement.V1MaxClaimChannels)
 }
 
 // settleBatchSize is how many channels one settle request carries: the
-// facilitator's advertised maxSettleChannels (4 when absent), lowered by
+// facilitator's advertised maxSettleChannels (4 when absent, at most
+// V1MaxSettleChannels), lowered by
 // MaxChannelsPerBatch when set.
 func (m *BatchChannelManager) settleBatchSize() int {
-	return m.batchSize(batchsettlement.ExtraMaxSettleChannels)
+	return m.batchSize(batchsettlement.ExtraMaxSettleChannels, batchsettlement.V1MaxSettleChannels)
 }
 
-func (m *BatchChannelManager) batchSize(capacityKey string) int {
-	capacity := advertisedCapacity(m.config.Requirements.Extra[capacityKey])
+// batchSize never exceeds ceiling, the protocol maximum: a facilitator
+// misadvertising a larger capacity would otherwise get batches the wire guard
+// rejects.
+func (m *BatchChannelManager) batchSize(capacityKey string, ceiling int) int {
+	capacity := min(advertisedCapacity(m.config.Requirements.Extra[capacityKey]), ceiling)
 	size := m.config.MaxChannelsPerBatch
 	if size == 0 || size > capacity {
 		size = capacity

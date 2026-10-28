@@ -778,6 +778,7 @@ export class UptoSvmScheme implements SchemeNetworkFacilitator {
     try {
       await simulateOpenSettleDistribute(feePayerSigner, this.signer, network, {
         openTransactionBase64: p.openTransaction,
+        acceptedTransactionVersions: this.transactionVersions,
         channel: {
           channelId: p.channelId,
           mint: requirements.asset,
