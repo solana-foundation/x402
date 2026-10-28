@@ -720,7 +720,7 @@ export function toFacilitatorSvmSigner(
           signature as never,
           {
             commitment: "confirmed",
-            maxSupportedTransactionVersion: 0,
+            maxSupportedTransactionVersion: 1,
             encoding: "jsonParsed",
           } as never,
         )
@@ -738,7 +738,7 @@ export function toFacilitatorSvmSigner(
           signature as never,
           {
             commitment: "confirmed",
-            maxSupportedTransactionVersion: 0,
+            maxSupportedTransactionVersion: 1,
             encoding: "jsonParsed",
           } as never,
         )
