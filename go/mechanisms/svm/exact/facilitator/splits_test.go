@@ -198,7 +198,7 @@ func (p splitParties) signer() *mockSmartWalletSigner {
 	}
 }
 
-func verifyReason(t *testing.T, resp *x402.VerifyResponse, err error) string {
+func splitVerifyReason(t *testing.T, resp *x402.VerifyResponse, err error) string {
 	t.Helper()
 	require.Nil(t, resp)
 	var ve *x402.VerifyError
@@ -259,6 +259,31 @@ func TestSplits_Path1AcceptsSponsoredAtaCreationIncludingPrimary(t *testing.T) {
 	assert.True(t, resp.IsValid)
 }
 
+func TestSplits_Path1AcceptsVersion1ChargeWithSponsoredCreation(t *testing.T) {
+	p := newSplitParties(t)
+	req := p.requirements(map[string]interface{}{
+		"transactionVersions": []interface{}{0, 1},
+		"splits": []interface{}{
+			map[string]interface{}{"payTo": p.platform.String(), "amount": "40000", "ataCreationRequired": true},
+			map[string]interface{}{"payTo": p.referrer.String(), "amount": "10000"},
+		},
+	})
+	encoded := p.clientTransaction(t, req)
+	tx, err := svm.DecodeTransaction(encoded)
+	require.NoError(t, err)
+	require.Equal(t, solana.MessageVersionV1, tx.Message.GetVersion())
+	// Version 1 has no ComputeBudget prefix: one create, three transfers, memo.
+	require.Len(t, tx.Message.Instructions, 1+3+1)
+	first, err := tx.Message.Program(tx.Message.Instructions[0].ProgramIDIndex)
+	require.NoError(t, err)
+	assert.Equal(t, solana.SPLAssociatedTokenAccountProgramID, first)
+
+	resp, err := NewExactSvmScheme(p.signer(), &Config{MaxSplits: 2, AtaCreationSponsored: true}).
+		Verify(context.Background(), splitPayment(req, encoded), req, nil)
+	require.NoError(t, err)
+	assert.True(t, resp.IsValid)
+}
+
 func TestSplits_Path1AcceptsSponsoredCreationForFeePayerRecipient(t *testing.T) {
 	// A split to the sponsor itself for cost recovery: the fee payer is then
 	// both the funding payer and the owner of the created ATA (§2.1.1).
@@ -281,18 +306,18 @@ func TestSplits_RejectsBeyondAdvertisedCapabilities(t *testing.T) {
 	signer := p.signer()
 
 	resp, err := NewExactSvmScheme(signer).Verify(context.Background(), splitPayment(req, encoded), req, nil)
-	assert.Equal(t, ErrSplitCountExceeded, verifyReason(t, resp, err))
+	assert.Equal(t, ErrSplitCountExceeded, splitVerifyReason(t, resp, err))
 
 	marked := p.requirements(map[string]interface{}{"ataCreationRequired": true})
 	resp, err = NewExactSvmScheme(signer, &Config{MaxSplits: 8}).
 		Verify(context.Background(), splitPayment(marked, p.clientTransaction(t, marked)), marked, nil)
-	assert.Equal(t, ErrSplitAtaCreationNotAuthorized, verifyReason(t, resp, err))
+	assert.Equal(t, ErrSplitAtaCreationNotAuthorized, splitVerifyReason(t, resp, err))
 
 	invalid := p.requirements(map[string]interface{}{
 		"splits": []interface{}{map[string]interface{}{"payTo": p.platform.String(), "amount": "1050000"}},
 	})
 	resp, err = NewExactSvmScheme(signer, &Config{MaxSplits: 8}).Verify(context.Background(), splitPayment(invalid, encoded), invalid, nil)
-	assert.Equal(t, ErrSplitRemainderNotPositive, verifyReason(t, resp, err))
+	assert.Equal(t, ErrSplitRemainderNotPositive, splitVerifyReason(t, resp, err))
 	assert.Equal(t, 0, signer.simulateCalls, "split terms are rejected before the transaction is inspected")
 }
 
@@ -303,7 +328,7 @@ func TestSplits_RejectsCreationForUnmarkedRecipient(t *testing.T) {
 	unmarked := p.requirements(nil)
 	resp, err := NewExactSvmScheme(p.signer(), &Config{MaxSplits: 8, AtaCreationSponsored: true}).
 		Verify(context.Background(), splitPayment(unmarked, encoded), unmarked, nil)
-	assert.Equal(t, ErrSplitAtaCreationNotAuthorized, verifyReason(t, resp, err))
+	assert.Equal(t, ErrSplitAtaCreationNotAuthorized, splitVerifyReason(t, resp, err))
 }
 
 func TestSplits_RejectsClientFundedCreation(t *testing.T) {
@@ -319,7 +344,7 @@ func TestSplits_RejectsClientFundedCreation(t *testing.T) {
 	})
 	resp, err := NewExactSvmScheme(p.signer(), &Config{MaxSplits: 8, AtaCreationSponsored: true}).
 		Verify(context.Background(), splitPayment(req, encoded), req, nil)
-	assert.Equal(t, ErrSplitAtaCreationNotAuthorized, verifyReason(t, resp, err))
+	assert.Equal(t, ErrSplitAtaCreationNotAuthorized, splitVerifyReason(t, resp, err))
 }
 
 func TestSplits_Path1RejectsLegsOutOfOrderOrWrongCarveOut(t *testing.T) {
@@ -334,7 +359,7 @@ func TestSplits_Path1RejectsLegsOutOfOrderOrWrongCarveOut(t *testing.T) {
 		memoIx("nonce"),
 	})
 	resp, err := scheme.Verify(context.Background(), splitPayment(req, swapped), req, nil)
-	assert.Equal(t, ErrRecipientMismatch, verifyReason(t, resp, err))
+	assert.Equal(t, ErrRecipientMismatch, splitVerifyReason(t, resp, err))
 
 	shortSplit, _ := p.buildTx(t, []solana.Instruction{
 		p.transfer(t, p.merchant, 1_010_000),
@@ -343,7 +368,7 @@ func TestSplits_Path1RejectsLegsOutOfOrderOrWrongCarveOut(t *testing.T) {
 		memoIx("nonce"),
 	})
 	resp, err = scheme.Verify(context.Background(), splitPayment(req, shortSplit), req, nil)
-	assert.Equal(t, ErrAmountMismatch, verifyReason(t, resp, err))
+	assert.Equal(t, ErrAmountMismatch, splitVerifyReason(t, resp, err))
 
 	// Path 1 is exact for the primary too; overpayment needs Path 2.
 	overpaid, _ := p.buildTx(t, []solana.Instruction{
@@ -352,14 +377,14 @@ func TestSplits_Path1RejectsLegsOutOfOrderOrWrongCarveOut(t *testing.T) {
 		p.transfer(t, p.referrer, 10_000),
 	})
 	resp, err = scheme.Verify(context.Background(), splitPayment(req, overpaid), req, nil)
-	assert.Equal(t, ErrAmountMismatch, verifyReason(t, resp, err))
+	assert.Equal(t, ErrAmountMismatch, splitVerifyReason(t, resp, err))
 
 	missingLeg, _ := p.buildTx(t, []solana.Instruction{
 		p.transfer(t, p.merchant, 1_000_000),
 		p.transfer(t, p.platform, 40_000),
 	})
 	resp, err = scheme.Verify(context.Background(), splitPayment(req, missingLeg), req, nil)
-	assert.Equal(t, ErrTransactionInstructionsLength, verifyReason(t, resp, err))
+	assert.Equal(t, ErrTransactionInstructionsLength, splitVerifyReason(t, resp, err))
 }
 
 func TestSplits_Path1RejectsMixedAuthorities(t *testing.T) {
@@ -371,9 +396,11 @@ func TestSplits_Path1RejectsMixedAuthorities(t *testing.T) {
 		other.transfer(t, p.platform, 40_000),
 		p.transfer(t, p.referrer, 10_000),
 	}, other.payer)
-	resp, err := NewExactSvmScheme(p.signer(), &Config{MaxSplits: 8}).
+	// Raise the signature ceiling so the authority check, not the signer count, rejects it.
+	maxSignatures := uint8(3)
+	resp, err := NewExactSvmScheme(p.signer(), &Config{MaxSplits: 8, MaxRequiredSignatures: &maxSignatures}).
 		Verify(context.Background(), splitPayment(req, encoded), req, nil)
-	assert.Equal(t, ErrSplitAuthorityMismatch, verifyReason(t, resp, err))
+	assert.Equal(t, ErrSplitAuthorityMismatch, splitVerifyReason(t, resp, err))
 }
 
 func TestSplits_Path1RejectsFeePayerOutsideCreateIdempotent(t *testing.T) {
@@ -392,7 +419,7 @@ func TestSplits_Path1RejectsFeePayerOutsideCreateIdempotent(t *testing.T) {
 	})
 	resp, err := NewExactSvmScheme(p.signer(), &Config{MaxSplits: 8}).
 		Verify(context.Background(), splitPayment(req, encoded), req, nil)
-	assert.Contains(t, verifyReason(t, resp, err), ErrSmartWalletFeePayerNotIsolated)
+	assert.Contains(t, splitVerifyReason(t, resp, err), ErrSmartWalletFeePayerNotIsolated)
 }
 
 func TestSplits_Path1EnforcesSellerMemo(t *testing.T) {
@@ -411,7 +438,7 @@ func TestSplits_Path1EnforcesSellerMemo(t *testing.T) {
 		memoIx("inv-43"),
 	})
 	resp, err = scheme.Verify(context.Background(), splitPayment(req, wrong), req, nil)
-	assert.Equal(t, ErrMemoMismatch, verifyReason(t, resp, err))
+	assert.Equal(t, ErrMemoMismatch, splitVerifyReason(t, resp, err))
 }
 
 func TestSplits_EightSplitsVerify(t *testing.T) {
@@ -442,7 +469,7 @@ func TestSplits_RejectsCreateUnderDifferentTokenProgram(t *testing.T) {
 	})
 	resp, err := NewExactSvmScheme(p.signer(), &Config{MaxSplits: 8, AtaCreationSponsored: true}).
 		Verify(context.Background(), splitPayment(req, encoded), req, nil)
-	assert.Equal(t, ErrSplitAtaCreationNotAuthorized, verifyReason(t, resp, err))
+	assert.Equal(t, ErrSplitAtaCreationNotAuthorized, splitVerifyReason(t, resp, err))
 }
 
 func TestSplits_RejectsTransferWithTrailingSignerAccounts(t *testing.T) {
@@ -461,9 +488,11 @@ func TestSplits_RejectsTransferWithTrailingSignerAccounts(t *testing.T) {
 		p.transfer(t, p.referrer, 10_000),
 		memoIx("nonce"),
 	}, extraSigner)
-	resp, err := NewExactSvmScheme(p.signer(), &Config{MaxSplits: 8}).
+	// Raise the signature ceiling so the layout check, not the signer count, rejects it.
+	maxSignatures := uint8(3)
+	resp, err := NewExactSvmScheme(p.signer(), &Config{MaxSplits: 8, MaxRequiredSignatures: &maxSignatures}).
 		Verify(context.Background(), splitPayment(req, encoded), req, nil)
-	assert.Equal(t, ErrNoTransferInstruction, verifyReason(t, resp, err))
+	assert.Equal(t, ErrNoTransferInstruction, splitVerifyReason(t, resp, err))
 }
 
 // ─── Path 2 ─────────────────────────────────────────────────────────────────
@@ -543,17 +572,17 @@ func TestSplits_Path2RejectsUnexpectedTransferUnpaidLegAndDoublePayment(t *testi
 	}
 
 	resp, err := verifyWith(append(append([]rpc.CompiledInstruction{}, legs...), p.cpiTransfer(t, tx, stranger, 1))...)
-	assert.Equal(t, ErrSplitUnexpectedTransfer, verifyReason(t, resp, err))
+	assert.Equal(t, ErrSplitUnexpectedTransfer, splitVerifyReason(t, resp, err))
 
 	resp, err = verifyWith(legs[:2]...)
-	assert.Equal(t, ErrSplitLegUnmatched, verifyReason(t, resp, err))
+	assert.Equal(t, ErrSplitLegUnmatched, splitVerifyReason(t, resp, err))
 
 	resp, err = verifyWith(append(append([]rpc.CompiledInstruction{}, legs...), legs[1])...)
-	assert.Equal(t, ErrSmartWalletMultipleMatchingTransfers, verifyReason(t, resp, err))
+	assert.Equal(t, ErrSmartWalletMultipleMatchingTransfers, splitVerifyReason(t, resp, err))
 
 	// A split overpaid by one base unit pays no leg.
 	resp, err = verifyWith(legs[0], p.cpiTransfer(t, tx, p.platform, 40_001), legs[2])
-	assert.Equal(t, ErrSplitUnexpectedTransfer, verifyReason(t, resp, err))
+	assert.Equal(t, ErrSplitUnexpectedTransfer, splitVerifyReason(t, resp, err))
 
 	// The primary may be overpaid off the static path.
 	resp, err = verifyWith(p.cpiTransfer(t, tx, p.merchant, 1_000_001), legs[1], legs[2])
@@ -583,7 +612,7 @@ func TestSplits_Path2AcceptsSponsoredCreateNextToWalletInstruction(t *testing.T)
 	// Same creation, but the requirements do not mark the merchant.
 	unmarked := p.requirements(nil)
 	resp, err = scheme.Verify(context.Background(), splitPayment(unmarked, encoded), unmarked, nil)
-	assert.Equal(t, ErrSplitAtaCreationNotAuthorized, verifyReason(t, resp, err))
+	assert.Equal(t, ErrSplitAtaCreationNotAuthorized, splitVerifyReason(t, resp, err))
 }
 
 func TestSplits_Path2RejectsFeePayerInsideWalletInstruction(t *testing.T) {
@@ -596,7 +625,7 @@ func TestSplits_Path2RejectsFeePayerInsideWalletInstruction(t *testing.T) {
 	encoded, _ := p.buildTx(t, []solana.Instruction{leaky, memoIx("nonce")})
 	cfg := path2Config
 	resp, err := NewExactSvmScheme(p.signer(), &cfg).Verify(context.Background(), splitPayment(req, encoded), req, nil)
-	assert.Contains(t, verifyReason(t, resp, err), ErrSmartWalletFeePayerNotIsolated)
+	assert.Contains(t, splitVerifyReason(t, resp, err), ErrSmartWalletFeePayerNotIsolated)
 }
 
 func TestSplits_Path2SettlesOnlyWhenEveryCPILegIsConfirmed(t *testing.T) {
@@ -659,7 +688,7 @@ func TestSplits_Path2KeepsAtaProgramOffAllowlistForSinglePayee(t *testing.T) {
 	signer.inner = trace(3, p.cpiTransfer(t, tx, p.merchant, 1_050_000))
 	cfg := path2Config
 	resp, err := NewExactSvmScheme(signer, &cfg).Verify(context.Background(), splitPayment(req, encoded), req, nil)
-	assert.Contains(t, verifyReason(t, resp, err), ErrSmartWalletProgramNotAllowed)
+	assert.Contains(t, splitVerifyReason(t, resp, err), ErrSmartWalletProgramNotAllowed)
 }
 
 func TestSplits_PendingReconciliationConfirmsEveryLeg(t *testing.T) {

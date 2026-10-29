@@ -203,10 +203,12 @@ func verifyExpectedMemo(tx *solana.Transaction, optional []solana.CompiledInstru
 	return ""
 }
 
-// verifyStaticSplitPath is Path 1 for split charges (§5.7): compute limit,
-// compute price, K fee-payer-funded CreateIdempotent for marked recipients,
-// one TransferChecked for the primary remainder, one per split in
-// extra.splits order, then up to four Lighthouse / Memo instructions.
+// verifyStaticSplitPath is Path 1 for split charges (§5.7): on legacy and
+// version 0 a compute limit + compute price prefix (version 1 carries its
+// budget in the message config instead), K fee-payer-funded CreateIdempotent
+// for marked recipients, one TransferChecked for the primary remainder, one
+// per split in extra.splits order, then up to four Lighthouse / Memo
+// instructions.
 func (f *ExactSvmScheme) verifyStaticSplitPath(
 	ctx context.Context,
 	tx *solana.Transaction,
@@ -220,22 +222,29 @@ func (f *ExactSvmScheme) verifyStaticSplitPath(
 		return err == nil && programID.Equals(solana.SPLAssociatedTokenAccountProgramID)
 	}
 
+	prefixLength := staticTransferIndex(tx)
 	createCount := 0
-	for 2+createCount < len(instructions) && isAtaProgram(instructions[2+createCount]) {
+	for prefixLength+createCount < len(instructions) && isAtaProgram(instructions[prefixLength+createCount]) {
 		createCount++
 	}
-	firstTransfer := 2 + createCount
+	firstTransfer := prefixLength + createCount
 	firstOptional := firstTransfer + len(legs)
 	if len(instructions) < firstOptional || len(instructions) > firstOptional+4 {
 		return "", x402.NewVerifyError(ErrTransactionInstructionsLength, "",
 			fmt.Sprintf("transaction instructions length mismatch: %d not in [%d, %d]", len(instructions), firstOptional, firstOptional+4))
 	}
 
-	if err := f.verifyComputeLimitInstruction(tx, instructions[0]); err != nil {
-		return "", x402.NewVerifyError(err.Error(), "", err.Error())
-	}
-	if err := f.verifyComputePriceInstruction(tx, instructions[1]); err != nil {
-		return "", x402.NewVerifyError(err.Error(), "", err.Error())
+	if prefixLength == 0 {
+		if err := f.verifyTransactionV1Config(tx); err != nil {
+			return "", x402.NewVerifyError(err.Error(), "", err.Error())
+		}
+	} else {
+		if err := f.verifyComputeLimitInstruction(tx, instructions[0]); err != nil {
+			return "", x402.NewVerifyError(err.Error(), "", err.Error())
+		}
+		if err := f.verifyComputePriceInstruction(tx, instructions[1]); err != nil {
+			return "", x402.NewVerifyError(err.Error(), "", err.Error())
+		}
 	}
 
 	asset, err := solana.PublicKeyFromBase58(requirements.Asset)

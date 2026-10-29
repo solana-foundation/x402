@@ -36,9 +36,6 @@ const (
 	// MaxSplitMemoBytes is the maximum byte length of extra.splits[].memo.
 	MaxSplitMemoBytes = 566
 
-	// MaxTransactionBytes is the serialized size limit of a legacy or version-0 transaction.
-	MaxTransactionBytes = 1232
-
 	// AssociatedTokenProgramAddress is the SPL Associated Token Account program.
 	AssociatedTokenProgramAddress = "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL"
 

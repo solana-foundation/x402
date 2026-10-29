@@ -373,7 +373,6 @@ export class ExactEvmSchemeV1 implements SchemeNetworkFacilitator {
       };
     }
 
-    // Reject malleable high-s EOA signatures before broadcast (see verifyEIP3009).
     if (isPlainNonCanonicalEcdsaSignature(signature, isDeployedAtPayer)) {
       return {
         isValid: false,

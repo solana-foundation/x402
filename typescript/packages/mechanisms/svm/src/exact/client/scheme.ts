@@ -1,7 +1,3 @@
-import {
-  getSetComputeUnitLimitInstruction,
-  setTransactionMessageComputeUnitPrice,
-} from "@solana-program/compute-budget";
 import { TOKEN_PROGRAM_ADDRESS } from "@solana-program/token";
 import {
   findAssociatedTokenPda,
@@ -17,7 +13,6 @@ import {
   getTransactionEncoder,
   partiallySignTransactionMessageWithSigners,
   pipe,
-  prependTransactionMessageInstruction,
   setTransactionMessageFeePayer,
   setTransactionMessageLifetimeUsingBlockhash,
   type Address,
@@ -28,12 +23,16 @@ import {
   DEFAULT_COMPUTE_UNIT_LIMIT,
   DEFAULT_COMPUTE_UNIT_PRICE_MICROLAMPORTS,
   MAX_MEMO_BYTES,
-  MAX_TRANSACTION_BYTES,
   MEMO_PROGRAM_ADDRESS,
   SPLIT_TRANSFER_COMPUTE_UNITS,
 } from "../../constants";
 import type { ClientSvmConfig, ClientSvmSigner } from "../../signer";
 import type { ExactSvmPayloadV2 } from "../../types";
+import {
+  applyTransactionV1Config,
+  computeBudgetInstructions,
+  maxTransactionSize,
+} from "../../transactionV1";
 import { createRpcClient, resolveBlockhash, resolveTransactionVersion } from "../../utils";
 import { getCachedMintMetadata, type MintMetadataCache } from "../../mint-cache";
 import { findDefaultAsset } from "../../defaultAssets";
@@ -70,7 +69,10 @@ export class ExactSvmScheme implements SchemeNetworkClient {
     x402Version: number,
     paymentRequirements: PaymentRequirements,
   ): Promise<Pick<PaymentPayload, "x402Version" | "payload">> {
-    const transactionVersion = resolveTransactionVersion(paymentRequirements.extra);
+    const transactionVersion = resolveTransactionVersion(
+      paymentRequirements.extra,
+      this.config?.transactionVersions,
+    );
     const rpc = createRpcClient(paymentRequirements.network, this.config?.rpcUrl);
 
     // Validate splits before any other RPC work, and obtain consent for them
@@ -190,16 +192,26 @@ export class ExactSvmScheme implements SchemeNetworkClient {
       data: memoData,
     };
 
+    // Version 0 carries the budget as a ComputeBudget instruction prefix;
+    // version 1 carries it in the message config and has no such prefix.
+    const budget = {
+      computeUnitLimit,
+      computeUnitPriceMicroLamports: DEFAULT_COMPUTE_UNIT_PRICE_MICROLAMPORTS,
+    };
     const tx = pipe(
       createTransactionMessage({ version: transactionVersion }),
-      tx => setTransactionMessageComputeUnitPrice(DEFAULT_COMPUTE_UNIT_PRICE_MICROLAMPORTS, tx),
+      tx => applyTransactionV1Config(transactionVersion, budget, tx),
       tx => setTransactionMessageFeePayer(feePayer, tx),
       tx =>
-        prependTransactionMessageInstruction(
-          getSetComputeUnitLimitInstruction({ units: computeUnitLimit }),
+        appendTransactionMessageInstructions(
+          [
+            ...computeBudgetInstructions(transactionVersion, budget),
+            ...createIxs,
+            ...transferIxs,
+            memoIx,
+          ],
           tx,
         ),
-      tx => appendTransactionMessageInstructions([...createIxs, ...transferIxs, memoIx], tx),
       tx => setTransactionMessageLifetimeUsingBlockhash(latestBlockhash, tx),
     );
 
@@ -207,9 +219,10 @@ export class ExactSvmScheme implements SchemeNetworkClient {
     // Each split adds a transfer and possibly an ATA creation (§5.2); fail
     // here with the reason rather than send a transaction that cannot land.
     const size = getTransactionEncoder().encode(signedTransaction).byteLength;
-    if (size > MAX_TRANSACTION_BYTES) {
+    const sizeLimit = maxTransactionSize(transactionVersion);
+    if (size > sizeLimit) {
       throw new Error(
-        `Transaction is ${size} bytes, over the ${MAX_TRANSACTION_BYTES}-byte limit; reduce extra.splits or ATA creations`,
+        `Transaction is ${size} bytes, over the ${sizeLimit}-byte limit; reduce extra.splits or ATA creations`,
       );
     }
     const base64EncodedWireTransaction = getBase64EncodedWireTransaction(signedTransaction);

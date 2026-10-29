@@ -9,7 +9,6 @@ import (
 	"strconv"
 
 	solana "github.com/gagliardetto/solana-go"
-	computebudget "github.com/gagliardetto/solana-go/programs/compute-budget"
 	"github.com/gagliardetto/solana-go/programs/token"
 	"github.com/gagliardetto/solana-go/rpc"
 
@@ -63,7 +62,7 @@ func (c *ExactSvmScheme) CreatePaymentPayload(
 	if !svm.IsValidNetwork(networkStr) {
 		return types.PaymentPayload{}, fmt.Errorf(ErrUnsupportedNetwork+": %s", requirements.Network)
 	}
-	version, err := svm.ResolveTransactionVersion(requirements.Extra)
+	version, err := svm.ResolveTransactionVersionFor(requirements.Extra, c.config.ClientTransactionVersions())
 	if err != nil {
 		return types.PaymentPayload{}, err
 	}
@@ -125,10 +124,7 @@ func (c *ExactSvmScheme) CreatePaymentPayload(
 	}
 
 	// Find source ATA (client's token account)
-	sourceATA, _, err := solana.FindProgramAddress(
-		[][]byte{c.signer.Address().Bytes(), tokenProgramID.Bytes(), mintPubkey.Bytes()},
-		solana.SPLAssociatedTokenAccountProgramID,
-	)
+	sourceATA, err := findAssociatedTokenAddress(c.signer.Address(), tokenProgramID, mintPubkey)
 	if err != nil {
 		return types.PaymentPayload{}, fmt.Errorf(ErrFailedToDeriveSourceATA+": %w", err)
 	}
@@ -195,20 +191,6 @@ func (c *ExactSvmScheme) CreatePaymentPayload(
 		uint32(len(legs)-1)*svm.SplitTransferComputeUnits +
 		uint32(len(createIxs))*svm.AtaCreationComputeUnits
 
-	cuLimit, err := computebudget.NewSetComputeUnitLimitInstructionBuilder().
-		SetUnits(computeUnitLimit).
-		ValidateAndBuild()
-	if err != nil {
-		return types.PaymentPayload{}, fmt.Errorf(ErrFailedToBuildComputeLimitIx+": %w", err)
-	}
-
-	cuPrice, err := computebudget.NewSetComputeUnitPriceInstructionBuilder().
-		SetMicroLamports(svm.DefaultComputeUnitPriceMicrolamports).
-		ValidateAndBuild()
-	if err != nil {
-		return types.PaymentPayload{}, fmt.Errorf(ErrFailedToBuildComputePriceIx+": %w", err)
-	}
-
 	// Memo instruction: use seller-defined memo from extra.memo, or random nonce for uniqueness
 	var memoPayload []byte
 	if memoStr, ok := requirements.Extra["memo"].(string); ok && memoStr != "" {
@@ -229,38 +211,20 @@ func (c *ExactSvmScheme) CreatePaymentPayload(
 		memoPayload,
 	)
 
-	// Create final transaction
-	builder := solana.NewTransactionBuilder().
-		AddInstruction(cuLimit).
-		AddInstruction(cuPrice)
-	for _, ix := range createIxs {
-		builder = builder.AddInstruction(ix)
-	}
-	for _, ix := range transferIxs {
-		builder = builder.AddInstruction(ix)
-	}
-	tx, err := builder.
-		AddInstruction(memoIx).
-		SetRecentBlockHash(recentBlockhash).
-		SetFeePayer(feePayer).
-		Build()
+	// Build the highest message version shared with extra.transactionVersions
+	// (version 0 when absent). Version 0 carries the compute budget as
+	// ComputeBudget instructions; version 1 carries it in the message config.
+	instructions := append(append(createIxs, transferIxs...), memoIx)
+	tx, err := svm.BuildClientTransaction(
+		version,
+		feePayer,
+		recentBlockhash,
+		instructions,
+		computeUnitLimit,
+		svm.DefaultComputeUnitPriceMicrolamports,
+	)
 	if err != nil {
 		return types.PaymentPayload{}, fmt.Errorf(ErrFailedToCreateTransaction+": %w", err)
-	}
-
-	// Build the message version the facilitator advertised in
-	// extra.transactionVersions (version 0 when absent). This client only
-	// produces version 0; a facilitator that accepts no version it can build
-	// is reported before signing.
-	tx.Message.SetVersion(version)
-
-	// Each split adds a transfer and possibly an ATA creation (§5.2); refuse to
-	// sign a transaction that cannot land rather than fail at the facilitator.
-	if size, err := serializedSize(tx); err != nil {
-		return types.PaymentPayload{}, fmt.Errorf(ErrFailedToCreateTransaction+": %w", err)
-	} else if size > svm.MaxTransactionBytes {
-		return types.PaymentPayload{}, fmt.Errorf("%s: transaction is %d bytes, over the %d-byte limit; reduce extra.splits or ATA creations",
-			ErrTransactionTooLarge, size, svm.MaxTransactionBytes)
 	}
 
 	// Partially sign with client's key
@@ -274,6 +238,14 @@ func (c *ExactSvmScheme) CreatePaymentPayload(
 		return types.PaymentPayload{}, fmt.Errorf(ErrFailedToEncodeTransaction+": %w", err)
 	}
 
+	// Each split adds a transfer and possibly an ATA creation (§5.2); refuse a
+	// transaction over its version's size limit (1232 bytes for version 0, 4096
+	// for version 1) rather than fail at the facilitator.
+	if size, limit, exceeded := svm.TransactionSizeExceeded(base64Tx, version); exceeded {
+		return types.PaymentPayload{}, fmt.Errorf("%s: transaction is %d bytes, over the %d-byte limit; reduce extra.splits or ATA creations",
+			ErrTransactionTooLarge, size, limit)
+	}
+
 	// Create SVM payload
 	svmPayload := &svm.ExactSvmPayload{
 		Transaction: base64Tx,
@@ -284,6 +256,14 @@ func (c *ExactSvmScheme) CreatePaymentPayload(
 		X402Version: 2,
 		Payload:     svmPayload.ToMap(),
 	}, nil
+}
+
+func findAssociatedTokenAddress(owner, tokenProgram, mint solana.PublicKey) (solana.PublicKey, error) {
+	account, _, err := solana.FindProgramAddress(
+		[][]byte{owner.Bytes(), tokenProgram.Bytes(), mint.Bytes()},
+		solana.SPLAssociatedTokenAccountProgramID,
+	)
+	return account, err
 }
 
 func (c *ExactSvmScheme) resolveRecentBlockhash(
@@ -342,18 +322,4 @@ func accountExists(ctx context.Context, rpcClient *rpc.Client, address solana.Pu
 		Commitment: rpc.CommitmentConfirmed,
 	})
 	return err == nil && out != nil && out.Value != nil
-}
-
-// serializedSize is the wire size of tx once every required signature is present.
-func serializedSize(tx *solana.Transaction) (int, error) {
-	message, err := tx.Message.MarshalBinary()
-	if err != nil {
-		return 0, err
-	}
-	signatures := int(tx.Message.Header.NumRequiredSignatures)
-	compactLen := 1
-	for n := signatures >> 7; n > 0; n >>= 7 {
-		compactLen++
-	}
-	return compactLen + signatures*64 + len(message), nil
 }

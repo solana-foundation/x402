@@ -1,17 +1,13 @@
 """SVM client implementation for the Exact payment scheme (V2)."""
 
-import base64
 import binascii
 import os
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import Any
 
 try:
-    from solana.rpc.api import Client as SolanaClient
     from solders.instruction import AccountMeta, Instruction
     from solders.pubkey import Pubkey
-    from solders.signature import Signature
-    from solders.transaction import VersionedTransaction
 except ImportError as e:
     raise ImportError(
         "SVM mechanism requires solana packages. Install with: pip install x402[svm]"
@@ -21,11 +17,10 @@ from ....schemas import PaymentRequirements
 from ..constants import (
     ASSOCIATED_TOKEN_PROGRAM_ADDRESS,
     ATA_CREATION_COMPUTE_UNITS,
-    COMPUTE_BUDGET_PROGRAM_ADDRESS,
     DEFAULT_COMPUTE_UNIT_LIMIT,
-    DEFAULT_COMPUTE_UNIT_PRICE_MICROLAMPORTS,
     MAX_MEMO_BYTES,
-    MAX_TRANSACTION_BYTES,
+    MAX_TRANSACTION_SIZE_V0,
+    MAX_TRANSACTION_SIZE_V1,
     MEMO_PROGRAM_ADDRESS,
     SCHEME_EXACT,
     SPLIT_TRANSFER_COMPUTE_UNITS,
@@ -33,15 +28,19 @@ from ..constants import (
 )
 from ..default_assets import find_default_asset
 from ..mint_cache import MintMetadataCache, get_cached_mint_metadata
+from ..rpc import SvmRpcClient
 from ..signer import ClientSvmSigner
 from ..types import ExactSvmPayload
 from ..utils import (
     compile_payment_message,
     derive_ata,
+    encode_partially_signed_transaction,
     get_network_config,
+    normalize_client_transaction_versions,
     normalize_network,
     resolve_blockhash,
     resolve_transaction_version,
+    transaction_size_exceeded,
 )
 from .splits import get_splits, parse_payment_legs, uses_split_terms
 
@@ -74,6 +73,7 @@ class ExactSvmScheme:
         self,
         signer: ClientSvmSigner,
         rpc_url: str | None = None,
+        transaction_versions: Sequence[int] | None = None,
         approve_splits: ApproveSplits | None = None,
     ):
         """Create ExactSvmScheme.
@@ -81,18 +81,22 @@ class ExactSvmScheme:
         Args:
             signer: SVM signer for payment authorizations.
             rpc_url: Optional custom RPC URL.
+            transaction_versions: Transaction message versions this client's
+                signer can build (``0`` and/or ``1``). Defaults to both; the
+                highest version the facilitator also advertises is built.
             approve_splits: Consent hook for requirements carrying
                 ``extra.splits`` (see :data:`ApproveSplits`). When unset,
                 requirements with splits are refused: a server could otherwise
                 inject recipients and divert part of the payment.
         """
         self._signer = signer
+        self._transaction_versions = normalize_client_transaction_versions(transaction_versions)
         self._approve_splits = approve_splits
         self._custom_rpc_url = rpc_url
-        self._clients: dict[str, SolanaClient] = {}
+        self._clients: dict[str, SvmRpcClient] = {}
         self._mint_cache: MintMetadataCache = {}
 
-    def _get_client(self, network: str) -> SolanaClient:
+    def _get_client(self, network: str) -> SvmRpcClient:
         """Get or create RPC client for network.
 
         Args:
@@ -111,7 +115,7 @@ class ExactSvmScheme:
         else:
             rpc_url = get_network_config(network)["rpc_url"]
 
-        client = SolanaClient(rpc_url)
+        client = SvmRpcClient(rpc_url)
         self._clients[caip2_network] = client
         return client
 
@@ -133,7 +137,7 @@ class ExactSvmScheme:
         """
         network = str(requirements.network)
         extra = requirements.extra or {}
-        transaction_version = resolve_transaction_version(extra)
+        transaction_version = resolve_transaction_version(extra, self._transaction_versions)
 
         # Validate splits before any RPC work, and obtain consent for them (§5.6).
         split_terms = uses_split_terms(requirements)
@@ -178,9 +182,6 @@ class ExactSvmScheme:
         source_ata_str = derive_ata(self._signer.address, requirements.asset, str(token_program))
         source_ata = Pubkey.from_string(source_ata_str)
 
-        # Build instructions
-        compute_budget_program = Pubkey.from_string(COMPUTE_BUDGET_PROGRAM_ADDRESS)
-
         def transfer_checked(owner: str, amount: int) -> Instruction:
             # Data: [12 (discriminator), u64 amount (little-endian), u8 decimals]
             dest_ata = Pubkey.from_string(derive_ata(owner, requirements.asset, str(token_program)))
@@ -224,26 +225,6 @@ class ExactSvmScheme:
             payment_ixs = [transfer_checked(requirements.pay_to, int(requirements.amount))]
             compute_unit_limit = DEFAULT_COMPUTE_UNIT_LIMIT
 
-        # 1. SetComputeUnitLimit instruction
-        # Data: [2 (discriminator), u32 units (little-endian)]
-        set_cu_limit_data = bytes([2]) + compute_unit_limit.to_bytes(4, "little")
-        set_cu_limit_ix = Instruction(
-            program_id=compute_budget_program,
-            accounts=[],
-            data=set_cu_limit_data,
-        )
-
-        # 2. SetComputeUnitPrice instruction
-        # Data: [3 (discriminator), u64 microLamports (little-endian)]
-        set_cu_price_data = bytes([3]) + DEFAULT_COMPUTE_UNIT_PRICE_MICROLAMPORTS.to_bytes(
-            8, "little"
-        )
-        set_cu_price_ix = Instruction(
-            program_id=compute_budget_program,
-            accounts=[],
-            data=set_cu_price_data,
-        )
-
         # Memo instruction: use seller-defined memo from extra.memo, or random nonce for uniqueness
         seller_memo = extra.get("memo")
         if seller_memo and isinstance(seller_memo, str):
@@ -264,31 +245,25 @@ class ExactSvmScheme:
         message = compile_payment_message(
             transaction_version,
             payer=fee_payer,
-            instructions=[set_cu_limit_ix, set_cu_price_ix, *payment_ixs, memo_ix],
+            instructions=[*payment_ixs, memo_ix],
             recent_blockhash=blockhash,
+            compute_unit_limit=compute_unit_limit,
         )
 
-        # Create a partially-signed transaction
-        # Signers: index 0 = fee_payer (facilitator), index 1 = payer_pubkey (client)
-        # For VersionedTransaction with MessageV0, prepend 0x80 version byte before signing
-        msg_bytes_with_version = bytes([0x80]) + bytes(message)
-        client_signature = self._signer.keypair.sign_message(msg_bytes_with_version)
-
-        # Client is at index 1, fee_payer placeholder at index 0
-        signatures = [Signature.default(), client_signature]
-        tx = VersionedTransaction.populate(message, signatures)
+        # Partially sign as the token authority; the facilitator fills the
+        # fee-payer slot (index 0) at settlement.
+        tx_base64 = encode_partially_signed_transaction(message, self._signer.keypair)
 
         # Each split adds a transfer and possibly an ATA creation (§5.2); fail
         # here with the reason rather than send a transaction that cannot land.
-        tx_bytes = bytes(tx)
-        if len(tx_bytes) > MAX_TRANSACTION_BYTES:
+        size_limit = (
+            MAX_TRANSACTION_SIZE_V1 if transaction_version == 1 else MAX_TRANSACTION_SIZE_V0
+        )
+        if transaction_size_exceeded(tx_base64, transaction_version):
             raise ValueError(
-                f"Transaction is {len(tx_bytes)} bytes, over the {MAX_TRANSACTION_BYTES}-byte "
-                "limit; reduce extra.splits or ATA creations"
+                f"Transaction is over the {size_limit}-byte limit; reduce extra.splits or "
+                "ATA creations"
             )
-
-        # Encode to base64
-        tx_base64 = base64.b64encode(tx_bytes).decode("utf-8")
 
         payload = ExactSvmPayload(transaction=tx_base64)
 
@@ -296,7 +271,7 @@ class ExactSvmScheme:
         return payload.to_dict()
 
     @staticmethod
-    def _account_exists(client: SolanaClient, address: Pubkey) -> bool:
+    def _account_exists(client: SvmRpcClient, address: Pubkey) -> bool:
         """Whether an account exists.
 
         An RPC failure counts as "not confirmed", so the caller includes the

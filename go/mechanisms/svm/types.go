@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
+	"strconv"
 
 	solana "github.com/gagliardetto/solana-go"
 	"github.com/gagliardetto/solana-go/rpc"
@@ -97,6 +99,16 @@ func (p *UptoSvmPayload) ToMap() map[string]interface{} {
 // UptoPayloadFromMap decodes an UptoSvmPayload and validates that every
 // required field is present with the expected type.
 func UptoPayloadFromMap(data map[string]interface{}) (*UptoSvmPayload, error) {
+	// The scheme types openSlot as a JSON number; clients emit the decimal
+	// string, which stays exact above 2^53. Accept both.
+	if slot, ok := uptoOpenSlotString(data["openSlot"]); ok {
+		normalized := make(map[string]interface{}, len(data))
+		for key, value := range data {
+			normalized[key] = value
+		}
+		normalized["openSlot"] = slot
+		data = normalized
+	}
 	jsonBytes, err := json.Marshal(data)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal payload data: %w", err)
@@ -135,11 +147,16 @@ func UptoPayloadFromMap(data map[string]interface{}) (*UptoSvmPayload, error) {
 func IsUptoSvmPayload(payload map[string]interface{}) bool {
 	stringFields := []string{
 		"from", "maxAmount", "deposit", "channelId",
-		"authorizedSigner", "openTransaction", "openSlot", "nonce",
+		"authorizedSigner", "openTransaction", "nonce",
 	}
 	for _, field := range stringFields {
 		value, ok := payload[field].(string)
 		if !ok || value == "" {
+			return false
+		}
+	}
+	if slot, ok := payload["openSlot"].(string); !ok || slot == "" {
+		if _, numeric := uptoOpenSlotString(payload["openSlot"]); !numeric {
 			return false
 		}
 	}
@@ -161,6 +178,40 @@ func IsUptoSvmPayload(payload map[string]interface{}) bool {
 		}
 	}
 	return true
+}
+
+// uptoOpenSlotString renders a numeric openSlot (a JSON number decoded as
+// float64, an integer, or a json.Number) as its decimal string. It reports
+// false for a string, a negative or fractional number, and a float64 above
+// 2^53, which JSON decoding may already have rounded.
+func uptoOpenSlotString(value interface{}) (string, bool) {
+	switch v := value.(type) {
+	case float64:
+		if v < 0 || v != math.Trunc(v) || v > 1<<53 {
+			return "", false
+		}
+		return strconv.FormatUint(uint64(v), 10), true
+	case int:
+		if v < 0 {
+			return "", false
+		}
+		return strconv.Itoa(v), true
+	case int64:
+		if v < 0 {
+			return "", false
+		}
+		return strconv.FormatInt(v, 10), true
+	case uint64:
+		return strconv.FormatUint(v, 10), true
+	case json.Number:
+		parsed, err := strconv.ParseUint(v.String(), 10, 64)
+		if err != nil {
+			return "", false
+		}
+		return strconv.FormatUint(parsed, 10), true
+	default:
+		return "", false
+	}
 }
 
 func jsonNumberIsInt64(value interface{}) bool {
@@ -397,6 +448,10 @@ type AssetInfo struct {
 // ClientConfig contains optional client configuration
 type ClientConfig struct {
 	RPCURL string // Custom RPC URL
+	// TransactionVersions narrows the transaction message versions this client
+	// builds (entries 0 and/or 1), for a signer that cannot sign version 1.
+	// Nil means ClientSupportedTransactionVersions.
+	TransactionVersions []int
 
 	// ApproveSplits is the consent hook for multi-payee splits
 	// (scheme_exact_svm.md §5.6). It is called before signing whenever the
@@ -408,6 +463,15 @@ type ClientConfig struct {
 	// When nil, requirements with splits are refused: a server could otherwise
 	// inject recipients and divert part of the payment.
 	ApproveSplits func(ctx context.Context, splits []SplitTerms, info SplitApprovalInfo) bool
+}
+
+// ClientTransactionVersions returns the configured client version set, or nil
+// for the default.
+func (c *ClientConfig) ClientTransactionVersions() []int {
+	if c == nil {
+		return nil
+	}
+	return c.TransactionVersions
 }
 
 // SplitTerms is one extra.splits entry as presented for consent.

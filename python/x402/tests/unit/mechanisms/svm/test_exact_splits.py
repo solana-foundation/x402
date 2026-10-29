@@ -11,7 +11,7 @@ import pytest
 from solders.hash import Hash
 from solders.instruction import AccountMeta, Instruction
 from solders.keypair import Keypair
-from solders.message import MessageV0
+from solders.message import MessageV0, MessageV1
 from solders.pubkey import Pubkey
 from solders.signature import Signature
 from solders.transaction import VersionedTransaction
@@ -501,13 +501,13 @@ class TestFacilitatorWithSplits:
     def test_advertises_split_capabilities_only_when_configured(self, p):
         assert facilitator(p).get_extra(SOLANA_DEVNET_CAIP2) == {
             "feePayer": addr(p.fee_payer),
-            "transactionVersions": [0],
+            "transactionVersions": [0, 1],
         }
         assert facilitator(p, max_splits=8, ata_creation_sponsored=True).get_extra(
             SOLANA_DEVNET_CAIP2
         ) == {
             "feePayer": addr(p.fee_payer),
-            "transactionVersions": [0],
+            "transactionVersions": [0, 1],
             "maxSplits": 8,
             "ataCreationSponsored": True,
         }
@@ -534,6 +534,30 @@ class TestFacilitatorWithSplits:
             sum(ix[0] == ASSOCIATED_TOKEN_PROGRAM_ADDRESS for ix in decoded_instructions(tx)) == 2
         )
         result = facilitator(p, max_splits=1, ata_creation_sponsored=True).verify(
+            payment(req, tx), req
+        )
+        assert result.is_valid, result.invalid_reason
+
+    def test_accepts_a_version_1_charge_with_sponsored_ata_creation(self, p):
+        req = requirements(
+            p,
+            transactionVersions=[0, 1],
+            splits=[
+                {"payTo": addr(p.platform), "amount": "40000", "ataCreationRequired": True},
+                {"payTo": addr(p.referrer), "amount": "10000"},
+            ],
+        )
+        tx = client_payload(p, req)
+        assert isinstance(VersionedTransaction.from_bytes(base64.b64decode(tx)).message, MessageV1)
+        # Version 1 has no ComputeBudget prefix: one creation, three transfers, memo.
+        assert [ix[0] for ix in decoded_instructions(tx)] == [
+            ASSOCIATED_TOKEN_PROGRAM_ADDRESS,
+            TOKEN_PROGRAM_ADDRESS,
+            TOKEN_PROGRAM_ADDRESS,
+            TOKEN_PROGRAM_ADDRESS,
+            MEMO_PROGRAM_ADDRESS,
+        ]
+        result = facilitator(p, max_splits=2, ata_creation_sponsored=True).verify(
             payment(req, tx), req
         )
         assert result.is_valid, result.invalid_reason

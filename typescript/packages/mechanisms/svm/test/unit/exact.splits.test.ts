@@ -17,10 +17,13 @@ import {
   decompileTransactionMessage,
   generateKeyPairSigner,
   getBase64EncodedWireTransaction,
+  getBase64Encoder,
   getCompiledTransactionMessageDecoder,
+  getTransactionDecoder,
   partiallySignTransactionMessageWithSigners,
   pipe,
   prependTransactionMessageInstruction,
+  setTransactionMessageConfig,
   setTransactionMessageFeePayer,
   setTransactionMessageLifetimeUsingBlockhash,
   type Address,
@@ -137,12 +140,13 @@ function facilitatorSigner(feePayer: string): FacilitatorSvmSigner {
   } as unknown as FacilitatorSvmSigner;
 }
 
+function compiledOf(base64: string) {
+  const { messageBytes } = getTransactionDecoder().decode(getBase64Encoder().encode(base64));
+  return getCompiledTransactionMessageDecoder().decode(messageBytes);
+}
+
 function instructionsOf(base64: string) {
-  const bytes = Uint8Array.from(Buffer.from(base64, "base64"));
-  // Wire format: compact-u16 signature count, 64 bytes per signature, message.
-  const messageBytes = bytes.slice(1 + bytes[0] * 64);
-  const compiled = getCompiledTransactionMessageDecoder().decode(messageBytes);
-  return decompileTransactionMessage(compiled).instructions;
+  return decompileTransactionMessage(compiledOf(base64)).instructions;
 }
 
 async function ata(owner: string): Promise<Address> {
@@ -438,7 +442,7 @@ describe("exact facilitator with splits", () => {
     const signer = facilitatorSigner(p.feePayer.address);
     expect(new ExactSvmFacilitator(signer).getExtra(SOLANA_DEVNET_CAIP2)).toEqual({
       feePayer: p.feePayer.address,
-      transactionVersions: [0],
+      transactionVersions: [0, 1],
     });
     expect(
       new ExactSvmFacilitator(signer, undefined, {
@@ -447,7 +451,7 @@ describe("exact facilitator with splits", () => {
       }).getExtra(SOLANA_DEVNET_CAIP2),
     ).toEqual({
       feePayer: p.feePayer.address,
-      transactionVersions: [0],
+      transactionVersions: [0, 1],
       maxSplits: 8,
       ataCreationSponsored: true,
     });
@@ -476,6 +480,80 @@ describe("exact facilitator with splits", () => {
     });
     const result = await facilitator.verify(payment(req, await clientTransaction(p, req)), req);
     expect(result).toMatchObject({ isValid: true });
+  });
+
+  it("builds and accepts a version-1 split charge with sponsored ATA creation", async () => {
+    const p = await parties();
+    const req = requirements(p, {
+      transactionVersions: [0, 1],
+      splits: [
+        { payTo: p.platform.address, amount: "40000", ataCreationRequired: true },
+        { payTo: p.referrer.address, amount: "10000" },
+      ],
+    });
+    const tx = await clientTransaction(p, req);
+    expect(compiledOf(tx).version).toBe(1);
+    // Version 1 has no ComputeBudget prefix: 1 creation, 3 transfers, memo.
+    const programs = instructionsOf(tx).map(ix => ix.programAddress.toString());
+    expect(programs).toEqual([
+      ASSOCIATED_TOKEN_PROGRAM_ADDRESS,
+      TOKEN_PROGRAM_ADDRESS,
+      TOKEN_PROGRAM_ADDRESS,
+      TOKEN_PROGRAM_ADDRESS,
+      MEMO_PROGRAM_ADDRESS,
+    ]);
+
+    const facilitator = new ExactSvmFacilitator(facilitatorSigner(p.feePayer.address), undefined, {
+      maxSplits: 2,
+      ataCreationSponsored: true,
+    });
+    expect(await facilitator.verify(payment(req, tx), req)).toMatchObject({
+      isValid: true,
+      payer: p.payer.address,
+    });
+  });
+
+  it("rejects a version-1 split charge carrying a ComputeBudget instruction", async () => {
+    const p = await parties();
+    const req = requirements(p);
+    const tx = pipe(
+      createTransactionMessage({ version: 1 }),
+      m =>
+        setTransactionMessageConfig(
+          { computeUnitLimit: 60_000, loadedAccountsDataSizeLimit: 4_194_304 },
+          m,
+        ),
+      m => setTransactionMessageFeePayer(p.feePayer.address, m),
+      m =>
+        appendTransactionMessageInstructions(
+          [getSetComputeUnitLimitInstruction({ units: 60_000 })],
+          m,
+        ),
+    );
+    const withLegs = appendTransactionMessageInstructions(
+      [
+        await transfer(p, p.merchant.address, 1_000_000n),
+        await transfer(p, p.platform.address, 40_000n),
+        await transfer(p, p.referrer.address, 10_000n),
+        memo("nonce"),
+      ],
+      tx,
+    );
+    const signed = await partiallySignTransactionMessageWithSigners(
+      setTransactionMessageLifetimeUsingBlockhash(
+        { blockhash: BLOCKHASH as Blockhash, lastValidBlockHeight: 1n },
+        withLegs,
+      ),
+    );
+    const facilitator = new ExactSvmFacilitator(facilitatorSigner(p.feePayer.address), undefined, {
+      maxSplits: 8,
+    });
+    expect(
+      await facilitator.verify(payment(req, getBase64EncodedWireTransaction(signed)), req),
+    ).toMatchObject({
+      isValid: false,
+      invalidReason: Errors.ErrTransactionV1ComputeBudgetInstruction,
+    });
   });
 
   it("rejects splits beyond the advertised maxSplits, and unadvertised sponsorship", async () => {
@@ -646,8 +724,10 @@ describe("exact facilitator with splits", () => {
       await transfer(p, p.referrer.address, 10_000n),
       memo("nonce"),
     ]);
+    // Raise the signature ceiling so the layout check, not the signer count, rejects it.
     const facilitator = new ExactSvmFacilitator(facilitatorSigner(p.feePayer.address), undefined, {
       maxSplits: 8,
+      maxRequiredSignatures: 3,
     });
     expect(await facilitator.verify(payment(req, tx), req)).toMatchObject({
       isValid: false,
@@ -1110,9 +1190,10 @@ describe("split rule edges", () => {
         await transfer(p, p.referrer.address, 10_000n),
         memo("nonce"),
       ]);
-      expect((await facilitatorFor(p).verify(payment(req, mixed), req)).invalidReason).toBe(
-        Errors.ErrSplitAuthorityMismatch,
-      );
+      expect(
+        (await facilitatorFor(p, { maxRequiredSignatures: 3 }).verify(payment(req, mixed), req))
+          .invalidReason,
+      ).toBe(Errors.ErrSplitAuthorityMismatch);
     });
 
     it("rejects a wrong mint, an unknown tail instruction, and the fee payer in a memo", async () => {

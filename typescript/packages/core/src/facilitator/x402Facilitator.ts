@@ -150,8 +150,8 @@ export class x402Facilitator {
   }
 
   /**
-   * Register a hook to execute after successful facilitator payment verification (isValid: true).
-   * This hook is NOT called when verification fails (isValid: false) - use onVerifyFailure for that.
+   * Register a hook to execute after verification returns a result, including
+   * `isValid: false`. A thrown verification error uses `onVerifyFailure` instead.
    *
    * @param hook - The hook function to register
    * @returns The x402Facilitator instance for chaining
@@ -162,8 +162,8 @@ export class x402Facilitator {
   }
 
   /**
-   * Register a hook to execute when facilitator payment verification fails.
-   * Called when: verification returns isValid: false, or an exception is thrown during verification.
+   * Register a hook to execute when verification throws.
+   * It does not run for a result with `isValid: false`. Use `onAfterVerify` for that rejection.
    * Can recover from failure by returning { recovered: true, result: VerifyResponse }
    *
    * @param hook - The hook function to register
@@ -338,35 +338,6 @@ export class x402Facilitator {
         facilitatorContext,
       );
 
-      // Check if verification failed (isValid: false)
-      if (!verifyResult.isValid) {
-        const reason = verifyResult.invalidReason || "Verification failed";
-        const detail = verifyResult.invalidMessage;
-        const failureContext: FacilitatorVerifyFailureContext = {
-          ...context,
-          error: new Error(detail ? `${reason}: ${detail}` : reason),
-        };
-
-        // Execute onVerifyFailure hooks
-        for (const hook of this.onVerifyFailureHooks) {
-          const result = await hook(failureContext);
-          if (result && "recovered" in result && result.recovered) {
-            // If recovered, execute afterVerify hooks with recovered result
-            const recoveredContext: FacilitatorVerifyResultContext = {
-              ...context,
-              result: result.result,
-            };
-            for (const hook of this.afterVerifyHooks) {
-              await hook(recoveredContext);
-            }
-            return result.result;
-          }
-        }
-
-        return verifyResult;
-      }
-
-      // Execute afterVerify hooks only for successful verification
       const resultContext: FacilitatorVerifyResultContext = {
         ...context,
         result: verifyResult,

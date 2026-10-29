@@ -312,12 +312,9 @@ func TestSplitsEightFitAndOversizedChargeIsRefused(t *testing.T) {
 	require.NoError(t, err)
 	raw, err := base64.StdEncoding.DecodeString(payload.Payload["transaction"].(string))
 	require.NoError(t, err)
-	assert.LessOrEqual(t, len(raw), svm.MaxTransactionBytes)
+	assert.LessOrEqual(t, len(raw), svm.MaxTransactionSizeLegacy)
 	decoded := decodePayloadTx(t, payload)
 	assert.Len(t, decoded.Message.Instructions, 2+9+1)
-	size, err := serializedSize(decoded)
-	require.NoError(t, err)
-	assert.Equal(t, len(raw), size, "pre-sign size estimate must equal the signed wire size")
 
 	_, err = client.CreatePaymentPayload(context.Background(), p.requirements(map[string]interface{}{
 		"ataCreationRequired": true,

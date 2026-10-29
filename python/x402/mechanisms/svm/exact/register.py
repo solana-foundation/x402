@@ -1,5 +1,6 @@
 """Registration helpers for SVM exact payment schemes."""
 
+from collections.abc import Sequence
 from typing import TYPE_CHECKING, TypeVar
 
 from ....schemas.helpers import matches_network_pattern
@@ -123,6 +124,7 @@ def register_exact_svm_facilitator(
     networks: str | list[str],
     max_splits: int = 0,
     ata_creation_sponsored: bool = False,
+    transaction_versions: Sequence[int] | None = None,
 ) -> FacilitatorT:
     """Register SVM exact payment schemes to x402Facilitator.
 
@@ -140,6 +142,9 @@ def register_exact_svm_facilitator(
         max_splits: Maximum ``extra.splits`` entries the V2 scheme accepts (0-8).
         ata_creation_sponsored: Whether the V2 scheme's fee payer funds ATA
             creation for recipients marked ``ataCreationRequired``.
+        transaction_versions: Transaction message versions to accept and
+            advertise, applied to both the V2 and V1 schemes. Defaults to
+            ``[0, 1]``.
 
     Returns:
         Facilitator for chaining.
@@ -155,6 +160,7 @@ def register_exact_svm_facilitator(
         settlement_cache,
         max_splits=max_splits,
         ata_creation_sponsored=ata_creation_sponsored,
+        transaction_versions=transaction_versions,
     )
 
     if isinstance(networks, str):
@@ -162,7 +168,9 @@ def register_exact_svm_facilitator(
     facilitator.register(networks, scheme)
 
     # Register V1
-    v1_scheme = ExactSvmFacilitatorSchemeV1(signer, settlement_cache)
+    v1_scheme = ExactSvmFacilitatorSchemeV1(
+        signer, settlement_cache, transaction_versions=transaction_versions
+    )
     facilitator.register_v1(V1_NETWORKS, v1_scheme)
 
     return facilitator
