@@ -72,10 +72,10 @@ export async function verifyRequiredSignatures(
  * @param messageBytes - Transaction message bytes the signature covers
  * @returns Whether the signature is valid
  */
-async function verifyEd25519(
+export async function verifyEd25519(
   address: string,
-  signature: Uint8Array,
-  messageBytes: Uint8Array,
+  signature: Parameters<typeof verifySignature>[1],
+  messageBytes: Parameters<typeof verifySignature>[2],
 ): Promise<boolean> {
   try {
     const publicKeyBytes = addressEncoder.encode(address as Address);

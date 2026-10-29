@@ -15,6 +15,9 @@ const baseConfig = {
     "batch-settlement/client/index": "src/batch-settlement/client/index.ts",
     "batch-settlement/server/index": "src/batch-settlement/server/index.ts",
     "batch-settlement/facilitator/index": "src/batch-settlement/facilitator/index.ts",
+    "atomic-batch/client/index": "src/atomic-batch/client/index.ts",
+    "atomic-batch/server/index": "src/atomic-batch/server/index.ts",
+    "atomic-batch/facilitator/index": "src/atomic-batch/facilitator/index.ts",
   },
   dts: {
     resolve: true,

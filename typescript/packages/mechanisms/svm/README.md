@@ -6,6 +6,7 @@ SVM (Solana Virtual Machine) implementation of the x402 payment protocol.
 - **Exact** — fixed-price SPL Token transfers (client pays the advertised amount)
 - **Upto** — usage-based billing via [payment-channels](https://github.com/solana-foundation/payment-channels) (client authorizes a max; server settles actual usage)
 - **Batch settlement** — long-lived payment channels with cumulative vouchers and periodic payouts
+- **Atomic Batch** — multi-recipient payments in one transaction (client signs once; every item settles or none does)
 
 ## Installation
 
@@ -80,6 +81,16 @@ After distribution, `BatchChannelManager` reads the confirmed channel payout wat
 Custom signers should return the execution slot from `confirmTransaction`, honor `minContextSlot`, and implement `getConfirmedTransaction` with confirmed token-balance metadata. The default adapter supports these capabilities. Missing payout metadata leaves the original transaction pending.
 
 When a sealed channel's receiver is also the refund recipient or protocol treasury, aggregate token balances can combine earnings with other credits. That payout is answered with `invalid_batch_settlement_svm_payout_attribution_ambiguous` and the transaction signature instead of the combined amount, and the sweep queue is released so later sweeps of those channels are not blocked. The transaction has completed onchain: reconcile it by signature, and never repeat it as a replacement payment. The `onDistributionConfirmed` callback is not invoked for it because no amount can be attributed.
+
+### Atomic Batch Scheme (`@x402/svm/atomic-batch/*`)
+
+Multi-recipient payments: the requirements enumerate 1–8 payments in `extra.items`; the client builds one transaction with one `TransferChecked` per item and signs once (payer is fee payer and sole signer); the facilitator verifies every item against the signed bytes and broadcasts unchanged. See [Atomic Batch specs](../../../../specs/schemes/atomic-batch/).
+
+| Role | Import |
+|------|--------|
+| Client | `@x402/svm/atomic-batch/client` → `AtomicBatchSvmScheme` |
+| Server | `@x402/svm/atomic-batch/server` → `AtomicBatchSvmScheme` |
+| Facilitator | `@x402/svm/atomic-batch/facilitator` → `AtomicBatchSvmScheme` |
 
 ### V1 Package (`@x402/svm/v1`)
 

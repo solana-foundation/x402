@@ -9,6 +9,8 @@ export { ExactSvmScheme } from "./exact";
 export type { ExactSvmSchemeOptions } from "./exact/facilitator/scheme";
 export { UptoSvmScheme } from "./upto";
 export { BatchSvmScheme } from "./batch-settlement";
+export { AtomicBatchSvmScheme } from "./atomic-batch";
+export type { AtomicBatchSvmSchemeOptions } from "./atomic-batch/facilitator/scheme";
 
 // Export smart wallet verification helpers
 export {
@@ -40,7 +42,13 @@ export type {
 } from "./signer";
 
 // Export payload types
-export type { ExactSvmPayloadV1, ExactSvmPayloadV2, UptoSvmPayloadV2 } from "./types";
+export type {
+  ExactSvmPayloadV1,
+  ExactSvmPayloadV2,
+  UptoSvmPayloadV2,
+  AtomicBatchSvmPayloadV2,
+  AtomicBatchItem,
+} from "./types";
 export { isUptoSvmPayload } from "./types";
 
 export {

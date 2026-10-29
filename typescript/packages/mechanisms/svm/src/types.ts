@@ -84,3 +84,24 @@ export function isUptoSvmPayload(payload: Record<string, unknown>): payload is U
     (payload.type === undefined || payload.type === "deposit" || payload.type === "claim")
   );
 }
+
+/**
+ * One payment in an atomic batch: the recipient and the amount in asset
+ * base units (decimal string, matching the shared x402 amount format).
+ * Batches are enumerated in `PaymentRequirements.extra.items`
+ * (see specs/schemes/atomic-batch/scheme_atomic_batch_svm.md).
+ */
+export type AtomicBatchItem = {
+  payTo: string;
+  amount: string;
+};
+
+/**
+ * Payload for Atomic Batch payment scheme requests (V2).
+ * Contains a fully-signed transaction carrying exactly one
+ * `TransferChecked` instruction per batch item; the payer is the fee
+ * payer and sole signer.
+ */
+export type AtomicBatchSvmPayloadV2 = {
+  transaction: string; // base64-encoded Solana transaction
+};

@@ -192,6 +192,36 @@
         "types": "./dist/cjs/batch-settlement/facilitator/index.d.ts",
         "default": "./dist/cjs/batch-settlement/facilitator/index.js"
       }
+    },
+    "./atomic-batch/client": {
+      "import": {
+        "types": "./dist/esm/atomic-batch/client/index.d.mts",
+        "default": "./dist/esm/atomic-batch/client/index.mjs"
+      },
+      "require": {
+        "types": "./dist/cjs/atomic-batch/client/index.d.ts",
+        "default": "./dist/cjs/atomic-batch/client/index.js"
+      }
+    },
+    "./atomic-batch/server": {
+      "import": {
+        "types": "./dist/esm/atomic-batch/server/index.d.mts",
+        "default": "./dist/esm/atomic-batch/server/index.mjs"
+      },
+      "require": {
+        "types": "./dist/cjs/atomic-batch/server/index.d.ts",
+        "default": "./dist/cjs/atomic-batch/server/index.js"
+      }
+    },
+    "./atomic-batch/facilitator": {
+      "import": {
+        "types": "./dist/esm/atomic-batch/facilitator/index.d.mts",
+        "default": "./dist/esm/atomic-batch/facilitator/index.mjs"
+      },
+      "require": {
+        "types": "./dist/cjs/atomic-batch/facilitator/index.d.ts",
+        "default": "./dist/cjs/atomic-batch/facilitator/index.js"
+      }
     }
   },
   "files": [
